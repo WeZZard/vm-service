@@ -1,0 +1,13 @@
+usage: vmctl push
+       [-h]
+       vm local remote
+
+positional arguments:
+  vm
+  local
+  remote
+
+options:
+  -h, --help
+    show this help
+    message and exit

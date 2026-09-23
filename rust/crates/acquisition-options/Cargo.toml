@@ -1,0 +1,13 @@
+[package]
+name = "acquisition-options"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+serde_json.workspace = true
+thiserror.workspace = true

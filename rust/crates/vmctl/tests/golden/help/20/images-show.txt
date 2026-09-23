@@ -1,0 +1,11 @@
+usage: vmctl images-show
+       [-h] image
+
+positional arguments:
+  image
+
+options:
+  -h, --help
+    show this help
+    message and
+    exit

@@ -1,0 +1,13 @@
+usage: vmctl heartbeat
+       [-h]
+       [--ttl-hours TTL_HOURS]
+       vm
+
+positional arguments:
+  vm
+
+options:
+  -h, --help
+    show this help
+    message and exit
+  --ttl-hours TTL_HOURS

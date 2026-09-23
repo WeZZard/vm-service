@@ -1,0 +1,14 @@
+usage: vmctl wait [-h]
+                  [--timeout-s TIMEOUT_S]
+                  vm
+
+positional arguments:
+  vm
+
+options:
+  -h, --help      show this help
+                  message and exit
+  --timeout-s TIMEOUT_S
+                  give up after N
+                  seconds (default:
+                  900)

@@ -1,0 +1,24 @@
+usage: vmctl exec [-h]
+                  [--script SCRIPT]
+                  [--timeout TIMEOUT]
+                  vm [argv ...]
+
+positional arguments:
+  vm
+  argv     command to run (use
+           -- to separate)
+
+options:
+  -h, --help
+           show this help
+           message and exit
+  --script SCRIPT
+           run a local script
+           file via guest shell
+           stdin
+  --timeout TIMEOUT
+           guest command
+           timeout in seconds;
+           transport allows an
+           additional 30
+           seconds

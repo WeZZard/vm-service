@@ -1,0 +1,12 @@
+{
+  "id": "vm-service",
+  "name": "VM service",
+  "purpose": "Lease-based disposable Tart VMs for AI agents on this Mac. POST /acquire clones a golden base (macOS 26 or Ubuntu 24.04), boots it headless over NAT, injects gateway credentials as env vars, and hands back a pristine machine with a TTL; exec/push/pull work inside the lease and release destroys it. Doctrines are enforced mechanically: at most 2 concurrent macOS guests (Virtualization.framework limit), NAT only, lifecycle-managed base/seed images never booted.",
+  "protocol": "vm-service-http",
+  "tags": ["vm", "tart", "disposable-infra", "agents"],
+  "docs": "https://github.com/WeZZard/vm-service",
+  "expected": "always-on",
+  "supervisor": { "kind": "launchd", "label": "com.wezzard.vm-service" },
+  "health": { "http_path": "/health", "interval": "30s" },
+  "port": 6240
+}

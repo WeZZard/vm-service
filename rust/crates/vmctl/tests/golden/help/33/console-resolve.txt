@@ -1,0 +1,12 @@
+usage: vmctl console-resolve
+       [-h] --lease-id LEASE_ID
+       vm
+
+positional arguments:
+  vm
+
+options:
+  -h, --help
+           show this help
+           message and exit
+  --lease-id LEASE_ID

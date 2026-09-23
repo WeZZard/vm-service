@@ -1,0 +1,39 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/lease-keys",
+  "crates/environment",
+  "crates/acquisition-options",
+  "crates/control-only",
+  "crates/application-catalog",
+  "crates/console",
+  "crates/vm-service-core",
+  "crates/vm-service",
+  "crates/vmctl",
+  "crates/console-worker",
+  "crates/guest-console-agent",
+  "crates/vm-service-install",
+  "crates/runtime-launcher",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["arbitrary_precision"] }
+clap = { version = "4", features = ["derive"] }
+tiny_http = "0.12"
+sha2 = "0.10"
+base64 = "0.22"
+uuid = { version = "1", features = ["v4"] }
+libc = "0.2"
+rand = "0.10"
+tempfile = "3"
+thiserror = "2"
+
+[profile.release]
+strip = true

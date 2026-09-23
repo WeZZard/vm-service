@@ -1,0 +1,1119 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index df840e6..23251a6 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -4,6 +4,9 @@ version = "0.1.0"
+ publish = false
+ edition = "2024"
+ 
++[features]
++vm-service-control-only = []
++
+ [lib]
+ path = "lib/mod.rs"
+ 
+diff --git a/lib/proxy/control_only.rs b/lib/proxy/control_only.rs
+new file mode 100644
+index 0000000..90357d0
+--- /dev/null
++++ b/lib/proxy/control_only.rs
+@@ -0,0 +1,420 @@
++//! Pure private packet policy. No interface, socket, clock updater or privileged operation.
++//! Configuration must come from a host-verified interface observer, never guest data.
++#[cfg(test)]
++mod tests;
++use crate::dhcp_snooper::{Lease, message_matches_bootp_client};
++use dhcproto::{
++    Decodable,
++    v4::{DhcpOption, Message, MessageType, Opcode, OptionCode},
++};
++use smoltcp::wire::*;
++use std::{
++    collections::HashMap,
++    time::{Duration, Instant},
++};
++
++const MAX_CONNECTIONS: usize = 128;
++const CONNECTION_TTL: Duration = Duration::from_secs(120);
++const DHCP_TTL: Duration = Duration::from_secs(30);
++
++/// Values supplied by a trusted observer of the actual attachment. Construction validates
++/// internal consistency, not provenance. No guessed subnet or learned gateway MAC fallback.
++#[derive(Clone, Copy)]
++pub(super) struct InterfaceConfig {
++    gateway: Ipv4Address,
++    gateway_mac: EthernetAddress,
++    network: ipnet::Ipv4Net,
++    pool_start: Ipv4Address,
++    pool_end: Ipv4Address,
++}
++impl InterfaceConfig {
++    pub(super) fn verified(
++        gateway: Ipv4Address,
++        gateway_mac: EthernetAddress,
++        netmask: Ipv4Address,
++        pool_start: Ipv4Address,
++        pool_end: Ipv4Address,
++    ) -> Option<Self> {
++        let mask = u32::from(netmask);
++        let prefix = mask.leading_ones() as u8;
++        if prefix == 0 || prefix > 30 || mask != u32::MAX << (32 - prefix) {
++            return None;
++        }
++        let network = ipnet::Ipv4Net::new(gateway, prefix).ok()?.trunc();
++        let config = Self {
++            gateway,
++            gateway_mac,
++            network,
++            pool_start,
++            pool_end,
++        };
++        if !gateway_mac.is_unicast()
++            || gateway_mac.0 == [0; 6]
++            || !config.usable(gateway)
++            || !config.usable(pool_start)
++            || !config.usable(pool_end)
++            || pool_start > pool_end
++            || (pool_start <= gateway && gateway <= pool_end)
++        {
++            return None;
++        }
++        Some(config)
++    }
++    fn usable(&self, ip: Ipv4Address) -> bool {
++        self.network.contains(&ip)
++            && ip != self.network.network()
++            && ip != self.network.broadcast()
++            && !ip.is_unspecified()
++            && !ip.is_multicast()
++            && !ip.is_broadcast()
++            && !ip.is_loopback()
++    }
++    fn guest(&self, ip: Ipv4Address) -> bool {
++        self.usable(ip) && ip != self.gateway && self.pool_start <= ip && ip <= self.pool_end
++    }
++}
++#[derive(Clone, Copy)]
++struct Transaction {
++    xid: u32,
++    requested: Option<Ipv4Address>,
++    offered: Option<Ipv4Address>,
++    request: bool,
++    until: Instant,
++}
++
++pub(super) struct ControlOnly {
++    config: Option<InterfaceConfig>,
++    connections: HashMap<u16, Instant>,
++    transaction: Option<Transaction>,
++    last_ip: Option<Ipv4Address>,
++}
++impl ControlOnly {
++    /// Until actual verified interface metadata is supplied, the private path denies all.
++    pub(super) fn new() -> Self {
++        Self::with_config(None)
++    }
++    pub(super) fn with_config(config: Option<InterfaceConfig>) -> Self {
++        Self {
++            config,
++            connections: HashMap::new(),
++            transaction: None,
++            last_ip: None,
++        }
++    }
++    pub(super) fn allows(
++        &mut self,
++        frame: &EthernetFrame<&[u8]>,
++        from_host: bool,
++        mac: EthernetAddress,
++        gateway: Ipv4Address,
++        lease: &Option<Lease>,
++    ) -> Option<()> {
++        self.allows_at(frame, from_host, mac, gateway, lease, Instant::now())
++    }
++    fn allows_at(
++        &mut self,
++        frame: &EthernetFrame<&[u8]>,
++        host: bool,
++        mac: EthernetAddress,
++        gateway: Ipv4Address,
++        lease: &Option<Lease>,
++        now: Instant,
++    ) -> Option<()> {
++        let c = self.config?;
++        if gateway != c.gateway || !mac.is_unicast() || mac.0 == [0; 6] || mac == c.gateway_mac {
++            return None;
++        }
++        self.connections.retain(|_, until| now < *until);
++        if self.transaction.is_some_and(|t| now >= t.until) {
++            self.transaction = None;
++        }
++        let ip = lease
++            .as_ref()
++            .filter(|l| l.valid() && c.guest(l.address()))
++            .map(|l| l.address());
++        if self.last_ip != ip {
++            self.connections.clear();
++            self.last_ip = ip;
++        }
++        if frame.src_addr() != if host { c.gateway_mac } else { mac } {
++            return None;
++        }
++        let unicast = frame.dst_addr() == if host { mac } else { c.gateway_mac };
++        if !unicast && !frame.dst_addr().is_broadcast() {
++            return None;
++        }
++        match frame.ethertype() {
++            EthernetProtocol::Arp => {
++                let arp = ArpPacket::new_checked(frame.payload()).ok()?;
++                let ArpRepr::EthernetIpv4 {
++                    operation,
++                    source_hardware_addr,
++                    source_protocol_addr,
++                    target_hardware_addr,
++                    target_protocol_addr,
++                } = ArpRepr::parse(&arp).ok()?
++                else {
++                    return None;
++                };
++                if source_hardware_addr != frame.src_addr() {
++                    return None;
++                }
++                match operation {
++                    ArpOperation::Request if target_hardware_addr.0 == [0; 6] => {}
++                    ArpOperation::Reply if unicast && target_hardware_addr == frame.dst_addr() => {}
++                    _ => return None,
++                }
++                if host {
++                    if source_protocol_addr != gateway || Some(target_protocol_addr) != ip {
++                        return None;
++                    }
++                } else if source_protocol_addr.is_unspecified() {
++                    // DAD only for this lease or an unexpired correlated offer, never gateway/other VM.
++                    let tentative = self.transaction.and_then(|t| t.offered);
++                    if operation != ArpOperation::Request
++                        || !frame.dst_addr().is_broadcast()
++                        || !(Some(target_protocol_addr) == ip
++                            || Some(target_protocol_addr) == tentative)
++                    {
++                        return None;
++                    }
++                } else if Some(source_protocol_addr) != ip || target_protocol_addr != gateway {
++                    return None;
++                }
++                Some(())
++            }
++            EthernetProtocol::Ipv4 => {
++                let p = Ipv4Packet::new_checked(frame.payload()).ok()?;
++                if p.version() != 4
++                    || p.header_len() != 20
++                    || p.more_frags()
++                    || p.frag_offset() != 0
++                    || frame.payload()[6] & 0x80 != 0
++                {
++                    return None;
++                }
++                if p.next_header() == IpProtocol::Udp {
++                    if p.dst_addr().is_broadcast() != frame.dst_addr().is_broadcast() {
++                        return None;
++                    }
++                    return self.dhcp(&p, host, mac, ip, now);
++                }
++                if p.next_header() != IpProtocol::Tcp || !unicast || ip.is_none() {
++                    return None;
++                }
++                let tcp = TcpPacket::new_checked(p.payload()).ok()?;
++                if tcp.src_port() == 0
++                    || tcp.dst_port() == 0
++                    || (tcp.syn() && (tcp.fin() || tcp.rst()))
++                {
++                    return None;
++                }
++                let port = if host { tcp.src_port() } else { tcp.dst_port() };
++                if host {
++                    if p.src_addr() != gateway || Some(p.dst_addr()) != ip || tcp.dst_port() != 22 {
++                        return None;
++                    }
++                    if !self.connections.contains_key(&port) {
++                        if !tcp.syn() || tcp.ack() || self.connections.len() >= MAX_CONNECTIONS {
++                            return None;
++                        }
++                    }
++                    self.connections.insert(port, now + CONNECTION_TTL);
++                } else if Some(p.src_addr()) != ip
++                    || p.dst_addr() != gateway
++                    || tcp.src_port() != 22
++                    || !self.connections.contains_key(&port)
++                    || (tcp.syn() && !tcp.ack())
++                {
++                    return None;
++                }
++                // Replies cannot refresh permissions indefinitely. Teardown requires a new host SYN.
++                if tcp.rst() {
++                    self.connections.remove(&port);
++                }
++                Some(())
++            }
++            _ => None,
++        }
++    }
++    fn dhcp(
++        &mut self,
++        p: &Ipv4Packet<&[u8]>,
++        host: bool,
++        mac: EthernetAddress,
++        ip: Option<Ipv4Address>,
++        now: Instant,
++    ) -> Option<()> {
++        let c = self.config?;
++        let u = UdpPacket::new_checked(p.payload()).ok()?;
++        if u.len() as usize != p.payload().len()
++            || (u.src_port(), u.dst_port()) != if host { (67, 68) } else { (68, 67) }
++        {
++            return None;
++        }
++        // Bound parsing work; reject ambiguous duplicate options and relay/client-identity extensions.
++        let payload = u.payload();
++        if payload.len() < 240 || payload.len() > 1500 || payload[236..240] != [99, 130, 83, 99] {
++            return None;
++        }
++        let mut seen = [false; 256];
++        let mut i = 240;
++        let mut ended = false;
++        while i < payload.len() {
++            let code = payload[i] as usize;
++            i += 1;
++            if code == 0 {
++                continue;
++            }
++            if code == 255 {
++                ended = true;
++                break;
++            }
++            if seen[code] || matches!(code, 52 | 61 | 82) || i >= payload.len() {
++                return None;
++            }
++            seen[code] = true;
++            let len = payload[i] as usize;
++            i += 1;
++            i = i.checked_add(len)?;
++            if i > payload.len() {
++                return None;
++            }
++        }
++        if !ended || payload[i..].iter().any(|b| *b != 0) {
++            return None;
++        }
++        let m = Message::decode(&mut dhcproto::v4::Decoder::new(payload)).ok()?;
++        if !message_matches_bootp_client(
++            &m,
++            if host {
++                Opcode::BootReply
++            } else {
++                Opcode::BootRequest
++            },
++            mac.0,
++        ) || !m.giaddr().is_unspecified()
++            || m.hops() != 0
++        {
++            return None;
++        }
++        let server = match m.opts().get(OptionCode::ServerIdentifier) {
++            Some(DhcpOption::ServerIdentifier(addr)) if *addr == c.gateway => Some(*addr),
++            None => None,
++            _ => return None,
++        };
++        let requested = match m.opts().get(OptionCode::RequestedIpAddress) {
++            Some(DhcpOption::RequestedIpAddress(addr)) if c.guest(*addr) => Some(*addr),
++            None => None,
++            _ => return None,
++        };
++        if host {
++            if let Some(option) = m.opts().get(OptionCode::SubnetMask) {
++                if !matches!(option, DhcpOption::SubnetMask(mask) if *mask == c.network.netmask()) {
++                    return None;
++                }
++            }
++            if let Some(option) = m.opts().get(OptionCode::Router) {
++                if !matches!(option, DhcpOption::Router(routers) if routers.as_slice() == [c.gateway])
++                {
++                    return None;
++                }
++            }
++            if p.src_addr() != c.gateway
++                || server.is_none()
++                || requested.is_some()
++                || !(m.siaddr().is_unspecified() || m.siaddr() == c.gateway)
++                || !(m.ciaddr().is_unspecified() || Some(m.ciaddr()) == ip)
++            {
++                return None;
++            }
++            let mut t = self.transaction?;
++            if t.xid != m.xid() {
++                return None;
++            }
++            let kind = m.opts().msg_type()?;
++            if kind == MessageType::Nak {
++                if !t.request || !m.yiaddr().is_unspecified() || !p.dst_addr().is_broadcast() {
++                    return None;
++                }
++                self.connections.clear();
++                self.transaction = None;
++                self.last_ip = None;
++                return Some(());
++            }
++            if !c.guest(m.yiaddr()) || !(p.dst_addr().is_broadcast() || p.dst_addr() == m.yiaddr())
++            {
++                return None;
++            }
++            match kind {
++                MessageType::Offer
++                    if !t.request
++                        && (t.requested.is_none() || t.requested == Some(m.yiaddr()))
++                        && (t.offered.is_none() || t.offered == Some(m.yiaddr())) =>
++                {
++                    t.offered = Some(m.yiaddr());
++                    self.transaction = Some(t);
++                }
++                MessageType::Ack if t.request && t.requested == Some(m.yiaddr()) => {
++                    if !matches!(m.opts().get(OptionCode::AddressLeaseTime), Some(DhcpOption::AddressLeaseTime(n)) if *n > 0)
++                    {
++                        return None;
++                    }
++                    // Every accepted ACK invalidates permissions, including same-address reassignment.
++                    self.connections.clear();
++                    self.transaction = None;
++                }
++                _ => return None,
++            }
++            Some(())
++        } else {
++            if !(p.dst_addr().is_broadcast() || p.dst_addr() == c.gateway)
++                || !(Some(p.src_addr()) == ip
++                    || (p.src_addr().is_unspecified() && p.dst_addr().is_broadcast()))
++                || !(m.ciaddr().is_unspecified()
++                    || (Some(m.ciaddr()) == ip && p.src_addr() == m.ciaddr()))
++                || !m.yiaddr().is_unspecified()
++                || !m.siaddr().is_unspecified()
++            {
++                return None;
++            }
++            let kind = m.opts().msg_type()?;
++            let request = match kind {
++                MessageType::Discover if server.is_none() && m.ciaddr().is_unspecified() => false,
++                MessageType::Request => true,
++                _ => return None, // Release/Decline/Inform unsupported: deny, never widen scope.
++            };
++            let desired = if request {
++                requested.or_else(|| (!m.ciaddr().is_unspecified()).then_some(m.ciaddr()))
++            } else {
++                requested
++            };
++            if request && desired.is_none() {
++                return None;
++            }
++            let old = self.transaction;
++            // One bounded slot. Retransmissions do not extend its absolute lifetime; other XIDs
++            // cannot evict an in-flight exchange. A selecting request must match its offer.
++            if let Some(t) = old {
++                if t.xid != m.xid()
++                    || (t.request && (!request || t.requested != desired))
++                    || (request
++                        && t.offered.is_some()
++                        && (t.offered != desired || server.is_none()))
++                {
++                    return None;
++                }
++            } else if server.is_some() {
++                return None;
++            }
++            self.transaction = Some(Transaction {
++                xid: m.xid(),
++                requested: desired,
++                offered: old.and_then(|t| t.offered),
++                request,
++                until: old.map(|t| t.until).unwrap_or(now + DHCP_TTL),
++            });
++            Some(())
++        }
++    }
++}
+diff --git a/lib/proxy/control_only/tests.rs b/lib/proxy/control_only/tests.rs
+new file mode 100644
+index 0000000..380d27f
+--- /dev/null
++++ b/lib/proxy/control_only/tests.rs
+@@ -0,0 +1,537 @@
++use super::*;
++use dhcproto::{Encodable, Encoder};
++use std::collections::HashSet;
++const MAC: EthernetAddress = EthernetAddress([2, 0, 0, 0, 0, 1]);
++const HOST_MAC: EthernetAddress = EthernetAddress([2, 0, 0, 0, 0, 2]);
++const HOST: Ipv4Address = Ipv4Address::new(192, 168, 64, 1);
++const VM: Ipv4Address = Ipv4Address::new(192, 168, 64, 2);
++fn policy() -> ControlOnly {
++    ControlOnly::with_config(InterfaceConfig::verified(
++        HOST,
++        HOST_MAC,
++        Ipv4Address::new(255, 255, 255, 0),
++        VM,
++        Ipv4Address::new(192, 168, 64, 254),
++    ))
++}
++fn lease() -> Option<Lease> {
++    Some(Lease::new(VM, Duration::from_secs(600), HashSet::new()))
++}
++fn frame(payload: &[u8], host: bool, proto: EthernetProtocol) -> Vec<u8> {
++    let mut b = vec![0; 14 + payload.len()];
++    let mut f = EthernetFrame::new_unchecked(b.as_mut_slice());
++    f.set_src_addr(if host { HOST_MAC } else { MAC });
++    f.set_dst_addr(if host { MAC } else { HOST_MAC });
++    f.set_ethertype(proto);
++    f.payload_mut().copy_from_slice(payload);
++    b
++}
++fn ipv4(host: bool, proto: IpProtocol, payload: &[u8]) -> Vec<u8> {
++    let mut b = vec![0; 20 + payload.len()];
++    let len = b.len() as u16;
++    let mut p = Ipv4Packet::new_unchecked(b.as_mut_slice());
++    p.set_version(4);
++    p.set_header_len(20);
++    p.set_total_len(len);
++    p.set_next_header(proto);
++    p.set_src_addr(if host { HOST } else { VM });
++    p.set_dst_addr(if host { VM } else { HOST });
++    p.payload_mut().copy_from_slice(payload);
++    frame(&b, host, EthernetProtocol::Ipv4)
++}
++fn tcp(host: bool, port: u16, syn: bool, ack: bool) -> Vec<u8> {
++    let mut b = [0; 20];
++    let mut p = TcpPacket::new_unchecked(&mut b[..]);
++    p.set_header_len(20);
++    p.set_src_port(if host { 50000 } else { port });
++    p.set_dst_port(if host { port } else { 50000 });
++    p.set_syn(syn);
++    p.set_ack(ack);
++    ipv4(host, IpProtocol::Tcp, &b)
++}
++fn allowed_at(p: &mut ControlOnly, b: &[u8], host: bool, l: &Option<Lease>, now: Instant) -> bool {
++    EthernetFrame::new_checked(b)
++        .ok()
++        .and_then(|f| p.allows_at(&f, host, MAC, HOST, l, now))
++        .is_some()
++}
++fn allowed(p: &mut ControlOnly, b: &[u8], host: bool, l: &Option<Lease>) -> bool {
++    allowed_at(p, b, host, l, Instant::now())
++}
++fn message(host: bool, kind: MessageType, xid: u32) -> Message {
++    let mut m = Message::new(
++        Ipv4Address::UNSPECIFIED,
++        if host && kind != MessageType::Nak {
++            VM
++        } else {
++            Ipv4Address::UNSPECIFIED
++        },
++        Ipv4Address::UNSPECIFIED,
++        Ipv4Address::UNSPECIFIED,
++        &MAC.0,
++    );
++    m.set_xid(xid);
++    m.set_opcode(if host {
++        Opcode::BootReply
++    } else {
++        Opcode::BootRequest
++    });
++    m.opts_mut().insert(DhcpOption::MessageType(kind));
++    if host {
++        m.opts_mut().insert(DhcpOption::ServerIdentifier(HOST));
++        m.opts_mut().insert(DhcpOption::AddressLeaseTime(600));
++    }
++    if kind == MessageType::Request {
++        m.opts_mut().insert(DhcpOption::RequestedIpAddress(VM));
++    }
++    m
++}
++fn dhcp(host: bool, m: &Message) -> Vec<u8> {
++    let mut payload = vec![];
++    m.encode(&mut Encoder::new(&mut payload)).unwrap();
++    let mut b = vec![0; 8 + payload.len()];
++    let len = b.len() as u16;
++    let mut u = UdpPacket::new_unchecked(b.as_mut_slice());
++    u.set_len(len);
++    u.set_src_port(if host { 67 } else { 68 });
++    u.set_dst_port(if host { 68 } else { 67 });
++    u.payload_mut().copy_from_slice(&payload);
++    let mut b = ipv4(host, IpProtocol::Udp, &b);
++    if !host {
++        b[..6].fill(255);
++        let mut p = Ipv4Packet::new_unchecked(&mut b[14..]);
++        p.set_src_addr(Ipv4Address::UNSPECIFIED);
++        p.set_dst_addr(Ipv4Address::BROADCAST);
++    }
++    b
++}
++#[test]
++fn dhcp_link_duplicate_options_and_nak() {
++    let req = dhcp(false, &message(false, MessageType::Request, 42));
++    let mut wrong_link = req.clone();
++    wrong_link[..6].copy_from_slice(&HOST_MAC.0);
++    assert!(!allowed(&mut policy(), &wrong_link, false, &None));
++    // Replace END with another message-type option, retaining one final END.
++    let mut duplicate = req.clone();
++    let end = duplicate.len() - 1;
++    assert_eq!(duplicate[end], 255);
++    duplicate.splice(end.., [53, 1, 3, 255]);
++    let total = (duplicate.len() - 14) as u16;
++    Ipv4Packet::new_unchecked(&mut duplicate[14..]).set_total_len(total);
++    UdpPacket::new_unchecked(&mut duplicate[34..]).set_len(total - 20);
++    assert!(!allowed(&mut policy(), &duplicate, false, &None));
++    let mut p = policy();
++    let l = lease();
++    assert!(allowed(&mut p, &req, false, &l));
++    assert!(allowed(&mut p, &tcp(true, 22, true, false), true, &l));
++    let mut nak = dhcp(true, &message(true, MessageType::Nak, 42));
++    nak[..6].fill(255);
++    Ipv4Packet::new_unchecked(&mut nak[14..]).set_dst_addr(Ipv4Address::BROADCAST);
++    assert!(allowed(&mut p, &nak, true, &l));
++    assert!(!allowed(&mut p, &nak, true, &l));
++    assert!(!allowed(&mut p, &tcp(false, 22, false, true), false, &l));
++}
++#[test]
++fn different_address_and_tentative_expiry() {
++    let mut p = policy();
++    let l = lease();
++    let now = Instant::now();
++    assert!(allowed_at(
++        &mut p,
++        &tcp(true, 22, true, false),
++        true,
++        &l,
++        now
++    ));
++    let next = Some(Lease::new(
++        Ipv4Address::new(192, 168, 64, 3),
++        Duration::from_secs(600),
++        HashSet::new(),
++    ));
++    assert!(!allowed_at(
++        &mut p,
++        &tcp(false, 22, false, true),
++        false,
++        &next,
++        now
++    ));
++    assert!(!allowed_at(
++        &mut p,
++        &tcp(false, 22, false, true),
++        false,
++        &l,
++        now
++    ));
++    assert!(allowed_at(
++        &mut p,
++        &dhcp(false, &message(false, MessageType::Discover, 42)),
++        false,
++        &None,
++        now
++    ));
++    assert!(allowed_at(
++        &mut p,
++        &dhcp(true, &message(true, MessageType::Offer, 42)),
++        true,
++        &None,
++        now
++    ));
++    let mut dad = arp(false, Ipv4Address::UNSPECIFIED, VM);
++    dad[..6].fill(255);
++    assert!(allowed_at(&mut p, &dad, false, &None, now));
++    assert!(!allowed_at(&mut p, &dad, false, &None, now + DHCP_TTL));
++}
++#[test]
++fn exact_ssh_returns_and_no_guest_initiation() {
++    let mut p = policy();
++    let l = lease();
++    assert!(!allowed(&mut p, &tcp(false, 22, true, false), false, &l));
++    assert!(!allowed(&mut p, &tcp(true, 22, false, true), true, &l));
++    assert!(allowed(&mut p, &tcp(true, 22, true, false), true, &l));
++    assert!(allowed(&mut p, &tcp(false, 22, true, true), false, &l));
++    for port in [21, 23, 53, 6240, 65535] {
++        assert!(!allowed(&mut p, &tcp(true, port, true, false), true, &l));
++        assert!(!allowed(&mut p, &tcp(false, port, false, true), false, &l));
++    }
++    assert!(!allowed(&mut p, &tcp(false, 22, false, true), false, &None));
++    assert!(!allowed(
++        &mut p,
++        &tcp(false, 22, false, true),
++        false,
++        &lease()
++    ));
++}
++#[test]
++fn reject_fragments_spoofing_and_unsupported_frames() {
++    let mut p = policy();
++    let l = lease();
++    for host in [false, true] {
++        for (more, offset) in [(true, 0), (false, 8)] {
++            let mut b = tcp(host, 22, true, false);
++            let mut ip = Ipv4Packet::new_unchecked(&mut b[14..]);
++            ip.set_more_frags(more);
++            ip.set_frag_offset(offset);
++            assert!(!allowed(&mut p, &b, host, &l));
++        }
++        for proto in [
++            EthernetProtocol::Ipv6,
++            EthernetProtocol::Unknown(0x8100),
++            EthernetProtocol::Unknown(0x88a8),
++        ] {
++            assert!(!allowed(&mut p, &frame(&[0; 48], host, proto), host, &l));
++        }
++        let mut b = tcp(host, 22, true, false);
++        Ipv4Packet::new_unchecked(&mut b[14..]).set_src_addr(Ipv4Address::new(169, 254, 169, 254));
++        assert!(!allowed(&mut p, &b, host, &l));
++        for idx in [0, 6] {
++            let mut b = tcp(host, 22, true, false);
++            b[idx] = 4;
++            assert!(!allowed(&mut p, &b, host, &l));
++        }
++        let mut b = tcp(host, 22, true, false);
++        b[..6].fill(255);
++        assert!(!allowed(&mut p, &b, host, &l));
++    }
++}
++#[test]
++fn truncated_and_malformed_never_panic_or_admit() {
++    for b in [
++        tcp(true, 22, true, false),
++        dhcp(false, &message(false, MessageType::Request, 42)),
++    ] {
++        for n in 0..b.len() {
++            for host in [false, true] {
++                assert!(!allowed(&mut policy(), &b[..n], host, &lease()));
++            }
++        }
++    }
++    for (idx, value) in [
++        (14, 0x44),
++        (14, 0x46),
++        (16, 0xff),
++        (20, 0x80),
++        (46, 0x10),
++        (46, 0xf0),
++        (47, 0x03),
++    ] {
++        let mut b = tcp(true, 22, true, false);
++        b[idx] = value;
++        assert!(!allowed(&mut policy(), &b, true, &lease()));
++    }
++    let b = dhcp(false, &message(false, MessageType::Request, 42));
++    for (idx, value) in [
++        (36, 1),
++        (37, 53),
++        (38, 0xff),
++        (39, 7),
++        (42, 2),
++        (43, 2),
++        (44, 5),
++        (45, 1),
++        (278, 0),
++    ] {
++        let mut bad = b.clone();
++        bad[idx] = value;
++        assert!(
++            !allowed(&mut policy(), &bad, false, &None),
++            "mutation byte {idx}"
++        );
++    }
++}
++#[test]
++fn interface_configuration_and_missing_metadata_fail_closed() {
++    assert!(!allowed(
++        &mut ControlOnly::new(),
++        &tcp(true, 22, true, false),
++        true,
++        &lease()
++    ));
++    for mask in [
++        [0, 0, 0, 0],
++        [255, 0, 255, 0],
++        [255, 255, 255, 255],
++        [255, 255, 255, 254],
++    ] {
++        assert!(InterfaceConfig::verified(HOST, HOST_MAC, mask.into(), VM, VM).is_none());
++    }
++    for addr in [
++        HOST,
++        Ipv4Address::new(192, 168, 64, 0),
++        Ipv4Address::new(192, 168, 64, 255),
++        Ipv4Address::new(192, 168, 65, 2),
++    ] {
++        assert!(
++            InterfaceConfig::verified(
++                HOST,
++                HOST_MAC,
++                Ipv4Address::new(255, 255, 255, 0),
++                addr,
++                addr
++            )
++            .is_none()
++        );
++        let l = Some(Lease::new(addr, Duration::from_secs(600), HashSet::new()));
++        assert!(!allowed(
++            &mut policy(),
++            &tcp(true, 22, true, false),
++            true,
++            &l
++        ));
++    }
++}
++#[test]
++fn dhcp_correlation_replay_and_reassignment() {
++    let mut p = policy();
++    let l = lease();
++    let request = dhcp(false, &message(false, MessageType::Request, 42));
++    let ack = dhcp(true, &message(true, MessageType::Ack, 42));
++    assert!(!allowed(&mut p, &ack, true, &l));
++    assert!(allowed(&mut p, &request, false, &l));
++    assert!(!allowed(
++        &mut p,
++        &dhcp(true, &message(true, MessageType::Ack, 43)),
++        true,
++        &l
++    ));
++    assert!(allowed(&mut p, &tcp(true, 22, true, false), true, &l));
++    assert!(allowed(&mut p, &ack, true, &l));
++    assert!(!allowed(&mut p, &tcp(false, 22, false, true), false, &l));
++    assert!(!allowed(&mut p, &ack, true, &l));
++    assert!(allowed(&mut p, &tcp(true, 22, true, false), true, &l));
++    let expired = Some(Lease::new(VM, Duration::ZERO, HashSet::new()));
++    assert!(!allowed(
++        &mut p,
++        &tcp(false, 22, false, true),
++        false,
++        &expired
++    ));
++    assert!(!allowed(&mut p, &tcp(false, 22, false, true), false, &l));
++}
++#[test]
++fn dhcp_subnet_server_identity_and_options() {
++    for addr in [
++        HOST,
++        Ipv4Address::new(192, 168, 64, 0),
++        Ipv4Address::new(192, 168, 64, 255),
++        Ipv4Address::new(10, 0, 0, 2),
++    ] {
++        let mut p = policy();
++        assert!(allowed(
++            &mut p,
++            &dhcp(false, &message(false, MessageType::Request, 42)),
++            false,
++            &None
++        ));
++        let mut m = message(true, MessageType::Ack, 42);
++        m.set_yiaddr(addr);
++        assert!(!allowed(&mut p, &dhcp(true, &m), true, &None));
++    }
++    for mutation in 0..5 {
++        let mut p = policy();
++        assert!(allowed(
++            &mut p,
++            &dhcp(false, &message(false, MessageType::Request, 42)),
++            false,
++            &None
++        ));
++        let mut m = message(true, MessageType::Ack, 42);
++        match mutation {
++            0 => {
++                m.opts_mut().insert(DhcpOption::ServerIdentifier(VM));
++            }
++            1 => {
++                m.set_chaddr(&HOST_MAC.0);
++            }
++            2 => {
++                m.set_giaddr(HOST);
++            }
++            3 => {
++                m.opts_mut().insert(DhcpOption::AddressLeaseTime(0));
++            }
++            _ => {
++                m.opts_mut()
++                    .insert(DhcpOption::ClientIdentifier(vec![1, 2, 3]));
++            }
++        }
++        assert!(!allowed(&mut p, &dhcp(true, &m), true, &None));
++    }
++}
++#[test]
++fn bounded_dhcp_slot_expiry_and_retransmission() {
++    let mut p = policy();
++    let now = Instant::now();
++    let req = dhcp(false, &message(false, MessageType::Request, 42));
++    assert!(allowed_at(&mut p, &req, false, &None, now));
++    for xid in 43..200 {
++        assert!(!allowed_at(
++            &mut p,
++            &dhcp(false, &message(false, MessageType::Request, xid)),
++            false,
++            &None,
++            now
++        ));
++    }
++    assert!(allowed_at(
++        &mut p,
++        &req,
++        false,
++        &None,
++        now + DHCP_TTL - Duration::from_secs(1)
++    ));
++    assert!(!allowed_at(
++        &mut p,
++        &dhcp(true, &message(true, MessageType::Ack, 42)),
++        true,
++        &None,
++        now + DHCP_TTL
++    ));
++    assert!(allowed_at(
++        &mut p,
++        &dhcp(false, &message(false, MessageType::Request, 43)),
++        false,
++        &None,
++        now + DHCP_TTL
++    ));
++}
++#[test]
++fn bounded_connections_expiry_and_reset() {
++    let mut p = policy();
++    let l = lease();
++    let now = Instant::now();
++    for port in 1..=MAX_CONNECTIONS + 1 {
++        let mut b = tcp(true, 22, true, false);
++        TcpPacket::new_unchecked(&mut b[34..]).set_src_port(port as u16);
++        assert_eq!(
++            allowed_at(&mut p, &b, true, &l, now),
++            port <= MAX_CONNECTIONS
++        );
++    }
++    assert_eq!(p.connections.len(), MAX_CONNECTIONS);
++    let mut reply = tcp(false, 22, false, true);
++    TcpPacket::new_unchecked(&mut reply[34..]).set_dst_port(1);
++    assert!(allowed_at(
++        &mut p,
++        &reply,
++        false,
++        &l,
++        now + CONNECTION_TTL - Duration::from_secs(1)
++    ));
++    assert!(!allowed_at(&mut p, &reply, false, &l, now + CONNECTION_TTL));
++    assert!(p.connections.is_empty());
++    assert!(allowed_at(
++        &mut p,
++        &tcp(true, 22, true, false),
++        true,
++        &l,
++        now + CONNECTION_TTL
++    ));
++    let mut rst = tcp(false, 22, false, true);
++    TcpPacket::new_unchecked(&mut rst[34..]).set_rst(true);
++    assert!(allowed_at(&mut p, &rst, false, &l, now + CONNECTION_TTL));
++    assert!(!allowed_at(
++        &mut p,
++        &tcp(false, 22, false, true),
++        false,
++        &l,
++        now + CONNECTION_TTL
++    ));
++}
++fn arp(host: bool, src: Ipv4Address, dst: Ipv4Address) -> Vec<u8> {
++    let repr = ArpRepr::EthernetIpv4 {
++        operation: ArpOperation::Request,
++        source_hardware_addr: if host { HOST_MAC } else { MAC },
++        source_protocol_addr: src,
++        target_hardware_addr: EthernetAddress([0; 6]),
++        target_protocol_addr: dst,
++    };
++    let mut b = vec![0; repr.buffer_len()];
++    repr.emit(&mut ArpPacket::new_unchecked(b.as_mut_slice()));
++    frame(&b, host, EthernetProtocol::Arp)
++}
++#[test]
++fn arp_ownership_targets_and_correlated_tentative_address() {
++    let mut p = policy();
++    let l = lease();
++    assert!(allowed(&mut p, &arp(false, VM, HOST), false, &l));
++    assert!(allowed(&mut p, &arp(true, HOST, VM), true, &l));
++    assert!(!allowed(
++        &mut p,
++        &arp(false, VM, Ipv4Address::new(8, 8, 8, 8)),
++        false,
++        &l
++    ));
++    let mut bad = arp(false, VM, HOST);
++    bad[22] = 4;
++    assert!(!allowed(&mut p, &bad, false, &l));
++    let mut bad = arp(false, VM, HOST);
++    bad[32] = 4;
++    assert!(!allowed(&mut p, &bad, false, &l));
++    let mut dad = arp(false, Ipv4Address::UNSPECIFIED, VM);
++    dad[..6].fill(255);
++    assert!(!allowed(&mut p, &dad, false, &None));
++    assert!(allowed(
++        &mut p,
++        &dhcp(false, &message(false, MessageType::Discover, 42)),
++        false,
++        &None
++    ));
++    assert!(allowed(
++        &mut p,
++        &dhcp(true, &message(true, MessageType::Offer, 42)),
++        true,
++        &None
++    ));
++    assert!(allowed(&mut p, &dad, false, &None));
++    let mut request = message(false, MessageType::Request, 42);
++    request
++        .opts_mut()
++        .insert(DhcpOption::ServerIdentifier(HOST));
++    assert!(allowed(&mut p, &dhcp(false, &request), false, &None));
++    assert!(allowed(
++        &mut p,
++        &dhcp(true, &message(true, MessageType::Ack, 42)),
++        true,
++        &None
++    ));
++    assert!(!allowed(&mut p, &dad, false, &None));
++}
+diff --git a/lib/proxy/host.rs b/lib/proxy/host.rs
+index b0be52c..7c0341c 100644
+--- a/lib/proxy/host.rs
++++ b/lib/proxy/host.rs
+@@ -49,6 +49,9 @@ impl Proxy<'_> {
+     }
+ 
+     fn allowed_from_host(&mut self, frame: &EthernetFrame<&[u8]>) -> Option<()> {
++        if let Some(policy) = &mut self.control_only {
++            return policy.allows(frame, true, self.vm_mac_address, self.host.gateway_ip, self.dhcp_snooper.lease());
++        }
+         match frame.ethertype() {
+             EthernetProtocol::Arp => Some(()),
+             EthernetProtocol::Ipv4 => {
+diff --git a/lib/proxy/mod.rs b/lib/proxy/mod.rs
+index 5e0324e..fb2fe5e 100644
+--- a/lib/proxy/mod.rs
++++ b/lib/proxy/mod.rs
+@@ -1,4 +1,5 @@
+ mod control;
++mod control_only;
+ mod exposed_port;
+ mod flows;
+ mod host;
+@@ -29,6 +30,7 @@ use std::time::Duration;
+ use vmnet::Batch;
+ 
+ pub struct Proxy<'proxy> {
++    control_only: Option<control_only::ControlOnly>,
+     vm: VM,
+     host: Host,
+     poller: Poller<'proxy>,
+@@ -51,6 +53,11 @@ impl Proxy<'_> {
+         exposed_ports: Vec<ExposedPort>,
+         control_fd: Option<RawFd>,
+     ) -> Result<Proxy<'proxy>> {
++        if cfg!(feature = "vm-service-control-only") {
++            anyhow::ensure!(allow.is_empty() && exposed_ports.is_empty() && control_fd.is_none()
++                && block.len() == 1 && block[0].to_string() == "0.0.0.0/0",
++                "invalid immutable control-only profile");
++        }
+         let allow = normalize_rules(allow);
+         let block = normalize_rules(block);
+ 
+@@ -79,6 +86,7 @@ impl Proxy<'_> {
+         let flows = rules.has_stateful().then(FlowTable::new);
+ 
+         Ok(Proxy {
++            control_only: cfg!(feature = "vm-service-control-only").then(control_only::ControlOnly::new),
+             vm,
+             host,
+             poller,
+diff --git a/lib/proxy/vm.rs b/lib/proxy/vm.rs
+index bda7730..6bae091 100644
+--- a/lib/proxy/vm.rs
++++ b/lib/proxy/vm.rs
+@@ -28,6 +28,9 @@ impl Proxy<'_> {
+     }
+ 
+     fn allowed_from_vm(&mut self, frame: &EthernetFrame<&[u8]>) -> Option<()> {
++        if let Some(policy) = &mut self.control_only {
++            return policy.allows(frame, false, self.vm_mac_address, self.host.gateway_ip, self.dhcp_snooper.lease());
++        }
+         if frame.src_addr() != self.vm_mac_address {
+             return None;
+         }
+diff --git a/src/main.rs b/src/main.rs
+index a5324b6..513573e 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -139,10 +139,14 @@ fn main() -> ExitCode {
+     }
+ 
+     // Initialize Sentry
+-    let _sentry = sentry::init(
+-        sentry::ClientOptions::default()
+-            .maybe_release(option_env!("CIRRUS_TAG").map(|tag| format!("softnet@{tag}"))),
+-    );
++    let _sentry = if cfg!(feature = "vm-service-control-only") {
++        None // Private helper must never create a telemetry network channel.
++    } else {
++        Some(sentry::init(
++            sentry::ClientOptions::default()
++                .maybe_release(option_env!("CIRRUS_TAG").map(|tag| format!("softnet@{tag}"))),
++        ))
++    };
+ 
+     // Enrich future events with Cirrus CI-specific tags
+     if let Ok(tags) = env::var("CIRRUS_SENTRY_TAGS") {
+@@ -161,7 +165,9 @@ fn main() -> ExitCode {
+             eprintln!("{}", causes.join(": "));
+ 
+             // Capture the error into Sentry
+-            sentry_anyhow::capture_anyhow(&err);
++            if !cfg!(feature = "vm-service-control-only") {
++                sentry_anyhow::capture_anyhow(&err);
++            }
+ 
+             ExitCode::FAILURE
+         }
+@@ -183,6 +189,15 @@ fn try_main() -> anyhow::Result<()> {
+     unsafe { signal(Signal::SIGINT, SigHandler::SigIgn) }?;
+ 
+     let args: Args = Args::parse();
++    let control_only = cfg!(feature = "vm-service-control-only");
++    if control_only {
++        anyhow::ensure!(args.control_fd.is_none() && args.expose.is_empty()
++            && args.allow.is_empty() && args.block.len() == 1
++            && args.block[0].to_string() == "0.0.0.0/0",
++            "private profile requires only --block=0.0.0.0/0; no allow/expose/control");
++        anyhow::ensure!(!args.sudo_escalation_probing && !args.sudo_escalation_done,
++            "private profile never invokes sudo");
++    }
+ 
+     // No need to run anything, just return
+     // so that the invoker process knows we
+@@ -203,7 +218,7 @@ fn try_main() -> anyhow::Result<()> {
+ 
+     // Ensure we are running as root
+     if get_effective_uid() != 0 {
+-        if sudo_escalation_works() && !args.sudo_escalation_done {
++        if !control_only && sudo_escalation_works() && !args.sudo_escalation_done {
+             let exe = std::env::current_exe().unwrap();
+             let args = std::env::args().skip(1);
+ 
+@@ -226,7 +241,9 @@ fn try_main() -> anyhow::Result<()> {
+     }
+ 
+     // Configure bootpd(8) while still having the root privileges
+-    configure_bootpd(args.bootpd_lease_time)?;
++    if !control_only {
++        configure_bootpd(args.bootpd_lease_time)?;
++    }
+ 
+     // Initialize the proxy while still having the root privileges
+     let mut proxy = Proxy::new(

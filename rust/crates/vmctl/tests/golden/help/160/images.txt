@@ -1,0 +1,5 @@
+usage: vmctl images [-h] [--json]
+
+options:
+  -h, --help  show this help message and exit
+  --json      machine-readable output

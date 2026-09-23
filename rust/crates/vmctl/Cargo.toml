@@ -1,0 +1,27 @@
+[package]
+name = "vmctl"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "vmctl"
+path = "src/main.rs"
+
+[dependencies]
+environment = { path = "../environment" }
+clap.workspace = true
+# `argparse` reads the terminal width from an ioctl when `COLUMNS` is unset.
+libc.workspace = true
+# `preserve_order` is required for byte-for-byte parity with Python
+# `json.dumps(..., indent=2)`: the CLI receives JSON order from the service and
+# must re-emit it unchanged, and `bin/vmctl environment` re-emits the resolver
+# bundle in insertion order.
+serde_json = { workspace = true, features = ["preserve_order"] }
+# Plain loopback HTTP only; TLS/gzip are intentionally not pulled in.
+ureq = { version = "3", default-features = false }
+
+[dev-dependencies]
+serde_json = { workspace = true, features = ["preserve_order"] }
+tempfile.workspace = true

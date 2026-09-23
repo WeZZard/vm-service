@@ -1,0 +1,17 @@
+[package]
+name = "guest-console-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "guest-console-agent"
+path = "src/main.rs"
+
+[dependencies]
+serde_json.workspace = true
+libc.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true

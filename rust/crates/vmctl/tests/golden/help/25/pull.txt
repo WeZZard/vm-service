@@ -1,0 +1,14 @@
+usage: vmctl pull [-h]
+                  vm
+                  remote
+                  local
+
+positional arguments:
+  vm
+  remote
+  local
+
+options:
+  -h, --help
+    show this help
+    message and exit

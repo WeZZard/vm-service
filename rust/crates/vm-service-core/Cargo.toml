@@ -1,0 +1,25 @@
+[package]
+name = "vm-service-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+lease-keys = { path = "../lease-keys" }
+environment = { path = "../environment" }
+acquisition-options = { path = "../acquisition-options" }
+control-only = { path = "../control-only" }
+application-catalog = { path = "../application-catalog" }
+console = { path = "../console" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+uuid.workspace = true
+tempfile.workspace = true
+libc.workspace = true
+rand.workspace = true
+thiserror.workspace = true

@@ -1,0 +1,15 @@
+[package]
+name = "runtime-launcher"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "runtime-launcher"
+path = "src/main.rs"
+
+[dependencies]
+libc.workspace = true
+
+[dev-dependencies]

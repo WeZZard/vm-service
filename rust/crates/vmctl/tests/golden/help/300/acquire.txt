@@ -1,0 +1,19 @@
+usage: vmctl acquire [-h] --purpose PURPOSE [--image IMAGE] [--env ENV] [--network {nat,control-only}] [--profile PROFILE] [--ttl-hours TTL_HOURS] [--cpu CPU] [--memory-mb MEMORY_MB] [--disk-gb DISK_GB] [--no-wait] [--vnc] [--source {base,work}]
+                     [--expected-source-fingerprint EXPECTED_SOURCE_FINGERPRINT]
+
+options:
+  -h, --help            show this help message and exit
+  --purpose PURPOSE     task name; becomes part of the VM name
+  --image IMAGE         image to clone (see: vmctl images; default: macos26)
+  --env ENV             default | none | <env-pack-name> (credential env vars)
+  --network {nat,control-only}
+  --profile PROFILE     explicit control-only helper profile
+  --ttl-hours TTL_HOURS
+  --cpu CPU
+  --memory-mb MEMORY_MB
+  --disk-gb DISK_GB
+  --no-wait             use shorter synchronous SSH readiness checks; transfers are still verified
+  --vnc                 prepare guest sharing without opening a viewer; requires configured console support
+  --source {base,work}  work is explicitly for fresh-clone acceptance of configured WORK_VM; requires --env none
+  --expected-source-fingerprint EXPECTED_SOURCE_FINGERPRINT
+                        JSON fingerprint file to require before cloning a work image

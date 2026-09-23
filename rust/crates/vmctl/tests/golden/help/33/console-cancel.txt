@@ -1,0 +1,16 @@
+usage: vmctl console-cancel
+       [-h] --lease-id LEASE_ID
+       --console-id CONSOLE_ID
+       --attempt-id ATTEMPT_ID
+       vm
+
+positional arguments:
+  vm
+
+options:
+  -h, --help
+           show this help
+           message and exit
+  --lease-id LEASE_ID
+  --console-id CONSOLE_ID
+  --attempt-id ATTEMPT_ID

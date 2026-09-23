@@ -1,0 +1,77 @@
+usage: vmctl [-h]
+             [--environment ENVIRONMENT]
+             {environment,acquire,wait,list,images,images-show,status,exec,push,pull,heartbeat,release,capabilities,acquisition-capabilities,console-resolve,console-open,console-cancel,gc} ...
+
+client for vm-service (Tart
+VM leases)
+
+positional arguments:
+  {environment,acquire,wait,list,images,images-show,status,exec,push,pull,heartbeat,release,capabilities,acquisition-capabilities,console-resolve,console-open,console-cancel,gc}
+    environment
+        resolve environment
+        offline without
+        writing files
+    acquire
+        clone + boot a fresh
+        VM and lease it
+    wait
+        block until a lease
+        is running (useful
+        after --no-wait)
+    list
+        list leases
+    images
+        query available
+        images and capacity
+    images-show
+        show one image's
+        full record (JSON)
+    status
+        show one lease
+    exec
+        run a command in the
+        guest
+    push
+        copy host -> guest
+    pull
+        copy guest -> host
+    heartbeat
+        reset TTL; keeps a
+        leased VM alive
+    release
+        stop + delete +
+        unregister
+    capabilities
+        show supported and
+        unavailable network
+        capabilities
+    acquisition-capabilities
+        describe acquisition
+        and console
+        prerequisites
+        without allocating a
+        VM
+    console-resolve
+        resolve the exact
+        lease console;
+        viewer is on the
+        service host
+    console-open
+        open the exact lease
+        console; viewer is
+        on the service host
+    console-cancel
+        cancel the exact
+        lease console;
+        viewer is on the
+        service host
+    gc  run TTL reclaim now
+
+options:
+  -h, --help
+        show this help
+        message and exit
+  --environment ENVIRONMENT
+        absolute selected-
+        environment profile
+        path
