@@ -581,6 +581,93 @@ fn test_gc_absent_count_resets_when_vm_runs_again() {
     );
 }
 
+/// V4: GC never blocks on one VM. GC released leases one after another and
+/// each release waited on its VM's operation lock, so a guest operation that
+/// held one VM's lock delayed reclamation of every other lease. Here the
+/// busy VM's exec runs through a transport that does not observe the release
+/// flag, standing for any operation that cannot be preempted. GC must
+/// reclaim the other expired lease in the same pass, defer the busy one, and
+/// reclaim it on a later pass once its lock is free.
+#[test]
+fn test_gc_reclaims_other_leases_while_one_vm_is_busy() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let fixture = common::Fixture::new();
+    // `a-` sorts before `b-`, so GC reaches the busy VM first.
+    let busy = fixture.acquire("a-busy", "ubuntu2404", "none");
+    let busy = busy["vm"].as_str().expect("vm name").to_string();
+    let other = fixture.acquire("b-expired", "ubuntu2404", "none");
+    let other = other["vm"].as_str().expect("vm name").to_string();
+    let now = unix_now();
+    for vm in [&busy, &other] {
+        set_fields(
+            &fixture.service,
+            vm,
+            &[
+                ("ttl_expires_at", json!(now - 100.0)),
+                ("grace_until", json!(now - 50.0)),
+                ("warned", json!(true)),
+            ],
+        );
+    }
+
+    let (entered_tx, entered_rx) = mpsc::channel::<()>();
+    let (finish_tx, finish_rx) = mpsc::channel::<()>();
+    let entered_tx = Mutex::new(entered_tx);
+    let finish_rx = Mutex::new(finish_rx);
+    *fixture.host.ssh_hook.lock().expect("ssh_hook") = Some(Arc::new(
+        move |_ip, _user, _key_dir, _cmd, _stdin, _timeout| {
+            let _ = entered_tx.lock().expect("entered").send(());
+            // Returns when the test finishes the command or drops the sender.
+            let _ = finish_rx.lock().expect("finish").recv();
+            Some((0, "done".to_string()))
+        },
+    ));
+    let exec_service = Arc::clone(&fixture.service);
+    let exec_vm = busy.clone();
+    let exec = std::thread::spawn(move || {
+        exec_service.guest_exec(&exec_vm, &json!({"argv": ["slow"], "timeout": 3600}))
+    });
+    entered_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("exec did not start");
+
+    let (gc_tx, gc_rx) = mpsc::channel();
+    let gc_service = Arc::clone(&fixture.service);
+    std::thread::spawn(move || {
+        let _ = gc_tx.send(gc_service.gc_once());
+    });
+    gc_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("GC blocked on the busy VM's operation lock")
+        .expect("gc_once");
+    let state = fixture.read_state();
+    assert!(
+        !state.contains_key(&other),
+        "GC did not reclaim the other expired lease while one VM was busy"
+    );
+    assert_eq!(
+        state.get(&busy).expect("the busy lease is kept for now")["state"],
+        json!("releasing")
+    );
+    let log = std::fs::read_to_string(&fixture.service.config.log_file).expect("service log");
+    assert!(
+        log.contains(&format!("GC: {busy} is busy with another operation")),
+        "{log}"
+    );
+
+    finish_tx.send(()).expect("finish the command");
+    exec.join().expect("exec thread").expect("exec result");
+    fixture.service.gc_once().expect("gc");
+    assert!(
+        !fixture.read_state().contains_key(&busy),
+        "a deferred lease was not reclaimed on a later pass"
+    );
+    assert!(!fixture.host.tart.exists(&busy));
+    assert!(!fixture.host.tart.exists(&other));
+}
+
 /// V1: startup reconciliation releases `pending` and `provisioning` records
 /// left by a previous process and keeps `running` leases.
 #[test]
