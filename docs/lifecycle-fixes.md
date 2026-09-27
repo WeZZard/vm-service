@@ -4,15 +4,60 @@
 
 - This note records the decisions and designs for six lease lifecycle failures found in the Rust daemon.
 - Each failure has an automated reproducer that was committed before its fix. Items V1 to V5 are fixed in source. Item V6 is documented by an ignored test and waits for the owner's decision.
+- The first fix for V4, an execution timeout cap, was replaced by the owner's decision of 2026-09-27: release preempts a running guest operation, GC never blocks on one VM, and timeouts have no maximum.
 - The fixes are source changes only. They do not restart, upgrade, or reconfigure the installed daemon.
 
-## V4: bounded execution timeout
+## V4: a long guest operation blocks release and GC
 
-- **Failure:** `POST /vms/<vm>/exec` rejected only nonpositive timeouts. The per-VM operation lock is held for the whole SSH call, and release and the single serial GC loop wait on that lock. A very large timeout therefore blocked reclamation of every other lease for as long as the command ran. A timeout near `i64::MAX` also panicked in the subprocess helper after `ssh` had been spawned, because the deadline `Instant` overflowed.
-- **Decision:** The daemon rejects a timeout above 4200 seconds with the error `timeout must not exceed 4200 seconds`, before any SSH process starts.
-- **Rationale:** mcp-vm-relay accepts guest commands of up to 3,600,000 ms, adds a 180,000 ms receiver allowance, and allows an after-snapshot delay of up to 300,000 ms. Its largest request is therefore `ceil(4,080,000 / 1000) = 4080` seconds. A maximum of 4200 seconds keeps a 120-second margin above that value.
-- **Decision:** The subprocess helper computes its deadline with checked arithmetic. A timeout that cannot be represented as a deadline is refused before the child is spawned.
-- **Limitation:** A command can still hold its lease's operation lock, and therefore the GC loop, for up to 4200 seconds. The bound limits the delay; it does not make GC independent of guest commands.
+- **Failure:** One per-VM operation lock serializes guest operations. `POST /vms/<vm>/exec` holds it for the whole SSH call, and push and pull hold it for the whole `scp` call. Release took the same lock before tearing the VM down, and the single GC thread released leases one after another. A long command therefore blocked release of its own VM and, through GC, reclamation of every other lease for as long as it ran. A timeout near `i64::MAX` also panicked in the subprocess helper after `ssh` had been spawned, because the deadline `Instant` overflowed.
+- **Superseded fix:** Commit `5401dc9` rejected a timeout above 4200 seconds. The owner did not approve the cap and treats the failure as an ordering problem. The cap is removed, and a request may again use any positive timeout.
+- **Decision (owner, 2026-09-27):** Guest execution timeouts have no maximum.
+- **Decision (owner, 2026-09-27):** A release preempts a running guest operation on its VM.
+- **Decision (owner, 2026-09-27):** GC never blocks on one VM.
+- **Decision:** The subprocess helper still computes its deadline with checked arithmetic. A timeout that cannot be represented as a deadline is refused before the child is spawned, so the panic does not return.
+
+### Design: release preempts the operation lock
+
+- The per-VM operation lock remains the queue for guest operations on one VM. Exec, push, and pull still run one at a time.
+- The service keeps a per-VM cancellation flag beside the operation lock.
+- Release first commits the `releasing` state under the state lock. This step is unchanged, and it still honors the expired-only check that GC uses, so a lease renewed before reclamation is not cancelled.
+- After the commit succeeds, release sets the VM's cancellation flag, and only then takes the operation lock.
+- Exec, push, and pull run their subprocesses inside a cancellation scope for their VM. The subprocess helper checks the flag before it spawns the child and on every 20-millisecond poll. When the flag is set, it kills the child in the same way as at the deadline. The operation lock is therefore free within milliseconds, and teardown proceeds.
+- A cancelled exec returns the error `command cancelled by release of <vm>`. A cancelled push or pull returns the error `transfer cancelled by release of <vm>`. The partial output of a cancelled command is discarded.
+- No new operation can start after the commit, because exec, push, and pull refuse a record that is not `running`.
+- Release no longer takes the operation lock before it commits `releasing`. Heartbeat and the expiry check both run under the state lock, so the commit remains atomic with respect to renewal.
+- The flag is never cleared. Each lease has a unique VM name, and a record in the `releasing` state refuses every new operation.
+
+```mermaid
+sequenceDiagram
+    participant E as exec thread
+    participant R as release thread
+    participant S as state lock
+    participant L as VM operation lock
+    E->>L: lock
+    E->>E: ssh (polls the flag every 20 ms)
+    R->>S: commit state = releasing
+    R->>R: set the cancellation flag
+    R->>L: lock (waits)
+    E->>E: kill ssh on the flag
+    E-->>L: unlock; return "command cancelled by release"
+    L-->>R: granted
+    R->>R: stop and delete the VM
+```
+
+### Design: GC does not wait on a busy VM
+
+- For each lease it reclaims, GC commits `releasing` and sets the cancellation flag in the same way as a release.
+- GC then tries to take the operation lock without waiting. If another thread holds the lock, GC logs `GC: <vm> is busy with another operation; teardown deferred to the next pass` and continues with the next lease.
+- A deferred lease keeps its `releasing` record. The next GC pass reclaims every `releasing` record, so a deferred lease is torn down on a later pass once its lock is free.
+- A lock can stay held after a cancellation only by an operation that does not run through the cancellable subprocess helper, such as another thread's teardown or an acquisition that is still provisioning. GC skips that VM and reclaims the others.
+
+### Limitations
+
+- Cancellation kills the local `ssh` or `scp` process. The remote command can continue in the guest until teardown stops the VM, which follows immediately.
+- Provisioning during acquisition does not observe the cancellation flag. A release during acquisition waits for provisioning to reach its next state check, as it did before this change. GC does not wait for it.
+- Teardown itself (`tart stop` and `tart delete`) is not cancellable.
+- The cancellation scope is bound to the thread that runs the operation. A `Host` implementation that runs its subprocess on another thread does not observe the flag. `RealHost` runs the subprocess on the calling thread.
 
 ## V5: a heartbeat without `ttl_hours`
 
@@ -51,7 +96,7 @@
 
 ## Logging
 
-- The service log records heartbeats, refused heartbeats, release requests, refused reservations, startup reconciliation, liveness observations, and undelivered acquisition responses.
+- The service log records heartbeats, refused heartbeats, release requests, refused reservations, startup reconciliation, liveness observations, undelivered acquisition responses, guest operations cancelled by release, and GC teardowns deferred because a VM was busy.
 - A reservation refused because the purpose is already leased or because the macOS limit is reached is logged. A refusal caused by the macOS limit also logs the VMs that hold the macOS slots, with their states and grace deadlines. Request validation errors are not logged.
 - The HTTP error text is unchanged, so clients that parse it are not affected.
 - Log lines use the existing `service.log` format and prefixes (`WARN:`, `GC:`, `LEASE WARN:`).
