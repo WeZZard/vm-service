@@ -26,7 +26,7 @@
 - **Failure:** Heartbeat and GC never checked whether Tart still ran the VM of a `running` record. A VM that crashed or was stopped outside the service kept its record, its macOS slot, and its successful heartbeats until TTL plus grace.
 - **Decision:** A heartbeat on a `running` record whose VM Tart does not report as running fails with the error `<vm> is not running on the host (Tart reports it stopped or absent); release it and acquire a new lease`. The TTL is not renewed.
 - **Decision:** If `tart list` itself fails, the heartbeat proceeds and the failure is logged. A transient Tart failure must not make a client abandon a healthy lease.
-- **Decision:** GC reads `tart list` once per pass. A `running` record whose VM is not running is counted per pass. After two consecutive passes, GC releases the lease through the normal teardown path with the reason `vm-not-running`. A pass that sees the VM running again resets the count.
+- **Decision:** GC reads `tart list` once per pass, after every record has passed the selected-environment check, and only when at least one record is `running`. A `running` record whose VM is not running is counted per pass. After two consecutive passes, GC releases the lease through the normal teardown path with the reason `vm-not-running`. A pass that sees the VM running again resets the count.
 - **Rationale:** Two passes (about 60 seconds apart) tolerate the race in which a record becomes `running` between the `tart list` snapshot and the state read. The count is held in memory, so the persisted state layout does not change. A daemon restart restarts the count, which delays reclamation by at most two passes.
 - GC logs the first observation and the reclamation.
 
@@ -41,6 +41,7 @@
 
 - **Failure:** The daemon ignored the result of writing the HTTP response. When the client disconnected while acquisition was still running, the daemon created a lease that no client knew about. The lease held its slot until TTL plus grace.
 - **Decision:** When the daemon cannot deliver a successful `POST /acquire` response, it releases the new lease with the reason `acquire-response-undelivered` and logs the event.
+- **Design:** `tiny_http`'s `Request::respond` reports a reset or broken connection as success. The daemon therefore writes each response through the request's raw writer with the same serialization, and it receives the write error.
 - **Limitation:** Delivery failure can be observed only when the socket write fails. A peer that closed its connection normally may still accept the buffered response bytes, and in that case the lease is kept. TTL and GC remain the safeguard for that case.
 
 ## V6: grace period and macOS capacity (owner decision pending)
@@ -50,6 +51,7 @@
 
 ## Logging
 
-- The service log records heartbeats, release requests, refused acquisitions, startup reconciliation, liveness observations, and undelivered acquisition responses.
-- A refused acquisition caused by the macOS limit logs the VMs that hold the macOS slots, with their states. The HTTP error text is unchanged, so clients that parse it are not affected.
+- The service log records heartbeats, refused heartbeats, release requests, refused reservations, startup reconciliation, liveness observations, and undelivered acquisition responses.
+- A reservation refused because the purpose is already leased or because the macOS limit is reached is logged. A refusal caused by the macOS limit also logs the VMs that hold the macOS slots, with their states and grace deadlines. Request validation errors are not logged.
+- The HTTP error text is unchanged, so clients that parse it are not affected.
 - Log lines use the existing `service.log` format and prefixes (`WARN:`, `GC:`, `LEASE WARN:`).
