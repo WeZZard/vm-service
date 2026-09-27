@@ -18,14 +18,6 @@ use crate::GC_INTERVAL_S;
 pub const MAX_MACOS_RUNNING: usize = 2;
 /// The reclamation grace period after TTL expiry, in hours.
 pub const GRACE_HOURS: i64 = 6;
-/// The largest accepted guest execution timeout, in seconds.
-///
-/// The per-VM operation lock is held for the whole command, and release and
-/// the serial GC loop wait on it, so the timeout bounds how long one command
-/// can delay reclamation. mcp-vm-relay's largest request is 4080 seconds
-/// (a 3600 s command, a 180 s receiver allowance, and a 300 s snapshot
-/// delay); this maximum keeps a 120 s margin. See `docs/lifecycle-fixes.md`.
-pub const MAX_EXEC_TIMEOUT_S: i64 = 4200;
 /// Consecutive GC passes a `running` record's VM may be missing from Tart's
 /// running set before GC reclaims the lease. Two passes tolerate a record
 /// that became `running` between the `tart list` snapshot and the state read.
@@ -836,11 +828,6 @@ release it and acquire a new lease"
         let timeout = body.get("timeout").and_then(Value::as_i64).unwrap_or(600);
         if timeout <= 0 {
             return Err(OpError::new("timeout must be positive"));
-        }
-        if timeout > MAX_EXEC_TIMEOUT_S {
-            return Err(OpError::new(format!(
-                "timeout must not exceed {MAX_EXEC_TIMEOUT_S} seconds"
-            )));
         }
         let (remote_cmd, stdin) = if let Some(script) = body.get("script").and_then(Value::as_str) {
             let shell = if kind == "macos" { "zsh -s" } else { "bash -s" };
