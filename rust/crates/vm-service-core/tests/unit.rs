@@ -498,6 +498,56 @@ fn test_bare_heartbeat_renews_expired_ttl() {
     );
 }
 
+/// V2: a heartbeat on a `running` record whose VM Tart no longer runs is
+/// reported to the client instead of silently renewing a dead lease.
+#[test]
+fn test_heartbeat_reports_a_lease_whose_vm_is_not_running() {
+    let fixture = common::Fixture::new();
+    let rec = fixture.acquire("t", "ubuntu2404", "none");
+    let vm = rec["vm"].as_str().expect("vm name").to_string();
+    let before = persisted(&fixture, &vm)["ttl_expires_at"].clone();
+    // The guest crashed or was stopped outside the service.
+    fixture
+        .host
+        .tart
+        .vms
+        .lock()
+        .expect("vms")
+        .insert(vm.clone(), false);
+    let result = fixture.service.heartbeat(&vm, Some(&json!(4)));
+    let error = result.expect_err("heartbeat on a stopped VM must fail");
+    assert!(
+        error.to_string().contains("is not running on the host"),
+        "{error}"
+    );
+    assert_eq!(
+        persisted(&fixture, &vm)["ttl_expires_at"],
+        before,
+        "a heartbeat on a stopped VM renewed the TTL"
+    );
+}
+
+/// V2: GC reclaims a `running` record whose VM has been absent for two
+/// consecutive passes, instead of holding its slot until TTL + grace.
+#[test]
+fn test_gc_reclaims_a_running_lease_whose_vm_is_gone() {
+    let fixture = common::Fixture::new();
+    let rec = fixture.acquire("t", "ubuntu2404", "none");
+    let vm = rec["vm"].as_str().expect("vm name").to_string();
+    fixture.host.tart.vms.lock().expect("vms").remove(&vm);
+
+    fixture.service.gc_once().expect("gc");
+    assert!(
+        fixture.read_state().contains_key(&vm),
+        "one missed observation must not reclaim the lease"
+    );
+    fixture.service.gc_once().expect("gc");
+    assert!(
+        !fixture.read_state().contains_key(&vm),
+        "GC kept a running record whose VM has been gone for two passes"
+    );
+}
+
 #[test]
 fn test_heartbeat_unknown_vm() {
     let fixture = common::Fixture::new();
