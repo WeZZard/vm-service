@@ -29,7 +29,7 @@ fn per_request_timeout_includes_receiver_allowance_and_longer_requests() {
     let record = fixture.acquire("timeouts", "ubuntu2404", "none");
     let vm = record["vm"].as_str().expect("vm name").to_string();
 
-    for timeout in [None, Some(3600_u64), Some(3720), Some(4080), Some(4200)] {
+    for timeout in [None, Some(3600_u64), Some(3720), Some(7200)] {
         for command in [json!({"argv": ["true"]}), json!({"script": "true"})] {
             let mut body = command;
             if let Some(value) = timeout {

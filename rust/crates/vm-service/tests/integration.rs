@@ -166,7 +166,7 @@ fn test_exec_request_timeout_reaches_ssh_without_clamping() {
     );
     assert_eq!(response.status, 200);
     let vm = response.body["vm"].as_str().expect("vm").to_string();
-    for timeout in [3600, 3720, 4080, 4200] {
+    for timeout in [3600, 3720, 7200] {
         for command in [
             json!({"argv": ["fixture-timeout"]}),
             json!({"script": "fixture-timeout"}),
