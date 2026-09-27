@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "acquisition-options"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde_json",
  "thiserror",
@@ -62,7 +62,7 @@ dependencies = [
 
 [[package]]
 name = "application-catalog"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "libc",
  "serde",
@@ -188,7 +188,7 @@ checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 
 [[package]]
 name = "console"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
  "lease-keys",
@@ -203,7 +203,7 @@ dependencies = [
 
 [[package]]
 name = "console-worker"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "libc",
  "serde",
@@ -213,7 +213,7 @@ dependencies = [
 
 [[package]]
 name = "control-only"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde_json",
  "sha2",
@@ -260,7 +260,7 @@ dependencies = [
 
 [[package]]
 name = "environment"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "libc",
  "serde",
@@ -340,7 +340,7 @@ dependencies = [
 
 [[package]]
 name = "guest-console-agent"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "libc",
  "serde_json",
@@ -418,7 +418,7 @@ dependencies = [
 
 [[package]]
 name = "lease-keys"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "libc",
  "tempfile",
@@ -516,7 +516,7 @@ checksum = "63b8176103e19a2643978565ca18b50549f6101881c443590420e4dc998a3c69"
 
 [[package]]
 name = "runtime-launcher"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "libc",
 ]
@@ -731,7 +731,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vm-service"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "environment",
  "libc",
@@ -744,7 +744,7 @@ dependencies = [
 
 [[package]]
 name = "vm-service-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "acquisition-options",
  "application-catalog",
@@ -764,7 +764,7 @@ dependencies = [
 
 [[package]]
 name = "vm-service-install"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "clap",
  "console",
@@ -777,7 +777,7 @@ dependencies = [
 
 [[package]]
 name = "vmctl"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "clap",
  "environment",
