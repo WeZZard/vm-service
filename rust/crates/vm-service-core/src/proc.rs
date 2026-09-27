@@ -3,11 +3,53 @@
 //! Rust has no timeout on `Child::wait`, so the helper polls and kills a child
 //! that exceeds its deadline. Output and input are drained on separate threads
 //! so a full pipe buffer can never deadlock a command.
+//!
+//! A caller can also bind a cancellation flag to its thread with
+//! [`with_cancellation`]. Every [`run_capture`] on that thread then kills its
+//! child as soon as the flag is set, exactly as it does at the deadline. A
+//! release uses this to preempt a guest operation that holds the VM's
+//! operation lock; see `docs/lifecycle-fixes.md` (V4).
 
+use std::cell::RefCell;
 use std::io::Read;
 use std::io::Write;
 use std::process::{Command, Output, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+thread_local! {
+    static CANCELLATION: RefCell<Option<Arc<AtomicBool>>> = const { RefCell::new(None) };
+}
+
+/// Run `body` with `flag` as this thread's cancellation flag.
+///
+/// Every [`run_capture`] that `body` makes on this thread refuses to spawn,
+/// or kills its running child, once `flag` is set, and returns
+/// [`ProcError::Cancelled`]. A subprocess started on another thread does not
+/// observe the flag. The previous binding is restored when `body` returns or
+/// unwinds.
+pub fn with_cancellation<T>(flag: Arc<AtomicBool>, body: impl FnOnce() -> T) -> T {
+    struct Restore(Option<Arc<AtomicBool>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let previous = self.0.take();
+            CANCELLATION.with(|cell| *cell.borrow_mut() = previous);
+        }
+    }
+    let previous = CANCELLATION.with(|cell| cell.borrow_mut().replace(flag));
+    let _restore = Restore(previous);
+    body()
+}
+
+/// Whether this thread's cancellation flag, if any, is set.
+fn cancelled() -> bool {
+    CANCELLATION.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::SeqCst))
+    })
+}
 
 /// A fake [`run_capture`] execution: given the command, optional stdin, and
 /// timeout it would have used, returns the outcome to report instead of
@@ -60,6 +102,9 @@ pub enum ProcError {
     Io(std::io::Error),
     /// The process exceeded its deadline and was killed.
     Timeout,
+    /// The thread's cancellation flag was set; the process was killed or never
+    /// spawned.
+    Cancelled,
 }
 
 impl std::fmt::Display for ProcError {
@@ -67,6 +112,7 @@ impl std::fmt::Display for ProcError {
         match self {
             ProcError::Io(error) => write!(formatter, "{error}"),
             ProcError::Timeout => write!(formatter, "process timed out"),
+            ProcError::Cancelled => write!(formatter, "process cancelled"),
         }
     }
 }
@@ -75,8 +121,9 @@ impl std::error::Error for ProcError {}
 
 /// Run a command to completion, capturing output and optionally feeding stdin.
 ///
-/// The child is killed when `timeout` elapses. The returned `Output` is
-/// equivalent to Python `subprocess.run(..., capture_output=True)`.
+/// The child is killed when `timeout` elapses, or when this thread's
+/// cancellation flag (see [`with_cancellation`]) is set. The returned `Output`
+/// is equivalent to Python `subprocess.run(..., capture_output=True)`.
 pub fn run_capture(
     command: &mut Command,
     stdin: Option<Vec<u8>>,
@@ -102,6 +149,9 @@ pub fn run_capture(
             "timeout exceeds the representable deadline",
         ))
     })?;
+    if cancelled() {
+        return Err(ProcError::Cancelled);
+    }
     command
         .stdin(if stdin.is_some() {
             Stdio::piped()
@@ -138,13 +188,20 @@ pub fn run_capture(
         match child.try_wait().map_err(ProcError::Io)? {
             Some(status) => break status,
             None => {
-                if Instant::now() >= deadline {
+                let stop = if cancelled() {
+                    Some(ProcError::Cancelled)
+                } else if Instant::now() >= deadline {
+                    Some(ProcError::Timeout)
+                } else {
+                    None
+                };
+                if let Some(error) = stop {
                     let _ = child.kill();
                     let _ = child.wait();
                     let _ = writer.map(|handle| handle.join());
                     let _ = stdout_reader.join();
                     let _ = stderr_reader.join();
-                    return Err(ProcError::Timeout);
+                    return Err(error);
                 }
                 std::thread::sleep(Duration::from_millis(20));
             }

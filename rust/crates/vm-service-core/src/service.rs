@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use serde_json::{Map, Value};
@@ -50,6 +51,10 @@ pub struct Service {
     pub host: Arc<dyn Host>,
     associations: Mutex<Associations>,
     operation_locks: Mutex<HashMap<String, Arc<ReentrantLock>>>,
+    /// Per-VM cancellation flags, set once a release has committed the
+    /// `releasing` state. Guest operations observe them; see
+    /// `docs/lifecycle-fixes.md` (V4).
+    release_flags: Mutex<HashMap<String, Arc<AtomicBool>>>,
     /// Consecutive GC passes in which a `running` record's VM was not running,
     /// keyed by VM name. Held in memory only; see `docs/lifecycle-fixes.md`.
     pub(crate) absent_passes: Mutex<HashMap<String, u32>>,
@@ -101,6 +106,7 @@ impl Service {
             host,
             associations: Mutex::new(Associations::default()),
             operation_locks: Mutex::new(HashMap::new()),
+            release_flags: Mutex::new(HashMap::new()),
             absent_passes: Mutex::new(HashMap::new()),
         }
     }
@@ -183,6 +189,25 @@ impl Service {
         locks
             .entry(vm.to_string())
             .or_insert_with(|| Arc::new(ReentrantLock::new()))
+            .clone()
+    }
+
+    /// Return the per-VM release flag that sits beside the operation lock.
+    ///
+    /// A release sets it after committing the `releasing` state and before
+    /// taking the operation lock. Exec, push, and pull run their subprocesses
+    /// under [`crate::proc::with_cancellation`] with this flag, so a release
+    /// kills the running subprocess instead of waiting for it. The flag is
+    /// never cleared: VM names are unique per lease, and a `releasing` record
+    /// refuses every new operation.
+    pub fn release_flag(&self, vm: &str) -> Arc<AtomicBool> {
+        let mut flags = self
+            .release_flags
+            .lock()
+            .expect("release flag map is never poisoned");
+        flags
+            .entry(vm.to_string())
+            .or_insert_with(|| Arc::new(AtomicBool::new(false)))
             .clone()
     }
 

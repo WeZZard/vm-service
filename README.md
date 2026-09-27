@@ -251,6 +251,11 @@ shared daemon; restart remains an explicit operator action.
   4080 seconds, is within the maximum.
 - The HTTP caller must set a transport timeout longer than the complete receiver
   budget and must continue heartbeating the lease during long operations.
+- A release of the lease preempts a running command, push, or pull. The daemon
+  kills the SSH or SCP subprocess, the request fails with
+  `command cancelled by release of <name>` or
+  `transfer cancelled by release of <name>`, and teardown proceeds. See
+  [Lease lifecycle fixes](docs/lifecycle-fixes.md).
 
 ### Fresh-work-clone acceptance
 

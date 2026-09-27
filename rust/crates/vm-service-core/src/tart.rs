@@ -46,6 +46,7 @@ pub fn tart(
 fn tart_error(args: &[&str], error: ProcError) -> OpError {
     match error {
         ProcError::Timeout => OpError::new(format!("tart {} timed out", args.join(" "))),
+        ProcError::Cancelled => OpError::new(format!("tart {} cancelled", args.join(" "))),
         ProcError::Io(error) => OpError::new(format!("tart {} failed: {error}", args.join(" "))),
     }
 }

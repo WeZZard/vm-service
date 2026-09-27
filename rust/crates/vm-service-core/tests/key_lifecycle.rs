@@ -1352,6 +1352,12 @@ fn exec_exit_255_is_returned_once_without_replay_or_bootstrap() {
     );
 }
 
+/// A release commits `releasing` at once and sets the VM's release flag; see
+/// `docs/lifecycle-fixes.md` (V4). This fixture's exec does not run through
+/// the cancellable subprocess helper, so it stands for an operation that
+/// cannot be preempted: teardown must still wait for it, and must not remove
+/// the lease key under it. A heartbeat returns at once and is refused,
+/// because teardown has committed.
 #[test]
 fn release_waits_for_inflight_exec_without_blocking_heartbeat() {
     let fixture = KeyFixture::new();
@@ -1413,14 +1419,15 @@ fn release_waits_for_inflight_exec_without_blocking_heartbeat() {
         release_done_thread.set();
     });
     // Bounded substitute for the Python `operation_lock` patch: release must
-    // reach and block on the per-VM lock held by the in-flight exec.
+    // reach and block on the per-VM lock held by the in-flight exec, after
+    // committing `releasing`.
     assert!(
         !release_done.wait_timeout(Duration::from_millis(100)),
         "release overtook in-flight exec"
     );
     assert_eq!(
         fixture.base.read_state().get(&vm).expect("record")["state"],
-        "running"
+        "releasing"
     );
     assert!(key_path.join("identity").is_file());
 
@@ -1440,12 +1447,12 @@ fn release_waits_for_inflight_exec_without_blocking_heartbeat() {
         heartbeat_done.wait_timeout(Duration::from_secs(2)),
         "heartbeat blocked on guest operation"
     );
-    let renewed_ttl = fixture.base.read_state().get(&vm).expect("record")["ttl_expires_at"]
+    let unchanged_ttl = fixture.base.read_state().get(&vm).expect("record")["ttl_expires_at"]
         .as_f64()
         .expect("ttl");
-    assert!(
-        renewed_ttl > previous_ttl - 24.0 * 3600.0,
-        "heartbeat did not renew"
+    assert_eq!(
+        unchanged_ttl, previous_ttl,
+        "heartbeat renewed a releasing lease"
     );
 
     finish.set();
@@ -1466,15 +1473,15 @@ fn release_waits_for_inflight_exec_without_blocking_heartbeat() {
         .as_ref()
         .expect("release ok");
     assert_eq!(release_result["released"], true);
-    let heartbeat_result = results
+    let heartbeat_error = results
         .get("heartbeat")
         .expect("heartbeat result")
         .as_ref()
-        .expect("heartbeat ok");
-    let remaining = heartbeat_result["ttl_hours_remaining"]
-        .as_f64()
-        .expect("ttl_hours_remaining");
-    assert!((remaining - 5.0).abs() < 0.02, "remaining {remaining}");
+        .expect_err("a releasing lease cannot renew");
+    assert!(
+        heartbeat_error.to_string().contains("releasing"),
+        "{heartbeat_error}"
+    );
     drop(results);
     fixture.assert_removed(&vm);
 }
@@ -1601,6 +1608,12 @@ fn envpack_refuses_symlink_export_and_rolls_back() {
 // test_gc_renewal.py
 // ---------------------------------------------------------------------------
 
+/// A renewal that lands before GC commits teardown preserves the lease, even
+/// while a guest operation holds the VM's operation lock. GC decides under
+/// the state lock before it touches the operation lock, so it no longer
+/// queues on the lock with a stale decision; see `docs/lifecycle-fixes.md`
+/// (V4). A renewal after the commit is refused
+/// (`heartbeat_refuses_after_teardown_has_committed`).
 #[test]
 fn renewal_while_gc_waits_preserves_vm_and_private_key() {
     let fixture = KeyFixture::new();
@@ -1645,16 +1658,23 @@ fn renewal_while_gc_waits_preserves_vm_and_private_key() {
     });
     assert!(entered.wait_timeout(Duration::from_secs(2)));
 
-    let gc_service = Arc::clone(&fixture.service);
-    let gc = std::thread::spawn(move || gc_service.gc_once().expect("gc_once"));
-    // Give GC time to queue on the per-VM lock held by the in-flight command.
-    std::thread::sleep(Duration::from_millis(200));
-
     let renewed = fixture
         .service
         .heartbeat(&vm, Some(&json!(1)))
         .expect("heartbeat");
     assert!(renewed["grace_until"].is_null());
+
+    let gc_done = Arc::new(Event::new());
+    let gc_service = Arc::clone(&fixture.service);
+    let gc_done_thread = Arc::clone(&gc_done);
+    let gc = std::thread::spawn(move || {
+        gc_service.gc_once().expect("gc_once");
+        gc_done_thread.set();
+    });
+    assert!(
+        gc_done.wait_timeout(Duration::from_secs(2)),
+        "GC waited on the in-flight command of a renewed lease"
+    );
 
     finish.set();
     command.join().expect("command thread");

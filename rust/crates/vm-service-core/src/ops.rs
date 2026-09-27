@@ -590,26 +590,34 @@ impl Service {
     }
 
     /// Public release entry point, mirroring the Python lock decision.
+    ///
+    /// Release commits the `releasing` state before it takes the VM's
+    /// operation lock, so a running exec, push, or pull is preempted instead
+    /// of waited for; see `docs/lifecycle-fixes.md` (V4).
     pub fn release(&self, vm: &str, reason: &str, expired_only: bool) -> OpResult<Value> {
-        let record = self.get_record(vm)?;
+        self.get_record(vm)?;
         self.log(&format!("release requested for {vm} (reason: {reason})"));
-        let vnc = record
-            .get("configuration")
-            .and_then(|config| config.get("effective"))
-            .and_then(|effective| effective.get("vnc"))
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        if expired_only || !vnc {
-            let lock = self.operation_lock(vm);
-            let _guard = lock.lock();
-            self.begin_release(vm, reason, expired_only)
-        } else {
-            self.begin_release(vm, reason, expired_only)
-        }
+        self.begin_release(vm, reason, expired_only)
     }
 
-    /// Commit the releasing state and tear the VM down.
+    /// Commit the releasing state, preempt a running guest operation, and
+    /// tear the VM down.
     pub fn begin_release(&self, vm: &str, reason: &str, expired_only: bool) -> OpResult<Value> {
+        if !self.commit_release(vm, expired_only)? {
+            return Ok(lease_renewed(vm));
+        }
+        let lock = self.operation_lock(vm);
+        let _guard = lock.lock();
+        self.destroy_lease(vm, reason)
+    }
+
+    /// Commit the `releasing` state under the state lock, then set the VM's
+    /// release flag so a guest operation holding the operation lock kills its
+    /// subprocess and returns.
+    ///
+    /// Returns `false`, and changes nothing, when an expired-only release
+    /// finds the lease no longer due for reclamation.
+    fn commit_release(&self, vm: &str, expired_only: bool) -> OpResult<bool> {
         let proceed = self.state.update(
             |data| {
                 let record = vms_mut(data)
@@ -640,15 +648,10 @@ impl Service {
             },
             Option::<fn(&Map<String, Value>)>::None,
         )?;
-        if !proceed {
-            return Ok(serde_json::json!({
-                "vm": vm, "released": false,
-                "reason": "lease-renewed-before-reclamation"
-            }));
+        if proceed {
+            self.release_flag(vm).store(true, Ordering::SeqCst);
         }
-        let lock = self.operation_lock(vm);
-        let _guard = lock.lock();
-        self.destroy_lease(vm, reason)
+        Ok(proceed)
     }
 
     /// Stop, delete, and unregister a lease, then remove its credentials.
@@ -839,27 +842,30 @@ release it and acquire a new lease"
                 "timeout must not exceed {MAX_EXEC_TIMEOUT_S} seconds"
             )));
         }
-        let outcome = if let Some(script) = body.get("script").and_then(Value::as_str) {
+        let (remote_cmd, stdin) = if let Some(script) = body.get("script").and_then(Value::as_str) {
             let shell = if kind == "macos" { "zsh -s" } else { "bash -s" };
-            self.host.ssh(
-                &ip,
-                &ssh_user,
-                &key_dir,
-                shell,
-                Some(script.as_bytes().to_vec()),
-                timeout as u64,
-            )
+            (shell.to_string(), Some(script.as_bytes().to_vec()))
         } else if let Some(argv) = body.get("argv").and_then(Value::as_array) {
             let command = argv
                 .iter()
                 .map(|value| shell_quote(&arg_text(value)))
                 .collect::<Vec<_>>()
                 .join(" ");
-            self.host
-                .ssh(&ip, &ssh_user, &key_dir, &command, None, timeout as u64)
+            (command, None)
         } else {
             return Err(OpError::new("need 'argv' or 'script'"));
         };
+        let flag = self.release_flag(vm);
+        let outcome = crate::proc::with_cancellation(Arc::clone(&flag), || {
+            self.host
+                .ssh(&ip, &ssh_user, &key_dir, &remote_cmd, stdin, timeout as u64)
+        });
+        if outcome.is_none() && flag.load(Ordering::SeqCst) {
+            self.log(&format!("{vm}: running command cancelled by release"));
+            return Err(OpError::new(format!(
+                "command cancelled by release of {vm}"
+            )));
+        }
         let (rc, text) = outcome.ok_or_else(|| OpError::new("ssh failed"))?;
         let truncated = tail_chars(&text, 64000);
         Ok(serde_json::json!({"vm": vm, "rc": rc, "output": truncated}))
@@ -890,14 +896,11 @@ release it and acquire a new lease"
             std::path::Path::new(local),
             true,
         )?;
-        let result = self.host.scp(
-            &ip,
-            &ssh_user,
-            &key_dir,
-            local,
-            &format!("{ssh_user}@{ip}:{remote}"),
-            300,
-        );
+        let destination = format!("{ssh_user}@{ip}:{remote}");
+        let result = self.cancellable_transfer(vm, || {
+            self.host
+                .scp(&ip, &ssh_user, &key_dir, local, &destination, 300)
+        })?;
         match result {
             Some((0, _)) => Ok(serde_json::json!({"vm": vm, "pushed": local, "to": remote})),
             other => Err(OpError::new(format!(
@@ -932,14 +935,10 @@ release it and acquire a new lease"
         if let Some(parent) = std::path::Path::new(local).parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let result = self.host.scp(
-            &ip,
-            &ssh_user,
-            &key_dir,
-            &format!("{ssh_user}@{ip}:{remote}"),
-            local,
-            300,
-        );
+        let source = format!("{ssh_user}@{ip}:{remote}");
+        let result = self.cancellable_transfer(vm, || {
+            self.host.scp(&ip, &ssh_user, &key_dir, &source, local, 300)
+        })?;
         match result {
             Some((0, _)) => Ok(serde_json::json!({"vm": vm, "pulled": remote, "to": local})),
             other => Err(OpError::new(format!(
@@ -947,6 +946,24 @@ release it and acquire a new lease"
                 other.map(|(_, text)| text).unwrap_or_default()
             ))),
         }
+    }
+
+    /// Run one `scp` transfer under the VM's release flag. A transfer killed
+    /// by a release reports that instead of a generic `scp` failure.
+    fn cancellable_transfer(
+        &self,
+        vm: &str,
+        transfer: impl FnOnce() -> Option<(i32, String)>,
+    ) -> OpResult<Option<(i32, String)>> {
+        let flag = self.release_flag(vm);
+        let result = crate::proc::with_cancellation(Arc::clone(&flag), transfer);
+        if result.is_none() && flag.load(Ordering::SeqCst) {
+            self.log(&format!("{vm}: running transfer cancelled by release"));
+            return Err(OpError::new(format!(
+                "transfer cancelled by release of {vm}"
+            )));
+        }
+        Ok(result)
     }
 
     fn running_record(&self, vm: &str) -> OpResult<Value> {
@@ -1163,6 +1180,14 @@ fn describe_holder(record: &Value) -> String {
         Some(grace) => format!("{vm} ({state}, grace until {})", format_gmtime(grace)),
         None => format!("{vm} ({state})"),
     }
+}
+
+/// The result of an expired-only release that found the lease renewed.
+fn lease_renewed(vm: &str) -> Value {
+    serde_json::json!({
+        "vm": vm, "released": false,
+        "reason": "lease-renewed-before-reclamation"
+    })
 }
 
 /// The acquisition default TTL, in hours, used when a record carries none.
