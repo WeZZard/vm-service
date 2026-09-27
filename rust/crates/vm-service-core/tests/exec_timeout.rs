@@ -97,6 +97,62 @@ fn nonpositive_timeout_never_launches_ssh() {
     }
 }
 
+/// V4: an execution timeout above the documented maximum is refused before
+/// any SSH process starts. The per-VM operation lock is held for the whole
+/// command, and release and the serial GC loop wait on it, so an unbounded
+/// timeout stalls reclamation of every other lease. See
+/// `docs/lifecycle-fixes.md`.
+#[test]
+fn timeout_above_maximum_never_launches_ssh() {
+    let fixture = common::Fixture::new();
+    let record = fixture.acquire("timeouts", "ubuntu2404", "none");
+    let vm = record["vm"].as_str().expect("vm name").to_string();
+
+    for timeout in [4201_i64, 86_400, i64::MAX] {
+        fixture
+            .host
+            .ssh
+            .ssh_calls
+            .lock()
+            .expect("ssh_calls")
+            .clear();
+        let result = fixture
+            .service
+            .guest_exec(&vm, &json!({"argv": ["true"], "timeout": timeout}));
+        let launched = !fixture
+            .host
+            .ssh
+            .ssh_calls
+            .lock()
+            .expect("ssh_calls")
+            .is_empty();
+        let error = result.expect_err("a timeout above the maximum is rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("timeout must not exceed 4200 seconds"),
+            "{error}"
+        );
+        assert!(!launched, "ssh launched for timeout {timeout}");
+    }
+}
+
+/// V4: a deadline that cannot be represented must be refused, not panic after
+/// the child process has already been spawned.
+#[test]
+fn run_capture_refuses_a_deadline_beyond_the_clock() {
+    let mut command = std::process::Command::new("/usr/bin/true");
+    let result = vm_service_core::proc::run_capture(
+        &mut command,
+        None,
+        std::time::Duration::from_secs(i64::MAX as u64),
+    );
+    assert!(
+        result.is_err(),
+        "an unrepresentable deadline must be refused"
+    );
+}
+
 #[test]
 #[cfg(debug_assertions)]
 fn test_timeout_never_replays_the_command() {
