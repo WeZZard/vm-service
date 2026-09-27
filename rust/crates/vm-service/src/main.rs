@@ -1,5 +1,6 @@
 //! The `vm-service` daemon: HTTP API, lease state, and the GC loop.
 
+use std::io::Write;
 use std::sync::Arc;
 
 use serde_json::{json, Map, Value};
@@ -153,13 +154,40 @@ fn handle(service: &Service, mut request: Request) {
         Method::Get => handle_get(service, &mut request, &url),
         Method::Post => handle_post(service, &mut request, &url),
         _ => {
-            send(request, 404, &json!({"error": "not found"}));
+            let _ = send(request, 404, &json!({"error": "not found"}));
             return;
         }
     };
+    let acquire = method == Method::Post && url == "/acquire";
     match response {
-        Ok((code, value)) => send(request, code, &value),
-        Err(error) => send(request, 409, &json!({"error": error.to_string()})),
+        Ok((code, value)) => {
+            let delivered = send(request, code, &value);
+            if let Err(error) = delivered {
+                if acquire && code == 200 {
+                    release_undelivered_acquire(service, &value, &error);
+                }
+            }
+        }
+        Err(error) => {
+            let _ = send(request, 409, &json!({"error": error.to_string()}));
+        }
+    }
+}
+
+/// Release a lease whose successful acquisition response could not be
+/// delivered: no client knows about it, so it would otherwise hold its slot
+/// until TTL + grace. See `docs/lifecycle-fixes.md` (V3).
+fn release_undelivered_acquire(service: &Service, record: &Value, error: &std::io::Error) {
+    let Some(vm) = record.get("vm").and_then(Value::as_str) else {
+        return;
+    };
+    service.log(&format!(
+        "WARN: acquire response for {vm} undelivered ({error}); releasing the new lease"
+    ));
+    if let Err(release_error) = service.release(vm, "acquire-response-undelivered", false) {
+        service.log(&format!(
+            "WARN: release of undelivered lease {vm} failed: {release_error}"
+        ));
     }
 }
 
@@ -465,7 +493,12 @@ fn read_body(request: &mut Request) -> OpResult<Value> {
     Ok(parsed)
 }
 
-fn send(request: Request, code: u16, value: &Value) {
+/// Write one JSON response, returning whether it reached the client's socket.
+///
+/// `Request::respond` reports a reset or broken connection as success, so the
+/// response is written through the request's raw writer instead; that is the
+/// same serialization `respond` performs, without discarding the error.
+fn send(request: Request, code: u16, value: &Value) -> std::io::Result<()> {
     let mut body = serde_json::to_string_pretty(value).unwrap_or_else(|_| "{}".to_string());
     body.push('\n');
     let content_type =
@@ -473,5 +506,10 @@ fn send(request: Request, code: u16, value: &Value) {
     let response = Response::from_string(body)
         .with_status_code(code)
         .with_header(content_type);
-    let _ = request.respond(response);
+    let version = request.http_version().clone();
+    let headers = request.headers().to_vec();
+    let head = request.method() == &Method::Head;
+    let mut writer = request.into_writer();
+    response.raw_print(&mut writer, version, &headers, head, None)?;
+    writer.flush()
 }

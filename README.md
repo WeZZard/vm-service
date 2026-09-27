@@ -311,6 +311,10 @@ the daemon, so `vm-service` does not need to be on PATH.)
   the HTTP server binds, the daemon releases every `pending` or `provisioning`
   record left by the previous process and logs each one, so a retry with the
   same purpose is not refused as already leased.
+- If the daemon cannot write a successful acquisition response because the
+  client's connection was reset, it releases the new lease and logs it. A
+  client that closed its connection normally may still receive the bytes into
+  its socket buffer; TTL and GC remain the safeguard in that case.
 
 See [per-lease SSH keys](docs/lease-ssh-keys.md) for bootstrap trust, key-only
 OpenSSH options, recovery, and the legacy-lease rollout requirement. The running
