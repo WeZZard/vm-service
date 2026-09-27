@@ -581,6 +581,30 @@ fn test_gc_absent_count_resets_when_vm_runs_again() {
     );
 }
 
+/// V1: startup reconciliation releases `pending` and `provisioning` records
+/// left by a previous process and keeps `running` leases.
+#[test]
+fn test_startup_reconciliation_releases_interrupted_acquisitions() {
+    let fixture = common::Fixture::new();
+    let kept = fixture.acquire("kept", "ubuntu2404", "none");
+    let kept = kept["vm"].as_str().expect("vm name").to_string();
+    let interrupted = fixture.acquire("interrupted", "macos26", "none");
+    let interrupted = interrupted["vm"].as_str().expect("vm name").to_string();
+    set_fields(
+        &fixture.service,
+        &interrupted,
+        &[("state", json!("provisioning"))],
+    );
+
+    let reconciled = fixture.service.reconcile_startup().expect("reconcile");
+
+    assert_eq!(reconciled, vec![interrupted.clone()]);
+    let state = fixture.read_state();
+    assert!(!state.contains_key(&interrupted));
+    assert!(state.contains_key(&kept));
+    assert!(!fixture.host.tart.exists(&interrupted));
+}
+
 #[test]
 fn test_heartbeat_unknown_vm() {
     let fixture = common::Fixture::new();

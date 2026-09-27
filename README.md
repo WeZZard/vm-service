@@ -307,6 +307,10 @@ the daemon, so `vm-service` does not need to be on PATH.)
   consecutive passes (about two minutes) that find its VM not running.
 - Failure rolls back: stop, delete, verify absence, then remove the key and lease.
   Failed teardown retains the `releasing` record and credentials for retry.
+- A daemon restart interrupts any acquisition in progress. At startup, before
+  the HTTP server binds, the daemon releases every `pending` or `provisioning`
+  record left by the previous process and logs each one, so a retry with the
+  same purpose is not refused as already leased.
 
 See [per-lease SSH keys](docs/lease-ssh-keys.md) for bootstrap trust, key-only
 OpenSSH options, recovery, and the legacy-lease rollout requirement. The running

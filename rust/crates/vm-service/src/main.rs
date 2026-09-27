@@ -116,6 +116,12 @@ fn serve(config: Config) -> Result<(), String> {
             .map_err(|error| error.to_string())?;
     }
 
+    // No acquisition survives a restart; release the records it left behind
+    // before any request can observe or retry them.
+    if let Err(error) = service.reconcile_startup() {
+        service.log(&format!("WARN: startup reconciliation failed: {error}"));
+    }
+
     let address = if service.config.host.contains(':') {
         format!("[{}]:{}", service.config.host, service.config.port)
     } else {

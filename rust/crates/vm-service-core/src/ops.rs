@@ -1076,6 +1076,48 @@ consecutive passes)"
         Ok(())
     }
 
+    /// Release every `pending` or `provisioning` record left by a previous
+    /// daemon process, through the normal teardown path.
+    ///
+    /// Call once at startup, before serving requests. The kernel-held
+    /// `daemon.lock` guarantees one daemon per state directory, so after a
+    /// restart no acquisition from the previous process can still be in
+    /// flight. A failed teardown keeps the record `releasing` for GC to retry.
+    /// Returns the names of the reconciled records.
+    pub fn reconcile_startup(&self) -> OpResult<Vec<String>> {
+        let data = self.state.read()?;
+        let mut interrupted: Vec<(String, String)> = Vec::new();
+        if let Some(records) = data.get("vms").and_then(Value::as_object) {
+            for (vm, record) in records {
+                let state = record.get("state").and_then(Value::as_str).unwrap_or("");
+                if state != "pending" && state != "provisioning" {
+                    continue;
+                }
+                if let Err(error) = self.state.require_lease_environment(record) {
+                    self.log(&format!(
+                        "WARN: startup: not reconciling {vm} (state={state}): {error}"
+                    ));
+                    continue;
+                }
+                interrupted.push((vm.clone(), state.to_string()));
+            }
+        }
+        let mut reconciled = Vec::new();
+        for (vm, state) in interrupted {
+            self.log(&format!(
+                "startup: reconciling {vm} (state={state}); its acquisition did not survive \
+the daemon restart"
+            ));
+            match self.begin_release(&vm, "acquire-interrupted-by-restart", false) {
+                Ok(_) => reconciled.push(vm),
+                Err(error) => self.log(&format!(
+                    "WARN: startup reconciliation of {vm} incomplete: {error}"
+                )),
+            }
+        }
+        Ok(reconciled)
+    }
+
     /// Run the garbage collector forever.
     pub fn gc_loop(self: Arc<Self>) {
         loop {
