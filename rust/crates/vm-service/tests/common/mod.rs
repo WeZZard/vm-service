@@ -292,7 +292,9 @@ exit 0
 /// Mirrors `tests/integration/_daemon_main.py::fake_ssh` where the subprocess
 /// boundary permits: the secrets probe answers `OK`, any stdin script answers
 /// `script-ran`, `true` answers empty success, a remote command containing
-/// `false` exits 1, and anything else echoes `ran: <remote>`.
+/// `false` exits 1, and anything else echoes `ran: <remote>`. A remote command
+/// containing `fixture-sleep` replaces the shim with `sleep 60`, standing in
+/// for a guest command that runs far longer than any test.
 ///
 /// Deviation (forced): the Python fake returned `str(timeout)` for the
 /// `fixture-timeout` sentinel because it received the timeout as an argument.
@@ -304,6 +306,9 @@ set -u
 root="${FAKE_ROOT:-${TART_HOME:-/tmp}}"
 mkdir -p "$root"
 printf '%s\n' "$*" >> "$root/ssh-calls.log"
+case "$*" in
+  *fixture-sleep*) exec sleep 60 ;;
+esac
 last=""
 for arg in "$@"; do last="$arg"; done
 input=""
@@ -335,13 +340,18 @@ exit 0
 /// The last two arguments are source and destination. A destination with a
 /// remote prefix (`user@host:path`) stores the source bytes; a source with a
 /// remote prefix restores them. This is what makes the daemon's real
-/// `verify_transfer` checksum check pass without a guest.
+/// `verify_transfer` checksum check pass without a guest. A path containing
+/// `fixture-sleep` replaces the shim with `sleep 60`, standing in for a
+/// transfer that runs far longer than any test.
 pub const SCP_SHIM: &str = r#"#!/bin/sh
 set -u
 root="${FAKE_ROOT:-${TART_HOME:-/tmp}}"
 store="$root/scp-store"
 mkdir -p "$store"
 printf '%s\n' "$*" >> "$root/scp-calls.log"
+case "$*" in
+  *fixture-sleep*) exec sleep 60 ;;
+esac
 src=""; dst=""
 for arg in "$@"; do
   src="$dst"; dst="$arg"

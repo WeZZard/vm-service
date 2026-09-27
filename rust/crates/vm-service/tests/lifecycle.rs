@@ -206,3 +206,128 @@ Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
         "the rollback was not logged: {log}"
     );
 }
+
+/// Acquire a lease, start a guest operation whose subprocess sleeps far
+/// longer than the test (the `fixture-sleep` shims), release the lease while
+/// it runs, and return the operation's response and the VM name.
+fn release_during(route: &str, body: Value) -> (common::Response, String) {
+    use std::time::{Duration, Instant};
+
+    let fixture = LegacyFixture::new();
+    let _daemon = fixture.start_daemon();
+    let response = fixture.request(
+        "POST",
+        "/acquire",
+        Some(&json!({"purpose": "preempted", "image": "ubuntu2404", "env": "none"})),
+    );
+    assert_eq!(response.status, 200, "{}", response.body);
+    let vm = response.body["vm"].as_str().expect("vm").to_string();
+
+    let port = fixture.port();
+    let path = format!("/vms/{vm}/{route}");
+    let operation = std::thread::spawn(move || {
+        common::http_timeout(
+            port,
+            "POST",
+            &path,
+            Some(&body),
+            None,
+            Duration::from_secs(90),
+        )
+    });
+    let log = if route == "exec" {
+        "ssh-calls.log"
+    } else {
+        "scp-calls.log"
+    };
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !std::fs::read_to_string(fixture.tart_home.join(log))
+        .unwrap_or_default()
+        .contains("fixture-sleep")
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the guest operation never started"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let started = Instant::now();
+    let released = common::try_http_timeout(
+        port,
+        "POST",
+        &format!("/vms/{vm}/release"),
+        Some(&json!({})),
+        None,
+        Duration::from_secs(10),
+    );
+    let elapsed = started.elapsed();
+    let released = released.unwrap_or_else(|error| {
+        panic!("release did not answer within 10 s while {route} was running: {error}")
+    });
+    assert_eq!(released.status, 200, "{}", released.body);
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "release waited {elapsed:?} for the running {route}"
+    );
+    let outcome = operation.join().expect("operation thread");
+    assert!(
+        !fixture.read_state().contains_key(&vm),
+        "the released lease is still recorded"
+    );
+    let calls = fixture.tart_calls();
+    assert!(
+        calls.contains(&format!("delete {vm}")),
+        "the released clone was not deleted: {calls}"
+    );
+    (outcome, vm)
+}
+
+/// V4: a release must preempt a running guest command. The per-VM operation
+/// lock was held for the whole SSH call and release waited on it, so a long
+/// command blocked its own release (and GC) for as long as it ran.
+#[test]
+fn release_preempts_a_running_exec() {
+    let (outcome, vm) = release_during("exec", json!({"argv": ["fixture-sleep"], "timeout": 3600}));
+    assert_eq!(outcome.status, 409, "{}", outcome.body);
+    let error = outcome.body["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains(&format!("command cancelled by release of {vm}")),
+        "{error}"
+    );
+}
+
+/// V4: a release must preempt a running push, which holds the same lock.
+#[test]
+fn release_preempts_a_running_push() {
+    let source = tempfile::NamedTempFile::new().expect("push source");
+    let (outcome, vm) = release_during(
+        "push",
+        json!({"local_path": source.path(), "remote_path": "/tmp/fixture-sleep"}),
+    );
+    assert_eq!(outcome.status, 409, "{}", outcome.body);
+    let error = outcome.body["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains(&format!("transfer cancelled by release of {vm}")),
+        "{error}"
+    );
+}
+
+/// V4: a release must preempt a running pull, which holds the same lock.
+#[test]
+fn release_preempts_a_running_pull() {
+    let destination = tempfile::tempdir().expect("pull destination");
+    let (outcome, vm) = release_during(
+        "pull",
+        json!({
+            "local_path": destination.path().join("pulled"),
+            "remote_path": "/tmp/fixture-sleep",
+        }),
+    );
+    assert_eq!(outcome.status, 409, "{}", outcome.body);
+    let error = outcome.body["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains(&format!("transfer cancelled by release of {vm}")),
+        "{error}"
+    );
+}
