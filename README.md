@@ -241,9 +241,14 @@ shared daemon; restart remains an explicit operator action.
 - `POST /vms/<name>/exec` accepts a positive `timeout` in seconds and defaults to
   600 seconds. The daemon forwards the requested value to the SSH subprocess
   without imposing a shorter deadline.
+- The maximum `timeout` is 4200 seconds. A larger value is rejected before any
+  SSH process starts, because a running command holds the lease's operation
+  lock, and release and GC wait on that lock. See
+  [Lease lifecycle fixes](docs/lifecycle-fixes.md).
 - A receiver running a command for up to 3600 seconds must include its capture
   and reporting allowance in this timeout. For example, a 120-second allowance
-  requires a 3720-second request timeout. Longer explicit requests remain valid.
+  requires a 3720-second request timeout. mcp-vm-relay's largest request,
+  4080 seconds, is within the maximum.
 - The HTTP caller must set a transport timeout longer than the complete receiver
   budget and must continue heartbeating the lease during long operations.
 

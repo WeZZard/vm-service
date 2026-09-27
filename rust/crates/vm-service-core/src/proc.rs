@@ -94,6 +94,14 @@ pub fn run_capture(
             return result;
         }
     }
+    // Compute the deadline before spawning, so an unrepresentable timeout is
+    // refused without leaving a child process behind.
+    let deadline = Instant::now().checked_add(timeout).ok_or_else(|| {
+        ProcError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "timeout exceeds the representable deadline",
+        ))
+    })?;
     command
         .stdin(if stdin.is_some() {
             Stdio::piped()
@@ -126,7 +134,6 @@ pub fn run_capture(
         buffer
     });
 
-    let deadline = Instant::now() + timeout;
     let status = loop {
         match child.try_wait().map_err(ProcError::Io)? {
             Some(status) => break status,
