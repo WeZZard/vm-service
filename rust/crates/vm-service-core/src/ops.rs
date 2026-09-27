@@ -1102,7 +1102,7 @@ release it and acquire a new lease"
                     "GC: reclaiming {vm} (VM not running for {ABSENT_PASSES_BEFORE_RECLAIM} \
 consecutive passes)"
                 ));
-                if let Err(error) = self.release(&vm, "vm-not-running", false) {
+                if let Err(error) = self.gc_release(&vm, "vm-not-running", false) {
                     self.log(&format!("WARN: GC release of {vm} failed: {error}"));
                 }
                 if let Ok(mut counter) = self.absent_passes.lock() {
@@ -1110,12 +1110,36 @@ consecutive passes)"
                 }
             } else {
                 self.log(&format!("GC: reclaiming {vm} (TTL + grace expired)"));
-                if let Err(error) = self.release(&vm, "ttl-expired", true) {
+                if let Err(error) = self.gc_release(&vm, "ttl-expired", true) {
                     self.log(&format!("WARN: GC release of {vm} failed: {error}"));
                 }
             }
         }
         Ok(())
+    }
+
+    /// Release a lease from GC without waiting on its operation lock.
+    ///
+    /// GC commits `releasing` and sets the release flag exactly as
+    /// [`Service::release`] does, which preempts a running exec, push, or
+    /// pull. If another thread still holds the VM's operation lock, GC logs
+    /// the VM and defers its teardown: the record stays `releasing`, and the
+    /// next pass reclaims it. One busy VM therefore never delays the
+    /// reclamation of the others; see `docs/lifecycle-fixes.md` (V4).
+    fn gc_release(&self, vm: &str, reason: &str, expired_only: bool) -> OpResult<()> {
+        self.get_record(vm)?;
+        self.log(&format!("release requested for {vm} (reason: {reason})"));
+        if !self.commit_release(vm, expired_only)? {
+            return Ok(());
+        }
+        let lock = self.operation_lock(vm);
+        let Some(_guard) = lock.try_lock() else {
+            self.log(&format!(
+                "GC: {vm} is busy with another operation; teardown deferred to the next pass"
+            ));
+            return Ok(());
+        };
+        self.destroy_lease(vm, reason).map(|_| ())
     }
 
     /// Release every `pending` or `provisioning` record left by a previous

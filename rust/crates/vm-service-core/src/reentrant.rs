@@ -54,6 +54,26 @@ impl ReentrantLock {
     }
 }
 
+impl ReentrantLock {
+    /// Acquire the lock only if no other thread holds it.
+    ///
+    /// Returns `None` instead of waiting when another thread owns the lock.
+    /// The owning thread always succeeds, as with [`ReentrantLock::lock`].
+    pub fn try_lock(&self) -> Option<ReentrantGuard<'_>> {
+        let current = thread::current().id();
+        let mut state = self.state.lock().expect("reentrant lock state");
+        match *state {
+            None => *state = Some((current, 1)),
+            Some((owner, depth)) if owner == current => *state = Some((owner, depth + 1)),
+            Some(_) => return None,
+        }
+        Some(ReentrantGuard {
+            lock: self,
+            thread: current,
+        })
+    }
+}
+
 /// One held level of a [`ReentrantLock`].
 ///
 /// Dropping the guard releases one level; the lock becomes available to other
