@@ -168,7 +168,8 @@ impl Service {
         let source_for_record = source.to_string();
         let base_for_record = base.clone();
         let chosen_for_record = chosen.clone();
-        let vm = self.state.update(
+        let slot_holders = std::cell::RefCell::new(None::<String>);
+        let reservation = self.state.update(
             |data| {
                 let vms = vms_mut(data);
                 for record in vms.values() {
@@ -193,6 +194,15 @@ impl Service {
                         })
                         .count();
                     if mac_active >= MAX_MACOS_RUNNING {
+                        let holders = active_records
+                            .iter()
+                            .filter(|record| {
+                                record.get("image_kind").and_then(Value::as_str) == Some("macos")
+                            })
+                            .map(|record| describe_holder(record))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        *slot_holders.borrow_mut() = Some(holders);
                         let extra = match self.host.host_macos_guests() {
                             Some(guests) => format!(
                                 "; host-wide Virtualization.framework guests: {guests} ({} not ours)",
@@ -298,7 +308,21 @@ impl Service {
                 Ok(vm.clone())
             },
             Option::<fn(&Map<String, Value>)>::None,
-        )?;
+        );
+        let vm = match reservation {
+            Ok(vm) => vm,
+            Err(error) => {
+                let holders = slot_holders
+                    .borrow()
+                    .as_ref()
+                    .map(|holders| format!("; macOS slots held by: {holders}"))
+                    .unwrap_or_default();
+                self.log(&format!(
+                    "acquire refused (purpose={purpose}, image={image}): {error}{holders}"
+                ));
+                return Err(error);
+            }
+        };
 
         // Phase 2 holds only this VM's operation lock, not the state lock.
         let lock = self.operation_lock(&vm);
@@ -568,6 +592,7 @@ impl Service {
     /// Public release entry point, mirroring the Python lock decision.
     pub fn release(&self, vm: &str, reason: &str, expired_only: bool) -> OpResult<Value> {
         let record = self.get_record(vm)?;
+        self.log(&format!("release requested for {vm} (reason: {reason})"));
         let vnc = record
             .get("configuration")
             .and_then(|config| config.get("effective"))
@@ -1126,6 +1151,17 @@ the daemon restart"
             }
             std::thread::sleep(std::time::Duration::from_secs(GC_INTERVAL_S));
         }
+    }
+}
+
+/// Describe a lease holding a macOS slot for the refused-acquisition log:
+/// its name, state, and grace deadline when it is past its TTL.
+fn describe_holder(record: &Value) -> String {
+    let vm = record.get("vm").and_then(Value::as_str).unwrap_or("?");
+    let state = record.get("state").and_then(Value::as_str).unwrap_or("?");
+    match record.get("grace_until").and_then(Value::as_f64) {
+        Some(grace) => format!("{vm} ({state}, grace until {})", format_gmtime(grace)),
+        None => format!("{vm} ({state})"),
     }
 }
 
