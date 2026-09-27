@@ -605,6 +605,49 @@ fn test_startup_reconciliation_releases_interrupted_acquisitions() {
     assert!(!fixture.host.tart.exists(&interrupted));
 }
 
+/// V6 (owner decision pending): a lease past its TTL stays active for the
+/// `GRACE_HOURS` grace period and keeps counting toward `MAX_MACOS_RUNNING`.
+/// Two expired macOS leases in grace therefore refuse every new macOS
+/// acquisition for up to six hours. This test documents the current behavior
+/// and passes when run with `--ignored`; see `docs/lifecycle-fixes.md`.
+#[test]
+#[ignore = "waiting for the owner's decision: whether leases in the 6 h grace period keep \
+            their macOS slots, and how long grace should last (docs/lifecycle-fixes.md, V6)"]
+fn grace_leases_hold_macos_slots_for_six_hours() {
+    assert_eq!(vm_service_core::ops::GRACE_HOURS, 6);
+    assert_eq!(vm_service_core::ops::MAX_MACOS_RUNNING, 2);
+    let fixture = common::Fixture::new();
+    let mut expired = Vec::new();
+    for purpose in ["first", "second"] {
+        let rec = fixture.acquire(purpose, "macos26", "none");
+        let vm = rec["vm"].as_str().expect("vm name").to_string();
+        set_fields(
+            &fixture.service,
+            &vm,
+            &[("ttl_expires_at", json!(unix_now() - 1.0))],
+        );
+        expired.push(vm);
+    }
+    let now = unix_now();
+    fixture.service.gc_once().expect("gc");
+    for vm in &expired {
+        let r = persisted(&fixture, vm);
+        assert_eq!(r["state"], json!("running"), "a grace lease stays active");
+        let grace = r["grace_until"].as_f64().expect("grace_until");
+        assert!(
+            (grace - (now + 6.0 * 3600.0)).abs() < 60.0,
+            "grace lasts six hours: {r}"
+        );
+    }
+    let error = fixture
+        .try_acquire("third", "macos26", "none", &json!(1), true)
+        .expect_err("expired leases in grace still hold both macOS slots");
+    assert!(
+        error.to_string().contains("macOS VM limit reached"),
+        "{error}"
+    );
+}
+
 #[test]
 fn test_heartbeat_unknown_vm() {
     let fixture = common::Fixture::new();
