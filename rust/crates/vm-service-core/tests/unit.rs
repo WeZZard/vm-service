@@ -456,6 +456,48 @@ fn test_heartbeat_resets_ttl_and_grace() {
     assert!((remaining - 4.0).abs() <= 0.02, "remaining={remaining}");
 }
 
+/// V5: a heartbeat without `ttl_hours` renews the lease for its own initial
+/// TTL. Before the fix it cleared the grace deadline but kept the expired TTL,
+/// so the next GC pass started a fresh grace period and repeated bare
+/// heartbeats kept an expired VM forever.
+#[test]
+fn test_bare_heartbeat_renews_expired_ttl() {
+    let fixture = common::Fixture::new();
+    let rec = fixture
+        .try_acquire("t", "ubuntu2404", "none", &json!(2), true)
+        .expect("acquire");
+    let vm = rec["vm"].as_str().expect("vm name").to_string();
+    let now = unix_now();
+    set_fields(
+        &fixture.service,
+        &vm,
+        &[
+            ("ttl_expires_at", json!(now - 100.0)),
+            ("grace_until", json!(now + 60.0)),
+            ("warned", json!(true)),
+        ],
+    );
+    let out = fixture.service.heartbeat(&vm, None).expect("heartbeat");
+    fixture.service.gc_once().expect("gc");
+    let r = persisted(&fixture, &vm);
+    assert!(
+        r["ttl_expires_at"].as_f64().expect("ttl") > now + 3600.0,
+        "bare heartbeat left the TTL expired: {r}"
+    );
+    assert!(
+        r["grace_until"].is_null(),
+        "GC restarted grace after a bare heartbeat: {r}"
+    );
+    assert_eq!(r["warned"], json!(false));
+    let remaining = out["ttl_hours_remaining"].as_f64().expect("remaining");
+    assert!((remaining - 2.0).abs() <= 0.02, "remaining={remaining}");
+    assert_eq!(
+        r["configuration"]["effective"]["initial_ttl_hours"],
+        json!(2.0),
+        "heartbeat rewrote the initial TTL"
+    );
+}
+
 #[test]
 fn test_heartbeat_unknown_vm() {
     let fixture = common::Fixture::new();
