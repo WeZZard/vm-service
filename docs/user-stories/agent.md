@@ -56,8 +56,9 @@ The agent's contract with the service is **lease-based**: it asks for a VM, work
 **As an** agent, **I want** to heartbeat my lease, **so that** long tasks are not reclaimed mid-flight.
 
 - `POST /vms/<vm>/heartbeat` with `ttl_hours` (0.1–720) resets the TTL and clears any grace/warn state.
+- `POST /vms/<vm>/heartbeat` without `ttl_hours` resets the TTL to the lease's own initial `ttl_hours`, so `vmctl heartbeat <vm>` keeps a lease alive.
 
-**Tests:** `TestTtlGc` (unit: heartbeat resets, bounds, unknown VM).
+**Tests:** `TestTtlGc` (unit: heartbeat resets, bounds, unknown VM), `test_bare_heartbeat_renews_expired_ttl` (unit).
 
 ## US7 — See capacity before asking
 

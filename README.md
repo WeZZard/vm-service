@@ -298,6 +298,10 @@ the daemon, so `vm-service` does not need to be on PATH.)
   Cloning a 200 GB-provisioned macOS base takes minutes; allow a ≥10-minute
   client timeout.
 - `ttl_hours` (default 24, cap 720): lease lifetime. Long jobs must heartbeat.
+- `POST /vms/<name>/heartbeat` renews the TTL from now and clears any grace
+  state. With `ttl_hours` it renews for that many hours; without it, the lease
+  is renewed for its own initial `ttl_hours`. The recorded initial TTL is not
+  changed.
 - Failure rolls back: stop, delete, verify absence, then remove the key and lease.
   Failed teardown retains the `releasing` record and credentials for retry.
 

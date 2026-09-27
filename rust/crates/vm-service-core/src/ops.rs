@@ -675,6 +675,7 @@ impl Service {
     /// Renew a lease TTL and clear the grace warning.
     pub fn heartbeat(&self, vm: &str, ttl_hours: Option<&Value>) -> OpResult<Value> {
         let grant = std::cell::Cell::new(None::<Instant>);
+        let renewal = std::cell::Cell::new(None::<(f64, f64)>);
         self.state.update(
             |data| {
                 let record = vms_mut(data)
@@ -686,20 +687,27 @@ impl Service {
                         "{vm} is releasing; renewal cannot cancel committed teardown"
                     )));
                 }
-                if let Some(ttl_value) = ttl_hours {
-                    let resolved =
-                        acquisition_options::resolve(None, None, None, true, ttl_value, false)
-                            .map_err(|error| OpError::new(error.to_string()))?;
-                    let ttl = resolved
-                        .get("effective")
-                        .and_then(|value| value.get("initial_ttl_hours"))
-                        .and_then(Value::as_f64)
-                        .unwrap_or(24.0);
-                    record["ttl_expires_at"] = number(unix_now() + ttl * 3600.0);
-                    grant.set(Some(
-                        Instant::now() + std::time::Duration::from_secs_f64(ttl * 3600.0),
-                    ));
-                }
+                let ttl = match ttl_hours {
+                    Some(ttl_value) => {
+                        let resolved =
+                            acquisition_options::resolve(None, None, None, true, ttl_value, false)
+                                .map_err(|error| OpError::new(error.to_string()))?;
+                        resolved
+                            .get("effective")
+                            .and_then(|value| value.get("initial_ttl_hours"))
+                            .and_then(Value::as_f64)
+                            .unwrap_or(DEFAULT_TTL_HOURS)
+                    }
+                    // A bare heartbeat renews the lease for its own initial
+                    // TTL; see `docs/lifecycle-fixes.md` (V5).
+                    None => lease_initial_ttl_hours(record),
+                };
+                let expires = unix_now() + ttl * 3600.0;
+                record["ttl_expires_at"] = number(expires);
+                grant.set(Some(
+                    Instant::now() + std::time::Duration::from_secs_f64(ttl * 3600.0),
+                ));
+                renewal.set(Some((ttl, expires)));
                 record["grace_until"] = Value::Null;
                 record["warned"] = Value::Bool(false);
                 Ok(())
@@ -716,6 +724,12 @@ impl Service {
                 }
             }),
         )?;
+        if let Some((ttl, expires)) = renewal.get() {
+            self.log(&format!(
+                "heartbeat {vm}: TTL renewed for {ttl}h (until {})",
+                format_gmtime(expires)
+            ));
+        }
         let now = unix_now();
         let mut record = self.get_record(vm)?;
         if let Some(object) = record.as_object_mut() {
@@ -961,6 +975,21 @@ impl Service {
             std::thread::sleep(std::time::Duration::from_secs(GC_INTERVAL_S));
         }
     }
+}
+
+/// The acquisition default TTL, in hours, used when a record carries none.
+const DEFAULT_TTL_HOURS: f64 = 24.0;
+
+/// The lease's own initial TTL: its resolved `initial_ttl_hours`, or the
+/// acquisition default for a legacy record without a configuration report.
+fn lease_initial_ttl_hours(record: &Value) -> f64 {
+    record
+        .get("configuration")
+        .and_then(|config| config.get("effective"))
+        .and_then(|effective| effective.get("initial_ttl_hours"))
+        .and_then(Value::as_f64)
+        .filter(|ttl| ttl.is_finite() && (0.1..=720.0).contains(ttl))
+        .unwrap_or(DEFAULT_TTL_HOURS)
 }
 
 fn valid_purpose(purpose: &str) -> bool {
