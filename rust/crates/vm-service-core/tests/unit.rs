@@ -648,6 +648,44 @@ fn grace_leases_hold_macos_slots_for_six_hours() {
     );
 }
 
+/// Logging: a refused acquisition names the VMs that hold the macOS slots,
+/// and a release request is logged with its reason. The HTTP error text is
+/// unchanged.
+#[test]
+fn test_refused_acquire_and_release_requests_are_logged() {
+    let fixture = common::Fixture::new();
+    let first = fixture.acquire("first", "macos26", "none");
+    let first = first["vm"].as_str().expect("vm name").to_string();
+    let second = fixture.acquire("second", "macos26", "none");
+    let second = second["vm"].as_str().expect("vm name").to_string();
+    let error = fixture
+        .try_acquire("third", "macos26", "none", &json!(1), true)
+        .expect_err("macOS limit");
+    assert!(
+        error
+            .to_string()
+            .starts_with("macOS VM limit reached (2 active); release one first"),
+        "{error}"
+    );
+    fixture
+        .service
+        .release(&first, "done", false)
+        .expect("release");
+
+    let log = std::fs::read_to_string(&fixture.service.config.log_file).expect("service log");
+    let refusal = log
+        .lines()
+        .find(|line| line.contains("acquire refused"))
+        .unwrap_or_else(|| panic!("refused acquire not logged: {log}"));
+    assert!(refusal.contains("purpose=third"), "{refusal}");
+    assert!(refusal.contains(&first), "{refusal}");
+    assert!(refusal.contains(&second), "{refusal}");
+    assert!(
+        log.contains(&format!("release requested for {first} (reason: done)")),
+        "{log}"
+    );
+}
+
 #[test]
 fn test_heartbeat_unknown_vm() {
     let fixture = common::Fixture::new();
