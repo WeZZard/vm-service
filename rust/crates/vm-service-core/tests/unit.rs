@@ -548,6 +548,39 @@ fn test_gc_reclaims_a_running_lease_whose_vm_is_gone() {
     );
 }
 
+/// V2: a VM that is seen running again resets the absent count, so only
+/// consecutive misses reclaim a lease.
+#[test]
+fn test_gc_absent_count_resets_when_vm_runs_again() {
+    let fixture = common::Fixture::new();
+    let rec = fixture.acquire("t", "ubuntu2404", "none");
+    let vm = rec["vm"].as_str().expect("vm name").to_string();
+    let set_running = |running: bool| {
+        fixture
+            .host
+            .tart
+            .vms
+            .lock()
+            .expect("vms")
+            .insert(vm.clone(), running);
+    };
+    set_running(false);
+    fixture.service.gc_once().expect("gc");
+    set_running(true);
+    fixture.service.gc_once().expect("gc");
+    set_running(false);
+    fixture.service.gc_once().expect("gc");
+    assert!(
+        fixture.read_state().contains_key(&vm),
+        "non-consecutive misses reclaimed the lease"
+    );
+    let log = std::fs::read_to_string(&fixture.service.config.log_file).expect("service log");
+    assert!(
+        log.contains(&format!("LEASE WARN: {vm} is recorded running")),
+        "{log}"
+    );
+}
+
 #[test]
 fn test_heartbeat_unknown_vm() {
     let fixture = common::Fixture::new();

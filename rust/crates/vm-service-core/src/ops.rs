@@ -26,6 +26,10 @@ pub const GRACE_HOURS: i64 = 6;
 /// (a 3600 s command, a 180 s receiver allowance, and a 300 s snapshot
 /// delay); this maximum keeps a 120 s margin. See `docs/lifecycle-fixes.md`.
 pub const MAX_EXEC_TIMEOUT_S: i64 = 4200;
+/// Consecutive GC passes a `running` record's VM may be missing from Tart's
+/// running set before GC reclaims the lease. Two passes tolerate a record
+/// that became `running` between the `tart list` snapshot and the state read.
+pub const ABSENT_PASSES_BEFORE_RECLAIM: u32 = 2;
 
 fn vms_mut(data: &mut Map<String, Value>) -> &mut Map<String, Value> {
     data.get_mut("vms")
@@ -674,6 +678,36 @@ impl Service {
 
     /// Renew a lease TTL and clear the grace warning.
     pub fn heartbeat(&self, vm: &str, ttl_hours: Option<&Value>) -> OpResult<Value> {
+        // A renewal must not keep a lease alive whose VM is gone. Tart is
+        // asked outside the state lock; an unknown record falls through to the
+        // update below, which reports it.
+        let recorded_running = self
+            .get_record(vm)
+            .ok()
+            .and_then(|record| {
+                record
+                    .get("state")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .is_some_and(|state| state == "running");
+        if recorded_running {
+            match self.host.vm_running(vm) {
+                Ok(true) => {}
+                Ok(false) => {
+                    self.log(&format!(
+                        "heartbeat refused for {vm}: Tart reports the VM stopped or absent"
+                    ));
+                    return Err(OpError::new(format!(
+                        "{vm} is not running on the host (Tart reports it stopped or absent); \
+release it and acquire a new lease"
+                    )));
+                }
+                Err(error) => self.log(&format!(
+                    "WARN: heartbeat {vm}: liveness check unavailable ({error}); renewing anyway"
+                )),
+            }
+        }
         let grant = std::cell::Cell::new(None::<Instant>);
         let renewal = std::cell::Cell::new(None::<(f64, f64)>);
         self.state.update(
@@ -913,7 +947,42 @@ impl Service {
     pub fn gc_once(&self) -> OpResult<()> {
         let now = unix_now();
         let mut actions: Vec<(String, &'static str, Option<f64>)> = Vec::new();
-        let _ = &mut actions;
+        // One Tart snapshot per pass, taken outside the state lock and only
+        // after every record passed the environment check, so a mismatched
+        // store never reaches Tart. When Tart cannot be asked, liveness is not
+        // judged in this pass.
+        let snapshot = self.state.read()?;
+        let mut any_running = false;
+        if let Some(records) = snapshot.get("vms").and_then(Value::as_object) {
+            for record in records.values() {
+                self.state.require_lease_environment(record)?;
+                any_running |= record.get("state").and_then(Value::as_str) == Some("running");
+            }
+        }
+        let listing = if any_running {
+            Some(self.host.tart_list())
+        } else {
+            None
+        };
+        let live: Option<std::collections::HashSet<String>> = match listing {
+            None => None,
+            Some(Ok(rows)) => Some(
+                rows.into_iter()
+                    .filter(|(_, state)| state == "running")
+                    .map(|(name, _)| name)
+                    .collect(),
+            ),
+            Some(Err(error)) => {
+                self.log(&format!("WARN: GC liveness check skipped: {error}"));
+                None
+            }
+        };
+        let previous_absent = self
+            .absent_passes
+            .lock()
+            .map_err(|_| OpError::new("absent-pass counter poisoned"))?
+            .clone();
+        let mut absent: std::collections::HashMap<String, u32> = Default::default();
         self.state.update(
             |data| {
                 for (vm, record) in vms_mut(data).iter_mut() {
@@ -925,6 +994,17 @@ impl Service {
                     }
                     if !crate::lines::ACTIVE_STATES.contains(&state) {
                         continue;
+                    }
+                    if let Some(live) = &live {
+                        if state == "running" && !live.contains(vm) {
+                            let passes = previous_absent.get(vm).copied().unwrap_or(0) + 1;
+                            absent.insert(vm.clone(), passes);
+                            if passes >= ABSENT_PASSES_BEFORE_RECLAIM {
+                                actions.push((vm.clone(), "reclaim-absent", None));
+                                continue;
+                            }
+                            actions.push((vm.clone(), "absent", Some(passes as f64)));
+                        }
                     }
                     let ttl = record
                         .get("ttl_expires_at")
@@ -950,12 +1030,42 @@ impl Service {
             },
             Option::<fn(&Map<String, Value>)>::None,
         )?;
+        if live.is_some() || !any_running {
+            // Records no longer absent (or gone) drop their count.
+            if let Ok(mut counter) = self.absent_passes.lock() {
+                *counter = absent;
+            }
+        }
         for (vm, action, grace) in actions {
             if action == "warn" {
                 self.log(&format!(
                     "LEASE WARN: {vm} past TTL; grace until {}",
                     grace.map(format_gmtime).unwrap_or_default()
                 ));
+            } else if action == "absent" {
+                self.log(&format!(
+                    "LEASE WARN: {vm} is recorded running but Tart reports it stopped or absent \
+(pass {} of {ABSENT_PASSES_BEFORE_RECLAIM})",
+                    grace.unwrap_or(0.0) as u32
+                ));
+            } else if action == "reclaim-absent" {
+                if matches!(self.host.vm_running(&vm), Ok(true)) {
+                    self.log(&format!("GC: {vm} is running again; not reclaiming"));
+                    if let Ok(mut counter) = self.absent_passes.lock() {
+                        counter.remove(&vm);
+                    }
+                    continue;
+                }
+                self.log(&format!(
+                    "GC: reclaiming {vm} (VM not running for {ABSENT_PASSES_BEFORE_RECLAIM} \
+consecutive passes)"
+                ));
+                if let Err(error) = self.release(&vm, "vm-not-running", false) {
+                    self.log(&format!("WARN: GC release of {vm} failed: {error}"));
+                }
+                if let Ok(mut counter) = self.absent_passes.lock() {
+                    counter.remove(&vm);
+                }
             } else {
                 self.log(&format!("GC: reclaiming {vm} (TTL + grace expired)"));
                 if let Err(error) = self.release(&vm, "ttl-expired", true) {

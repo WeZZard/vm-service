@@ -302,6 +302,9 @@ the daemon, so `vm-service` does not need to be on PATH.)
   state. With `ttl_hours` it renews for that many hours; without it, the lease
   is renewed for its own initial `ttl_hours`. The recorded initial TTL is not
   changed.
+- A heartbeat on a `running` lease whose VM Tart reports stopped or absent
+  fails, and the TTL is not renewed. GC releases such a lease after two
+  consecutive passes (about two minutes) that find its VM not running.
 - Failure rolls back: stop, delete, verify absence, then remove the key and lease.
   Failed teardown retains the `releasing` record and credentials for retry.
 

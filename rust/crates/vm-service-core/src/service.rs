@@ -50,6 +50,9 @@ pub struct Service {
     pub host: Arc<dyn Host>,
     associations: Mutex<Associations>,
     operation_locks: Mutex<HashMap<String, Arc<ReentrantLock>>>,
+    /// Consecutive GC passes in which a `running` record's VM was not running,
+    /// keyed by VM name. Held in memory only; see `docs/lifecycle-fixes.md`.
+    pub(crate) absent_passes: Mutex<HashMap<String, u32>>,
 }
 
 impl Service {
@@ -98,6 +101,7 @@ impl Service {
             host,
             associations: Mutex::new(Associations::default()),
             operation_locks: Mutex::new(HashMap::new()),
+            absent_passes: Mutex::new(HashMap::new()),
         }
     }
 
