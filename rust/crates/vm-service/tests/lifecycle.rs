@@ -104,3 +104,105 @@ fn startup_reconciles_acquisitions_interrupted_by_a_restart() {
         "reconciliation was not logged: {log}"
     );
 }
+
+/// Reset a TCP connection instead of closing it gracefully, so the daemon's
+/// next write on it fails, as it does when a client times out and its socket
+/// is torn down.
+fn reset(stream: std::net::TcpStream) {
+    use std::os::fd::AsRawFd;
+    let linger = libc::linger {
+        l_onoff: 1,
+        l_linger: 0,
+    };
+    // SAFETY: `setsockopt` reads `linger` for the duration of the call on a
+    // descriptor owned by `stream`.
+    let rc = unsafe {
+        libc::setsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_LINGER,
+            std::ptr::addr_of!(linger).cast(),
+            std::mem::size_of::<libc::linger>() as libc::socklen_t,
+        )
+    };
+    assert_eq!(rc, 0, "setsockopt(SO_LINGER)");
+    drop(stream);
+}
+
+/// V3: an acquisition that completes after its client has gone must not leave
+/// a lease that nobody knows about. The daemon ignored the result of writing
+/// the response, so the new lease held its slot until TTL + grace.
+#[test]
+fn undelivered_acquire_response_releases_the_new_lease() {
+    use std::io::Write;
+    use std::time::{Duration, Instant};
+
+    let fixture = LegacyFixture::new();
+    let _daemon = fixture.start_daemon();
+
+    let body = json!({"purpose": "abandoned", "image": "ubuntu2404", "env": "none"}).to_string();
+    let request = format!(
+        "POST /acquire HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\
+Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len(),
+        port = fixture.port(),
+    );
+    let mut stream = std::net::TcpStream::connect(("127.0.0.1", fixture.port())).expect("connect");
+    stream.write_all(request.as_bytes()).expect("send acquire");
+    stream.flush().expect("flush");
+
+    let lease = |state: &serde_json::Map<String, Value>| {
+        state
+            .values()
+            .find(|record| record["purpose"] == json!("abandoned"))
+            .cloned()
+    };
+    // Wait until the daemon has read the request and reserved the lease, then
+    // give up on the response the way a timed-out client does.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let vm = loop {
+        if let Some(record) = std::fs::read_to_string(fixture.state_file())
+            .ok()
+            .and_then(|_| lease(&fixture.read_state()))
+        {
+            break record["vm"].as_str().expect("vm").to_string();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "acquisition never reserved a lease"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    reset(stream);
+
+    // The acquisition itself still completes (about 10 s of boot settle).
+    // Once it has, the lease must not outlive the failed response.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut running_since: Option<Instant> = None;
+    loop {
+        let state = fixture.read_state();
+        match state.get(&vm) {
+            None => break,
+            Some(record) if record["state"] == json!("running") => {
+                let since = *running_since.get_or_insert_with(Instant::now);
+                assert!(
+                    since.elapsed() < Duration::from_secs(5),
+                    "the lease of an undelivered acquisition is still held: {record}"
+                );
+            }
+            Some(_) => {}
+        }
+        assert!(Instant::now() < deadline, "acquisition did not finish");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let calls = fixture.tart_calls();
+    assert!(
+        calls.contains(&format!("delete {vm}")),
+        "the clone of the undelivered lease was not deleted: {calls}"
+    );
+    let log = std::fs::read_to_string(fixture.state_dir.join("service.log")).unwrap_or_default();
+    assert!(
+        log.contains(&format!("acquire response for {vm} undelivered")),
+        "the rollback was not logged: {log}"
+    );
+}
