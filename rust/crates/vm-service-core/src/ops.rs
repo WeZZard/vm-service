@@ -89,6 +89,29 @@ impl Service {
         }
 
         let cfg = self.line_cfg(image)?;
+        // Omitted CPU and memory take the image's configured defaults.
+        let configured = |name: &str| {
+            cfg.get("defaults")
+                .and_then(|defaults| defaults.get(name))
+                .and_then(Value::as_i64)
+                .filter(|value| *value > 0)
+        };
+        let image_defaults = acquisition_options::ImageDefaults {
+            cpu: configured("cpu"),
+            memory_mb: configured("memory_mb"),
+        };
+        let configuration = acquisition_options::resolve_for_image(
+            cpu, memory_mb, disk_gb, wait, ttl_hours, vnc, image_defaults,
+        )
+        .map_err(|error| OpError::new(error.to_string()))?;
+        let effective_resource = |name: &str| {
+            configuration
+                .get("effective")
+                .and_then(|effective| effective.get(name))
+                .and_then(Value::as_i64)
+        };
+        let effective_cpu = effective_resource("cpu");
+        let effective_memory_mb = effective_resource("memory_mb");
         let kind = cfg
             .get("kind")
             .and_then(Value::as_str)
@@ -319,7 +342,7 @@ impl Service {
         // Phase 2 holds only this VM's operation lock, not the state lock.
         let lock = self.operation_lock(&vm);
         let _guard = lock.lock();
-        self.provision(&vm, &base, &cfg, chosen, cpu, memory_mb, disk_gb, wait)?;
+        self.provision(&vm, &base, &cfg, chosen, effective_cpu, effective_memory_mb, disk_gb, wait)?;
         self.get_record(&vm)
     }
 

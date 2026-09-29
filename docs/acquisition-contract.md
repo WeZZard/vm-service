@@ -20,7 +20,7 @@
 
 - The additional boolean `vnc` defaults to false. False preserves ordinary VM acquisition; true requests guest-console preparation on a fresh lease without automatically opening a viewer.
 - Existing field names and aliases, resource defaults, selected-store checks, environment-pack behavior, and source-image validation must remain compatible.
-- Omitted CPU and memory continue to resolve to 6 CPUs and 16384 MB. An omitted disk override leaves the cloned disk unchanged; reporting must not invent a measured disk size.
+- Omitted CPU and memory resolve to the image line's configured `CPU` and `MEMORY_MB` (`line.conf`). A line that does not configure a value falls back to 6 CPUs and 16384 MB. An omitted disk override leaves the cloned disk unchanged; reporting must not invent a measured disk size.
 - Resource validation accepts positive integers or null and rejects booleans, nonpositive values, fractional values, and strings before reservation. This tightens previously accidental invalid-input coercion while preserving valid values and defaults.
 - TTL validation retains the 0.1–720-hour range and numeric-string compatibility while rejecting non-finite values and invalid types.
 - `env: none` suppresses the application credential pack, not required per-lease SSH-key preparation. VNC must not require injecting the default application credentials.
@@ -33,7 +33,7 @@
 - A new acquisition receives an immutable fresh `lease_id`. It prevents accidental name reuse in console operations but does not introduce general caller authentication.
 - The `configuration` report separates `requested`, `effective`, `sources`, and `resources_applied`.
 - `requested` records normalized inputs rather than raw request bodies. `effective` records the instructions selected for provisioning, not independently measured hardware or readiness.
-- Resource origins will distinguish service defaults, source-image inheritance, and explicit requests. Existing top-level nullable resource fields remain unchanged for older clients.
+- Resource origins distinguish service defaults, image configuration, source-image inheritance, and explicit requests. Existing top-level nullable resource fields remain unchanged for older clients.
 - `resources_applied` will identify the observation source and time. A successful Tart setting command is command acknowledgment, not hardware readback or proof of subsequent boot.
 - VNC reporting will name the guest-sharing backend and console-session type separately from stock Tart version and boot mode. It will contain no password, endpoint credential, or private-key location.
 - Current expiration remains in the lease's existing expiration field. Initial requested lifetime must not be rewritten as though every heartbeat were a new acquisition.

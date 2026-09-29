@@ -2,6 +2,10 @@
 
 This list records owner decisions. The linked documents carry the design and the rationale.
 
+## 2026-09-29: image resource defaults
+
+- An acquisition that omits CPU or memory gets the image line's configured `CPU` and `MEMORY_MB`, as `vmctl images-show` reports them. The hardcoded 6 CPUs and 16384 MB apply only when the line configures no value. The owner called ignoring the configuration a bug. See [acquisition contract](acquisition-contract.md#acquisition-request-and-compatibility).
+
 ## 2026-09-27: lease lifecycle fixes
 
 - (Superseded later the same day.) Execution timeouts are capped at 4200 seconds, which is above the largest request that mcp-vm-relay sends. The owner did not approve this cap.

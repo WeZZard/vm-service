@@ -324,6 +324,8 @@ pub struct FakeHost {
     pub ssh: FakeSSH,
     /// The image map returned by `discover_lines`.
     pub lines: Map<String, Value>,
+    /// Replaces [`FakeHost::lines`] when set, for tests that change an image's configuration.
+    pub lines_override: Mutex<Option<Map<String, Value>>>,
     /// The base-VM map returned by `discover_lines`.
     pub bases: Map<String, Value>,
     /// The IP `wait_ip` reports.
@@ -363,6 +365,7 @@ impl FakeHost {
             tart: FakeTart::new(),
             ssh: FakeSSH::new(),
             lines: default_lines(),
+            lines_override: Mutex::new(None),
             bases: default_bases(),
             wait_ip_value: Mutex::new(Some(FAKE_IP.to_string())),
             wait_ssh_ok: AtomicBool::new(true),
@@ -494,7 +497,8 @@ impl Host for FakeHost {
         _cache: &mut LineCache,
         _force: bool,
     ) -> OpResult<(Map<String, Value>, Map<String, Value>)> {
-        Ok((self.lines.clone(), self.bases.clone()))
+        let lines = self.lines_override.lock().expect("lines_override").clone();
+        Ok((lines.unwrap_or_else(|| self.lines.clone()), self.bases.clone()))
     }
 
     fn home_dir(&self) -> Option<PathBuf> {

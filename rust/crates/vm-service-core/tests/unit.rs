@@ -199,6 +199,51 @@ fn test_full_lifecycle_record_and_tart_calls() {
     assert!(!vms.get("pilot-ubuntu-base").copied().unwrap_or(false));
 }
 
+/// The `tart set` arguments of the fixture's one acquisition.
+fn tart_set_args(fixture: &common::Fixture) -> Vec<String> {
+    let calls = fixture.host.tart.calls.lock().expect("calls");
+    let (_, args) = calls.iter().find(|(op, _)| op == "set").expect("tart set");
+    args[1..].to_vec()
+}
+
+#[test]
+fn test_omitted_resources_use_the_image_configuration() {
+    let fixture = common::Fixture::new();
+    let mut lines = common::default_lines();
+    lines["ubuntu2404"]["defaults"] = json!({"cpu": 4, "memory_mb": 8192, "disk_gb": null});
+    *fixture.host.lines_override.lock().expect("lines_override") = Some(lines);
+    let rec = fixture.acquire("task-a", "ubuntu2404", "none");
+    assert_eq!(tart_set_args(&fixture), ["--cpu", "4", "--memory", "8192"]);
+    let configuration = &rec["configuration"];
+    assert_eq!(configuration["effective"]["memory_mb"], json!(8192));
+    assert_eq!(configuration["sources"]["memory_mb"], json!("image-configuration"));
+    // The top-level fields still report only what the client requested.
+    assert!(rec["memory_mb"].is_null());
+}
+
+#[test]
+fn test_requested_resources_override_the_image_configuration() {
+    let fixture = common::Fixture::new();
+    let mut lines = common::default_lines();
+    lines["ubuntu2404"]["defaults"] = json!({"cpu": 4, "memory_mb": 8192, "disk_gb": null});
+    *fixture.host.lines_override.lock().expect("lines_override") = Some(lines);
+    fixture
+        .service
+        .acquire(
+            "task-a", "ubuntu2404", "none", &json!(24), Some(2), Some(4096), None, true, "nat",
+            None, "base", None, false,
+        )
+        .expect("acquire");
+    assert_eq!(tart_set_args(&fixture), ["--cpu", "2", "--memory", "4096"]);
+}
+
+#[test]
+fn test_an_image_without_resource_defaults_uses_the_service_defaults() {
+    let fixture = common::Fixture::new();
+    fixture.acquire("task-a", "ubuntu2404", "none");
+    assert_eq!(tart_set_args(&fixture), ["--cpu", "6", "--memory", "16384"]);
+}
+
 #[test]
 fn test_failure_rolls_back_clone_and_state() {
     let fixture = common::Fixture::new();

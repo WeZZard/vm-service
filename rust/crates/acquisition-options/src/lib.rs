@@ -27,6 +27,18 @@ pub enum ResolveError {
     InvalidTtl,
 }
 
+/// CPU and memory defaults configured by an image's `line.conf`.
+///
+/// A dimension is `None` when the image does not configure it, and the service
+/// default (6 CPUs, 16384 MB) applies.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ImageDefaults {
+    /// The image's `CPU`.
+    pub cpu: Option<i64>,
+    /// The image's `MEMORY_MB`.
+    pub memory_mb: Option<i64>,
+}
+
 /// Resolve a requested acquisition configuration against service defaults.
 ///
 /// `cpu`, `memory_mb`, and `disk_gb` are `None` when the caller did not request
@@ -40,6 +52,22 @@ pub fn resolve(
     wait: bool,
     ttl_hours: &Value,
     vnc: bool,
+) -> Result<Value, ResolveError> {
+    resolve_for_image(cpu, memory_mb, disk_gb, wait, ttl_hours, vnc, ImageDefaults::default())
+}
+
+/// Resolve a requested acquisition configuration against the image's defaults.
+///
+/// An omitted CPU or memory takes the image's configured value, and the
+/// service default only when the image configures none.
+pub fn resolve_for_image(
+    cpu: Option<i64>,
+    memory_mb: Option<i64>,
+    disk_gb: Option<i64>,
+    wait: bool,
+    ttl_hours: &Value,
+    vnc: bool,
+    image: ImageDefaults,
 ) -> Result<Value, ResolveError> {
     for (name, value) in [("cpu", cpu), ("memory_mb", memory_mb), ("disk_gb", disk_gb)] {
         if let Some(value) = value {
@@ -60,8 +88,8 @@ pub fn resolve(
     });
 
     let effective = json!({
-        "cpu": cpu.unwrap_or(6),
-        "memory_mb": memory_mb.unwrap_or(16384),
+        "cpu": cpu.or(image.cpu).unwrap_or(6),
+        "memory_mb": memory_mb.or(image.memory_mb).unwrap_or(16384),
         "disk_gb": disk_gb,
         "disk_mode": if disk_gb.is_none() { "inherit" } else { "resize" },
         "network": "nat",
@@ -75,11 +103,17 @@ pub fn resolve(
     });
 
     let mut sources = Map::new();
-    for (name, value) in [("cpu", cpu), ("memory_mb", memory_mb), ("disk_gb", disk_gb)] {
+    for (name, value, configured) in [
+        ("cpu", cpu, image.cpu),
+        ("memory_mb", memory_mb, image.memory_mb),
+        ("disk_gb", disk_gb, None),
+    ] {
         let source = if value.is_some() {
             "request"
         } else if name == "disk_gb" {
             "source-image"
+        } else if configured.is_some() {
+            "image-configuration"
         } else {
             "service-default"
         };
@@ -258,6 +292,36 @@ mod tests {
         assert_eq!(result["sources"]["cpu"], json!("request"));
         assert_eq!(result["sources"]["memory_mb"], json!("request"));
         assert_eq!(result["sources"]["disk_gb"], json!("request"));
+    }
+
+    #[test]
+    fn omitted_resources_take_the_image_configuration() {
+        let image = ImageDefaults { cpu: Some(4), memory_mb: Some(8192) };
+        let result = resolve_for_image(None, None, None, true, &json!(24), false, image).unwrap();
+        assert_eq!(result["effective"]["cpu"], json!(4));
+        assert_eq!(result["effective"]["memory_mb"], json!(8192));
+        assert_eq!(result["sources"]["cpu"], json!("image-configuration"));
+        assert_eq!(result["sources"]["memory_mb"], json!("image-configuration"));
+        assert_eq!(result["sources"]["disk_gb"], json!("source-image"));
+        assert!(result["requested"]["memory_mb"].is_null());
+    }
+
+    #[test]
+    fn a_request_overrides_the_image_configuration() {
+        let image = ImageDefaults { cpu: Some(4), memory_mb: Some(8192) };
+        let result =
+            resolve_for_image(Some(2), None, None, true, &json!(24), false, image).unwrap();
+        assert_eq!(result["effective"]["cpu"], json!(2));
+        assert_eq!(result["sources"]["cpu"], json!("request"));
+        assert_eq!(result["effective"]["memory_mb"], json!(8192));
+    }
+
+    #[test]
+    fn an_unconfigured_image_dimension_takes_the_service_default() {
+        let image = ImageDefaults { cpu: None, memory_mb: Some(8192) };
+        let result = resolve_for_image(None, None, None, true, &json!(24), false, image).unwrap();
+        assert_eq!(result["effective"]["cpu"], json!(6));
+        assert_eq!(result["sources"]["cpu"], json!("service-default"));
     }
 
     #[test]
