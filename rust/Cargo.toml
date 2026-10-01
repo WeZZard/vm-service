@@ -27,7 +27,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["arbitrary_precision"] }
 clap = { version = "4", features = ["derive"] }
 tiny_http = "0.12"
-sha2 = "0.10"
+sha2 = "0.11"
 base64 = "0.22"
 uuid = { version = "1", features = ["v4"] }
 libc = "0.2"
