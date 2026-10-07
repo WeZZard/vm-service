@@ -4,6 +4,7 @@
 pub mod config;
 pub mod console_api;
 pub mod error;
+pub mod guest_link;
 pub mod host;
 pub mod lines;
 pub mod ops;

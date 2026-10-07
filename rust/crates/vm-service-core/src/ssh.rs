@@ -11,7 +11,12 @@ use crate::error::{OpError, OpResult};
 use crate::proc::{code_and_text, run_capture};
 
 /// Build the `ssh` argument vector for a lease identity.
-fn ssh_argv(ip: &str, user: &str, key_dir: &Path, remote_cmd: &str) -> OpResult<Vec<String>> {
+pub(crate) fn ssh_argv(
+    ip: &str,
+    user: &str,
+    key_dir: &Path,
+    remote_cmd: &str,
+) -> OpResult<Vec<String>> {
     let mut argv = vec!["ssh".to_string()];
     argv.extend(lease_keys::key_args(key_dir).map_err(lease_error)?);
     argv.push("-T".to_string());

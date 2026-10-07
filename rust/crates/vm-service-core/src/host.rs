@@ -18,6 +18,7 @@ use serde_json::{Map, Value};
 
 use crate::config::Config;
 use crate::error::{OpError, OpResult};
+use crate::guest_link::GuestChannel;
 use crate::lines::LineCache;
 
 /// A booting guest process, observed while the hypervisor settles.
@@ -84,6 +85,26 @@ pub trait Host: Send + Sync {
         dst: &str,
         timeout_s: u64,
     ) -> Option<(i32, String)>;
+
+    /// Start `remote_cmd` in the guest with its standard input and output
+    /// carrying a guest session (`docs/arch/guest-session.md`, GS-2).
+    fn open_guest_channel(
+        &self,
+        ip: &str,
+        user: &str,
+        key_dir: &Path,
+        remote_cmd: &str,
+    ) -> OpResult<GuestChannel> {
+        let _ = (ip, user, key_dir, remote_cmd);
+        Err(OpError::new(
+            "guest session channels are unavailable on this host",
+        ))
+    }
+
+    /// The guest session agent for a guest of `kind` (GS-3).
+    fn session_agent(&self, kind: &str) -> OpResult<Vec<u8>> {
+        crate::guest_link::agent_bytes_for(kind)
+    }
 
     /// Wait for a VM to report an IP within `timeout_s`.
     fn wait_ip(&self, name: &str, timeout_s: u64) -> Option<String>;
@@ -276,6 +297,16 @@ impl Host for RealHost {
         timeout_s: u64,
     ) -> Option<(i32, String)> {
         crate::ssh::scp(&self.config, ip, user, key_dir, src, dst, timeout_s)
+    }
+
+    fn open_guest_channel(
+        &self,
+        ip: &str,
+        user: &str,
+        key_dir: &Path,
+        remote_cmd: &str,
+    ) -> OpResult<GuestChannel> {
+        crate::guest_link::ssh_channel(ip, user, key_dir, remote_cmd)
     }
 
     fn wait_ip(&self, name: &str, timeout_s: u64) -> Option<String> {

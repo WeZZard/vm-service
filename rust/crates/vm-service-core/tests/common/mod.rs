@@ -9,6 +9,8 @@
 
 #![allow(dead_code)]
 
+pub mod guest;
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -17,9 +19,10 @@ use std::sync::{Arc, Mutex};
 use serde_json::{json, Map, Value};
 use tempfile::TempDir;
 
-use vm_service_core::config::Config;
+use vm_service_core::config::{Config, GuestLink};
 use vm_service_core::console_api::ConsoleController;
 use vm_service_core::error::{OpError, OpResult};
+use vm_service_core::guest_link::{GuestChannel, START_COMMAND, UPLOAD_COMMAND};
 use vm_service_core::host::{BootProcess, Host, TartOutput};
 use vm_service_core::lines::LineCache;
 use vm_service_core::service::Service;
@@ -355,6 +358,8 @@ pub struct FakeHost {
     pub transfer_hook: Mutex<Option<TransferHook>>,
     /// The Tart store root reported to the service.
     pub tart_store: Mutex<PathBuf>,
+    /// The in-process guest behind guest session channels.
+    pub guest: guest::FakeGuest,
 }
 
 impl FakeHost {
@@ -372,7 +377,6 @@ impl FakeHost {
             stub_transfer: AtomicBool::new(true),
             boot_settle: Mutex::new(0.05),
             gauge: Mutex::new(Some(0)),
-            home,
             boot_exit: Mutex::new(None),
             ssh_hook: Mutex::new(None),
             scp_hook: Mutex::new(None),
@@ -380,6 +384,8 @@ impl FakeHost {
             bootstrap_hook: Mutex::new(None),
             transfer_hook: Mutex::new(None),
             tart_store: Mutex::new(home_tart_store),
+            guest: guest::FakeGuest::new(home.join("guest")),
+            home,
         }
     }
 
@@ -417,7 +423,29 @@ impl Host for FakeHost {
         if let Some(hook) = self.ssh_hook.lock().expect("ssh_hook").clone() {
             return hook(ip, user, key_dir, remote_cmd, stdin.as_deref(), timeout_s);
         }
+        if remote_cmd == UPLOAD_COMMAND {
+            self.guest.install(stdin.unwrap_or_default());
+            return Some((0, String::new()));
+        }
         self.ssh.ssh(remote_cmd, stdin, timeout_s)
+    }
+
+    fn open_guest_channel(
+        &self,
+        _ip: &str,
+        _user: &str,
+        _key_dir: &std::path::Path,
+        remote_cmd: &str,
+    ) -> OpResult<GuestChannel> {
+        assert_eq!(
+            remote_cmd, START_COMMAND,
+            "guest channels run the start command"
+        );
+        self.guest.open()
+    }
+
+    fn session_agent(&self, _kind: &str) -> OpResult<Vec<u8>> {
+        Ok(self.guest.offered.lock().expect("offered").clone())
     }
 
     fn scp(
@@ -498,7 +526,10 @@ impl Host for FakeHost {
         _force: bool,
     ) -> OpResult<(Map<String, Value>, Map<String, Value>)> {
         let lines = self.lines_override.lock().expect("lines_override").clone();
-        Ok((lines.unwrap_or_else(|| self.lines.clone()), self.bases.clone()))
+        Ok((
+            lines.unwrap_or_else(|| self.lines.clone()),
+            self.bases.clone(),
+        ))
     }
 
     fn home_dir(&self) -> Option<PathBuf> {
@@ -574,15 +605,24 @@ impl Fixture {
     /// `self.svc.CONSOLES = <manager>` replacement, using the same
     /// `verify_transfer` stub as [`Fixture::new`].
     pub fn with_consoles(consoles: Arc<dyn ConsoleController>) -> Self {
-        Self::build(true, Some(consoles))
+        Self::build(true, Some(consoles), GuestLink::default())
     }
 
     /// Build a fixture, optionally exercising the real transfer check.
     pub fn with_transfer_stub(stub: bool) -> Self {
-        Self::build(stub, None)
+        Self::build(stub, None, GuestLink::default())
     }
 
-    fn build(stub: bool, consoles: Option<Arc<dyn ConsoleController>>) -> Self {
+    /// Build a fixture whose guest operations use `link`.
+    pub fn with_guest_link(link: GuestLink) -> Self {
+        Self::build(true, None, link)
+    }
+
+    fn build(
+        stub: bool,
+        consoles: Option<Arc<dyn ConsoleController>>,
+        guest_link: GuestLink,
+    ) -> Self {
         let dir = tempfile::tempdir().expect("tempdir");
         // macOS `/var` is a symlink; lease keys intentionally reject those.
         let root = dir.path().canonicalize().expect("canonicalize");
@@ -597,6 +637,7 @@ impl Fixture {
             log_file: root.join("service.log"),
             host: "127.0.0.1".to_string(),
             port: 6240,
+            guest_link,
         };
         let host = Arc::new(FakeHost::new(root.join("home")));
         host.stub_transfer.store(stub, Ordering::SeqCst);

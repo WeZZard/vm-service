@@ -4,15 +4,20 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
+use guest_session::client::{Op, SessionError, Transfer};
 use serde_json::{Map, Value};
 
-use crate::config::unix_now;
+use crate::config::{unix_now, GuestLink};
 use crate::error::{OpError, OpResult};
+use crate::guest_link::{GuestError, GuestTarget};
 use crate::service::Service;
 use crate::ssh::shell_quote;
 use crate::GC_INTERVAL_S;
+
+/// Time one push or pull gets, as the `scp` transfer does.
+const TRANSFER_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Maximum concurrent macOS guests on the whole host.
 pub const MAX_MACOS_RUNNING: usize = 2;
@@ -101,7 +106,13 @@ impl Service {
             memory_mb: configured("memory_mb"),
         };
         let configuration = acquisition_options::resolve_for_image(
-            cpu, memory_mb, disk_gb, wait, ttl_hours, vnc, image_defaults,
+            cpu,
+            memory_mb,
+            disk_gb,
+            wait,
+            ttl_hours,
+            vnc,
+            image_defaults,
         )
         .map_err(|error| OpError::new(error.to_string()))?;
         let effective_resource = |name: &str| {
@@ -342,7 +353,16 @@ impl Service {
         // Phase 2 holds only this VM's operation lock, not the state lock.
         let lock = self.operation_lock(&vm);
         let _guard = lock.lock();
-        self.provision(&vm, &base, &cfg, chosen, effective_cpu, effective_memory_mb, disk_gb, wait)?;
+        self.provision(
+            &vm,
+            &base,
+            &cfg,
+            chosen,
+            effective_cpu,
+            effective_memory_mb,
+            disk_gb,
+            wait,
+        )?;
         self.get_record(&vm)
     }
 
@@ -677,6 +697,7 @@ impl Service {
             .get("vms")
             .and_then(|vms| vms.get(vm))
             .is_some();
+        self.close_guest_session(vm);
         if !present {
             return Ok(serde_json::json!({"vm": vm, "released": true, "reason": reason}));
         }
@@ -865,6 +886,15 @@ release it and acquire a new lease"
         } else {
             return Err(OpError::new("need 'argv' or 'script'"));
         };
+        if self.config.guest_link == GuestLink::SshSession {
+            let target = GuestTarget {
+                ip: &ip,
+                user: &ssh_user,
+                key_dir: &key_dir,
+                kind,
+            };
+            return self.session_exec(vm, &target, &remote_cmd, stdin, timeout as u64);
+        }
         let flag = self.release_flag(vm);
         let outcome = crate::proc::with_cancellation(Arc::clone(&flag), || {
             self.host
@@ -906,6 +936,23 @@ release it and acquire a new lease"
             std::path::Path::new(local),
             true,
         )?;
+        if self.config.guest_link == GuestLink::SshSession && !std::path::Path::new(local).is_dir()
+        {
+            let target = GuestTarget {
+                ip: &ip,
+                user: &ssh_user,
+                key_dir: &key_dir,
+                kind: record_kind(&record),
+            };
+            let result = self.with_guest_session(vm, &target, Op::Write, |session| {
+                session.write_from_path(std::path::Path::new(local), remote, TRANSFER_TIMEOUT)
+            });
+            let transfer = self.session_transfer_result(vm, Op::Write, result)?;
+            return Ok(serde_json::json!({
+                "vm": vm, "pushed": local, "to": remote,
+                "bytes": transfer.size, "sha256": transfer.sha256,
+            }));
+        }
         let destination = format!("{ssh_user}@{ip}:{remote}");
         let result = self.cancellable_transfer(vm, || {
             self.host
@@ -945,6 +992,29 @@ release it and acquire a new lease"
         if let Some(parent) = std::path::Path::new(local).parent() {
             let _ = std::fs::create_dir_all(parent);
         }
+        if self.config.guest_link == GuestLink::SshSession {
+            let target = GuestTarget {
+                ip: &ip,
+                user: &ssh_user,
+                key_dir: &key_dir,
+                kind: record_kind(&record),
+            };
+            let result = self.with_guest_session(vm, &target, Op::Read, |session| {
+                session.read_to_path(remote, std::path::Path::new(local), TRANSFER_TIMEOUT)
+            });
+            // A guest directory is still copied by `scp -r` (GS-6).
+            let directory = matches!(
+                &result,
+                Err(GuestError::Session(SessionError::Remote { code, .. })) if code == "is_directory"
+            );
+            if !directory {
+                let transfer = self.session_transfer_result(vm, Op::Read, result)?;
+                return Ok(serde_json::json!({
+                    "vm": vm, "pulled": remote, "to": local,
+                    "bytes": transfer.size, "sha256": transfer.sha256,
+                }));
+            }
+        }
         let source = format!("{ssh_user}@{ip}:{remote}");
         let result = self.cancellable_transfer(vm, || {
             self.host.scp(&ip, &ssh_user, &key_dir, &source, local, 300)
@@ -955,6 +1025,83 @@ release it and acquire a new lease"
                 "scp failed: {}",
                 other.map(|(_, text)| text).unwrap_or_default()
             ))),
+        }
+    }
+
+    /// Run an exec on the VM's guest session and answer as the SSH exec does.
+    fn session_exec(
+        &self,
+        vm: &str,
+        target: &GuestTarget<'_>,
+        command: &str,
+        stdin: Option<Vec<u8>>,
+        timeout_s: u64,
+    ) -> OpResult<Value> {
+        let result = self.with_guest_session(vm, target, Op::Exec, |session| {
+            session.exec(command, stdin.as_deref(), Duration::from_secs(timeout_s))
+        });
+        if self.release_flag(vm).load(Ordering::SeqCst) {
+            self.log(&format!("{vm}: running command cancelled by release"));
+            return Err(OpError::new(format!(
+                "command cancelled by release of {vm}"
+            )));
+        }
+        let outcome = match result {
+            Ok(outcome) => outcome,
+            Err(GuestError::Open(error)) => return Err(error),
+            Err(GuestError::Session(error)) if error.is_uncertain(Op::Exec) => {
+                self.log(&format!("{vm}: exec outcome uncertain: {error}"));
+                return Err(OpError::uncertain(format!(
+                    "the guest session failed after the command was sent; whether it ran is unknown: {error}"
+                )));
+            }
+            Err(GuestError::Session(error)) => {
+                return Err(OpError::new(format!("ssh failed: {error}")))
+            }
+        };
+        if outcome.timed_out {
+            return Err(OpError::new(format!(
+                "ssh failed: the command timed out after {timeout_s}s and was killed"
+            )));
+        }
+        let text = String::from_utf8_lossy(&outcome.output);
+        let truncated = tail_chars(&text, 64000);
+        // `ssh` exits 255 when the remote command is ended by a signal.
+        let rc = outcome.rc.unwrap_or(255);
+        let mut answer = serde_json::json!({"vm": vm, "rc": rc, "output": truncated});
+        if let Some(signal) = outcome.signal {
+            answer["signal"] = serde_json::json!(signal);
+        }
+        Ok(answer)
+    }
+
+    /// Map a guest session transfer's result onto the service's errors.
+    fn session_transfer_result(
+        &self,
+        vm: &str,
+        op: Op,
+        result: Result<Transfer, GuestError>,
+    ) -> OpResult<Transfer> {
+        let verb = if op == Op::Read { "pull" } else { "push" };
+        if self.release_flag(vm).load(Ordering::SeqCst) {
+            self.log(&format!("{vm}: running transfer cancelled by release"));
+            return Err(OpError::new(format!(
+                "transfer cancelled by release of {vm}"
+            )));
+        }
+        match result {
+            Ok(transfer) => Ok(transfer),
+            Err(GuestError::Open(error)) => Err(error),
+            Err(GuestError::Session(error)) if error.is_uncertain(op) => {
+                self.log(&format!("{vm}: {verb} outcome uncertain: {error}"));
+                Err(OpError::uncertain(format!(
+                    "{verb} failed after its bytes were sent; whether the file is in place is unknown: {error}"
+                )))
+            }
+            Err(GuestError::Session(SessionError::Remote { message, .. })) => {
+                Err(OpError::new(format!("{verb} failed: {message}")))
+            }
+            Err(GuestError::Session(error)) => Err(OpError::new(format!("{verb} failed: {error}"))),
         }
     }
 
@@ -1268,6 +1415,13 @@ fn arg_text(value: &Value) -> String {
         Value::String(text) => text.clone(),
         other => other.to_string(),
     }
+}
+
+fn record_kind(record: &Value) -> &str {
+    record
+        .get("image_kind")
+        .and_then(Value::as_str)
+        .unwrap_or("linux")
 }
 
 fn tail_chars(text: &str, max: usize) -> String {

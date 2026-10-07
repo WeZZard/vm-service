@@ -15,6 +15,7 @@ use serde_json::{Map, Value};
 use crate::config::{log_to_file, Config};
 use crate::console_api::{ConsoleConfig, ConsoleController, Manager};
 use crate::error::{OpError, OpResult};
+use crate::guest_link::LiveSession;
 use crate::host::{BootProcess, Host, RealHost};
 use crate::lines::LineCache;
 use crate::reentrant::ReentrantLock;
@@ -58,6 +59,9 @@ pub struct Service {
     /// Consecutive GC passes in which a `running` record's VM was not running,
     /// keyed by VM name. Held in memory only; see `docs/lifecycle-fixes.md`.
     pub(crate) absent_passes: Mutex<HashMap<String, u32>>,
+    /// Open guest sessions, keyed by VM name (`docs/arch/guest-session.md`,
+    /// GS-1). A request takes its VM's session out while it runs.
+    pub(crate) guest_sessions: Mutex<HashMap<String, LiveSession>>,
 }
 
 impl Service {
@@ -108,6 +112,7 @@ impl Service {
             operation_locks: Mutex::new(HashMap::new()),
             release_flags: Mutex::new(HashMap::new()),
             absent_passes: Mutex::new(HashMap::new()),
+            guest_sessions: Mutex::new(HashMap::new()),
         }
     }
 

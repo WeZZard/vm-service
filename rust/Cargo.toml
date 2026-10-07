@@ -12,6 +12,7 @@ members = [
   "crates/vmctl",
   "crates/console-worker",
   "crates/guest-console-agent",
+  "crates/guest-session",
   "crates/vm-service-install",
   "crates/runtime-launcher",
 ]
