@@ -9,3 +9,4 @@ test-evidence/
 # Rust build output
 rust/target/
 rust/target-*/
+.troubleshooting/

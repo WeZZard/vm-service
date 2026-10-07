@@ -1,0 +1,105 @@
+Feature: Agent operations over guest sessions and remote sessions
+
+  @AC-1 @TL-2
+  Scenario: Many operations on one lease use one guest session
+    Given a running lease whose guest link is "ssh-session"
+    When the agent sends 20 execs, 5 pushes and 5 pulls
+    Then every request succeeds
+    And vm-service ran exactly three channel commands for them: the start that finds no agent, the agent upload, and the start of the one guest session
+
+  @AC-2 @TL-2 @TL-4
+  Scenario Outline: Guest operations over a guest session match the ssh link
+    Given two leases of one image, one on guest link "ssh" and one on "ssh-session"
+    When the agent sends <request> to both
+    Then both answers have the same status, "rc" and "output"
+
+    Examples:
+      | request                                        |
+      | argv ["echo", "a b", "$HOME"]                  |
+      | argv ["sh", "-c", "exit 7"]                    |
+      | argv ["no-such-command"]                       |
+      | script "id -un; echo $PATH; echo err >&2"      |
+      | argv ["sleep", "5"] with timeout 1             |
+      | push of a host directory, then cat of a file   |
+      | pull of a guest file                           |
+
+  @AC-3 @TL-1 @TL-2 @TL-4
+  Scenario: Transferred bytes arrive intact or the request fails
+    Given a running lease on guest link "ssh-session"
+    When the agent pushes a 64 MiB random file and pulls it back
+    Then the pulled file has the pushed file's SHA-256
+    When one byte of the session stream is changed in transit
+    Then the request fails with a corruption error
+    And no partial file exists at the destination path
+
+  @AC-4 @TL-1 @TL-2
+  Scenario: A guest session lost during an exec reports uncertain and never reruns it
+    Given a running lease on guest link "ssh-session"
+    When the agent sends an exec that appends one line to a marker file and then sleeps
+    And the guest session's connection is killed while the command runs
+    Then the request fails with outcome "uncertain"
+    And the marker file has exactly one line
+    And the next exec opens a new guest session and succeeds
+
+  @AC-5 @TL-1 @TL-2
+  Scenario: A guest session lost during a read is retried once
+    Given a running lease on guest link "ssh-session"
+    When the guest session's connection is killed during a pull
+    Then vm-service opens a new guest session, reads the file again and the pull succeeds
+
+  @AC-19 @TL-1 @TL-2 @TL-4
+  Scenario: A guest session that falls silent fails its request by the silence limit
+    Given a running lease on guest link "ssh-session"
+    When the agent sends an exec with a timeout of 600 s that appends one line to a marker file
+    And nothing arrives from the guest after the exec is sent, though the connection stays open
+    Then the request fails with outcome "uncertain" within 5 heartbeat intervals and a margin
+    And it is not sent again
+    And the next exec opens a new guest session and succeeds
+    When the connection stops taking bytes before an exec is fully sent
+    Then vm-service ends the channel within the same limit and runs the exec once on a new guest session
+
+  @AC-6 @TL-1 @TL-2
+  Scenario: A remote session resumes after a reset without running a call twice
+    Given a client with a remote session through a fault proxy
+    When the client calls an exec that appends one line to a marker file and sleeps 3 s
+    And the proxy resets the connection after 1 s
+    Then the client reconnects, resumes the session and receives the exec's result once
+    And the marker file has exactly one line
+
+  @AC-7 @TL-1 @TL-2
+  Scenario: A repeated execution ID returns the first outcome
+    Given a completed exec call with execution ID "e-1"
+    When the client sends another exec call with execution ID "e-1" on a new session
+    Then vm-service answers with the first call's result
+    And the command did not run again
+
+  @AC-8 @TL-2 @TL-3
+  Scenario: A silent connection is detected and resumed
+    Given a client with a remote session through a fault proxy
+    When the proxy stops forwarding in both directions but keeps the connection open
+    Then both ends close the connection within 15 s of the last frame
+    When the proxy forwards again
+    Then the client resumes the session and pending results arrive once
+
+  @AC-9 @TL-2 @TL-3
+  Scenario: A resume from a new address keeps the session
+    Given a client with a remote session and an exec in flight
+    When the connection breaks and the client reconnects from a new source port or address
+    Then vm-service resumes the same session
+    And the exec's result arrives once
+
+  @AC-10 @TL-1 @TL-2
+  Scenario: An expired session leaves outcomes queryable
+    Given a remote session with a grace period of 2 s and an exec in flight
+    When the client stays disconnected for 3 s and then resumes
+    Then vm-service answers "expired"
+    When the client opens a new session and queries the exec's execution ID
+    Then the answer is "completed" with the result, or "running"
+    And the command ran once
+
+  @AC-11 @TL-3
+  Scenario: The remote session passes an HTTPS-only proxy
+    Given a client whose only route is an HTTP proxy that allows CONNECT to port 443
+    And vm-service's remote session listener on port 443 with TLS
+    When the client opens a remote session through the proxy
+    Then exec, write and read calls succeed

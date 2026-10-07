@@ -2,6 +2,23 @@
 
 This list records owner decisions. The linked documents carry the design and the rationale.
 
+## 2026-10-07: session transport for the guest link and the client link
+
+Entries from this date carry identifiers. The design is in [architecture](arch/index.md), the tests in [test layers](arch/test-layers.md), and the acceptance criteria in [acceptance](acceptance/index.md).
+
+- DC-1: Migration cost is not a selection criterion. The owner asked for the best architecture, because the stack is rebuilt with AI agents at near-zero cost.
+- DC-2: Every change ships with unit tests and integration tests. Each integration test runs on the layer that owns the behaviour it checks, because the change spans several layers.
+- DC-3: The guest link is built behind one interface with two candidates: a guest helper over one long-lived SSH session, and a guest helper over vsock through Tart's guest agent. One conformance suite tests both. Live test results choose the default.
+- DC-4: The cross-layer tests and the shared design live in this repository. mcp-vm-relay keeps its own unit tests and its fake-vm-service tests.
+- DC-5: Live tests may upgrade Tart to 2.40.1, run a second vm-service instance on another port with its own state directory, add Tart's guest agent to test image variants, and send commands directly to their own test VMs.
+- DC-6: Tests cover both situations: the VM link inside one Mac, and a client link that crosses the internet or an intercontinental intranet. The owner proposed WebSocket with heartbeats for the long-distance link; the design adopts it with a resumable session on top.
+- DC-7: The owner leaves the technical choices in this work to the agent. The agent decides, writes the reason into the design, and reports its concerns, their consequences and its actions in plain language.
+- DC-8: The finish line comes from measurement, not from the owner: the work is done when the transport is the smallest part of the time between actions. The owner sets no numeric target, because nobody knows this system's limits before it is measured.
+- DC-9: Network faults are tested in test VMs with network conditioning, macOS VMs included, with the test plan run by an agent.
+- DC-10: The remote session listener may accept clients on other machines, under TLS and a client credential (RS-1).
+- DC-11: The mcp-vm-relay changes for the new links are merged once their tests and this repository's live tests pass.
+- DC-12: The faster link becomes the default when the measurements support it (DC-3, DC-8).
+
 ## 2026-09-29: image resource defaults
 
 - An acquisition that omits CPU or memory gets the image line's configured `CPU` and `MEMORY_MB`, as `vmctl images-show` reports them. The hardcoded 6 CPUs and 16384 MB apply only when the line configures no value. The owner called ignoring the configuration a bug. See [acquisition contract](acquisition-contract.md#acquisition-request-and-compatibility).

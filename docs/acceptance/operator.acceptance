@@ -1,0 +1,36 @@
+Feature: Choosing and testing the guest link
+
+  @AC-15 @TL-4
+  Scenario Outline: Both channels pass one conformance suite on live VMs
+    Given a second instance with guest link "<link>"
+    And a lease of image "<image>" with the Tart guest agent installed
+    When the conformance suite runs
+    Then every case passes or is recorded as failing with its evidence
+    And the report records round-trip time per operation for this link and image
+
+    Examples:
+      | link         | image      |
+      | ssh-session  | macos26    |
+      | ssh-session  | ubuntu2404 |
+      | tart-session | macos26    |
+      | tart-session | ubuntu2404 |
+
+  @AC-16 @TL-2
+  Scenario: The guest link is selected by configuration
+    Given vm-service started with VM_SERVICE_GUEST_LINK set to "ssh"
+    Then every exec starts its own ssh process
+    Given vm-service started with VM_SERVICE_GUEST_LINK set to "ssh-session"
+    Then execs share one guest session
+    Given vm-service started with VM_SERVICE_GUEST_LINK set to an unknown value
+    Then vm-service refuses to start and names the accepted values
+
+  @AC-17 @TL-1 @TL-2
+  Scenario: Offline suites need no Tart, SSH or network
+    When "cargo test --workspace" runs on a machine without Tart, sshd or network access
+    Then every unit and component integration test of both links runs and passes
+
+  @AC-18 @TL-4
+  Scenario: Live tests leave the installed service alone
+    Given the installed vm-service running on port 6240
+    When the live suites run against a second instance on another port and state directory
+    Then the installed service's process, state directory and leases are unchanged
