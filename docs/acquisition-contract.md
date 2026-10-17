@@ -31,12 +31,17 @@
 ## Guest network
 
 - `network` is optional. `nat`, the default, keeps today's NAT: the guest reaches the internet, the host and the host's private networks (DC-13).
-- `internet` starts the guest with `tart run --net-softnet`. Softnet lets the guest reach the internet only: traffic to the host and to the private address ranges is dropped.
-- A request for `internet` on a host where Softnet is not installed as Tart needs it fails before the clone, with a reason that names Softnet. It never falls back to NAT.
-- The lease's record and its reporting carry its network.
-- Discovery reports whether `internet` is available on this host.
+- `internet` starts the guest with `tart run --net-softnet`. Softnet drops the guest's traffic to the private address ranges, but it passes the guest's traffic to the vmnet bridge's gateway address, which is this host. The guest firewall closes that path (DC-14).
+- The guest firewall is a pf anchor, `com.apple/250.vm-service`, loaded under the default `/etc/pf.conf`'s `anchor "com.apple/*"`. It drops every TCP and UDP connection that a guest on the Softnet subnet opens to one of the host's own addresses, except DHCP renewals to the host's bootpd(8). pf keeps state for the host's own connections to the guests, so the replies to the service's SSH still pass.
+- The Softnet subnet is chosen by vmnet, because Softnet passes no address to vmnet. On the host where DC-14 was designed it is `192.168.2.0/24`, shared by concurrent Softnet guests and separate from NAT's `192.168.64.0/24`. The anchor is installed for one subnet, `192.168.2.0/24` unless the installer is given `--subnet`.
+- `vm-service-guest-firewall install` writes the anchor to `/etc/pf.anchors/com.wezzard.vm-service` and the LaunchDaemon `com.wezzard.vm-service.guest-firewall`, which enables pf with `pfctl -E` and loads the anchor at boot and every 300 seconds. The installer needs root once. `vm-service-guest-firewall remove` unloads and deletes both and leaves pf enabled.
+- An `internet` guest gets public DNS resolvers, `VM_SERVICE_GUEST_DNS`, by default `1.1.1.1,8.8.8.8`, because the gateway's resolver is this host. Each resolver must be a public IPv4 address, because Softnet drops IPv6 and private destinations. A Linux guest gets them through a systemd-resolved drop-in with the routing domain `~.`, or `/etc/resolv.conf` without systemd-resolved. A macOS guest gets them through `networksetup -setdnsservers` on the default route's service.
+- Before an `internet` lease is ready, the service opens a TCP listener on all of the host's addresses on an ephemeral port. The guest then tries to connect to its default gateway on that port. Only a timeout, with no connection at the listener, passes. A connection, a reset, or a probe that cannot run fails the acquisition, the lease is released, and the reason names the anchor and the install command for the guest's subnet.
+- A request for `internet` fails before the reservation and the clone when Softnet is not installed as Tart needs it, when the anchor file is missing, or when `VM_SERVICE_GUEST_DNS` is invalid. Each reason names what is missing. Whether pf has the anchor loaded needs root to see, so the isolation check catches an anchor that is installed but not in force. An `internet` request never falls back to NAT.
+- The lease's record and its reporting carry its network. An `internet` lease also carries `guest_dns` and its `isolation` report: the gateway, the probe port, the firewall's subnet and the observation time.
+- Discovery reports whether `internet` is available on this host: Softnet is usable and the anchor file is present.
 - The control-only network is a separate contract, and stays as it is.
-- [The live verification](guest-network-verification.md) records what an `internet` guest reaches on this host. Stock Softnet passes the guest's traffic to the host's address on the VM network, so the host's services listening on all addresses are still reachable, and DC-13 is not yet met.
+- [The live verification](guest-network-verification.md) records what an `internet` guest reached before the guest firewall existed: every port the host serves on all addresses, through the gateway.
 
 ## New lease identity and reporting
 

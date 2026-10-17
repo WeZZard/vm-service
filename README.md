@@ -13,7 +13,7 @@ AGENTS.md mechanically:
   base; every release destroys it (AGENTS.md "MUST create a clean VM instance /
   destroy when done").
 - **Max 2 concurrent macOS VMs** (Virtualization.framework limit); Linux unlimited.
-- **NAT or internet-only** — no bridged networking is ever offered (MAC-whitelist doctrine). A lease may ask for `network: "internet"`, which runs its guest on Tart's Softnet with no route to the host or the private networks (DC-13).
+- **NAT or internet-only** — no bridged networking is ever offered (MAC-whitelist doctrine). A lease may ask for `network: "internet"`, which runs its guest on Tart's Softnet with no route to the private networks (DC-13), behind a pf anchor that keeps it off the host, with public DNS resolvers and an isolation check before the lease is ready (DC-14).
 - **Lifecycle-managed images are unbootable through the service** — only
   purpose clones are ever started; `-base`/`-seed`/`-work` are never booted by the service. Explicit work-source acceptance reads and clones the configured stopped work image without changing it.
 - **Credential env packs are env-var-only** (gateway era) — `env.extra` carries
@@ -96,6 +96,7 @@ install -m 0755 target/release/vm-service          ~/.local/libexec/vm-service/v
 install -m 0755 target/release/vmctl               ~/.local/libexec/vm-service/vmctl
 install -m 0755 target/release/console-worker      ~/.local/libexec/vm-service/console-worker
 install -m 0755 target/release/vm-service-install  ~/.local/libexec/vm-service/vm-service-install
+install -m 0755 target/release/vm-service-guest-firewall ~/.local/libexec/vm-service/vm-service-guest-firewall
 install -m 0755 target/release/guest-console-agent ~/.local/libexec/vm-service/guest-console-agent
 install -m 0755 target/aarch64-unknown-linux-musl/release/guest-console-agent \
   ~/.local/libexec/vm-service/guest-console-agent-linux
@@ -132,6 +133,23 @@ curl -s localhost:6240/health
 
 Log at `/tmp/com.wezzard.vm-service.{out,err}`, service log at
 `~/.local/state/vm-service/service.log`.
+
+## Guest firewall for `internet` leases
+
+An `internet` lease needs the guest firewall, a pf anchor that keeps its guest
+off this host (DC-14, [acquisition contract](docs/acquisition-contract.md#guest-network)).
+Install it once, as root, from the staged executable:
+
+```zsh
+sudo ~/.local/libexec/vm-service/vm-service-guest-firewall install   # --subnet CIDR if Softnet guests use another subnet
+~/.local/libexec/vm-service/vm-service-guest-firewall status         # no root needed
+sudo ~/.local/libexec/vm-service/vm-service-guest-firewall remove
+```
+
+- `install` writes `/etc/pf.anchors/com.wezzard.vm-service` and the LaunchDaemon `com.wezzard.vm-service.guest-firewall`, enables pf, and loads the anchor into `com.apple/250.vm-service`. `print` shows both files without installing them.
+- Install the firewall while no `internet` lease is running, because SSH connections opened before the anchor loads have no pf state.
+- `VM_SERVICE_GUEST_DNS` sets the resolvers an `internet` guest gets, by default `1.1.1.1,8.8.8.8`.
+- `VM_SERVICE_GUEST_FIREWALL_ANCHOR` points the service at another anchor file, as the test fixtures do.
 
 ## Consul discovery
 

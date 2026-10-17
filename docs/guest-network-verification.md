@@ -8,6 +8,11 @@
 - Name-based internet access fails on this host under `internet`, because the host's DNS answers with addresses that Softnet drops. Internet access by address and through DNS over HTTPS works.
 - Tart offers one way to close the host's address, `--net-softnet-block=@host`. That option also drops the guest's replies to the host's SSH connections, so the service cannot provision a guest with it. The implementation does not use it.
 
+## Response
+
+- DC-14 closes the gap with a pf anchor that drops the connections a Softnet guest opens to the host's own addresses, public DNS resolvers for the guest, and an isolation check before every `internet` lease is ready. The design is in [the acquisition contract](acquisition-contract.md#guest-network).
+- The results below were taken before DC-14 was built. They remain the record of what stock Softnet allows.
+
 ## Setup
 
 - The host is this Mac, with Tart 2.32.1 and Softnet 0.19.0 at `/opt/homebrew/bin/softnet`. That path is a symlink to a root-owned setuid file in Homebrew's Cellar.
