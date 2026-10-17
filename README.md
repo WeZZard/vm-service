@@ -13,7 +13,7 @@ AGENTS.md mechanically:
   base; every release destroys it (AGENTS.md "MUST create a clean VM instance /
   destroy when done").
 - **Max 2 concurrent macOS VMs** (Virtualization.framework limit); Linux unlimited.
-- **NAT or internet-only** — no bridged networking is ever offered (MAC-whitelist doctrine). A lease may ask for `network: "internet"`, which runs its guest on Tart's Softnet with no route to the private networks (DC-13), behind a pf anchor that keeps it off the host, with public DNS resolvers and an isolation check before the lease is ready (DC-14).
+- **NAT or internet-only** — no bridged networking is ever offered (MAC-whitelist doctrine). A lease may ask for `network: "internet"`, which runs its guest on Tart's Softnet with no route to the private networks (DC-13), behind a pf anchor that keeps it off the host by its own address (DC-14, DC-15), resolving names over DNS over TLS (DC-16), and with an isolation check before the lease is ready.
 - **Lifecycle-managed images are unbootable through the service** — only
   purpose clones are ever started; `-base`/`-seed`/`-work` are never booted by the service. Explicit work-source acceptance reads and clones the configured stopped work image without changing it.
 - **Credential env packs are env-var-only** (gateway era) — `env.extra` carries
@@ -97,6 +97,7 @@ install -m 0755 target/release/vmctl               ~/.local/libexec/vm-service/v
 install -m 0755 target/release/console-worker      ~/.local/libexec/vm-service/console-worker
 install -m 0755 target/release/vm-service-install  ~/.local/libexec/vm-service/vm-service-install
 install -m 0755 target/release/vm-service-guest-firewall ~/.local/libexec/vm-service/vm-service-guest-firewall
+install -m 0755 target/release/vm-service-dot-forwarder ~/.local/libexec/vm-service/vm-service-dot-forwarder
 install -m 0755 target/release/guest-console-agent ~/.local/libexec/vm-service/guest-console-agent
 install -m 0755 target/aarch64-unknown-linux-musl/release/guest-console-agent \
   ~/.local/libexec/vm-service/guest-console-agent-linux
@@ -136,19 +137,22 @@ Log at `/tmp/com.wezzard.vm-service.{out,err}`, service log at
 
 ## Guest firewall for `internet` leases
 
-An `internet` lease needs the guest firewall, a pf anchor that keeps its guest
-off this host (DC-14, [acquisition contract](docs/acquisition-contract.md#guest-network)).
-Install it once, as root, from the staged executable:
+An `internet` lease needs the guest firewall, a pf anchor whose table lists
+the running `internet` guests by address and keeps them off this host
+(DC-14, DC-15, [acquisition contract](docs/acquisition-contract.md#guest-network)).
+Install it once, as root, from the account that runs vm-service:
 
 ```zsh
-sudo ~/.local/libexec/vm-service/vm-service-guest-firewall install   # --subnet CIDR if Softnet guests use another subnet
-~/.local/libexec/vm-service/vm-service-guest-firewall status         # no root needed
+sudo ~/.local/libexec/vm-service/vm-service-guest-firewall install   # --table PATH for another table file
+~/.local/libexec/vm-service/vm-service-guest-firewall status         # no root needed; lists the table's guests
 sudo ~/.local/libexec/vm-service/vm-service-guest-firewall remove
 ```
 
-- `install` writes `/etc/pf.anchors/com.wezzard.vm-service` and the LaunchDaemon `com.wezzard.vm-service.guest-firewall`, enables pf, and loads the anchor into `com.apple/250.vm-service`. `print` shows both files without installing them.
+- `install` creates the table file `/var/db/com.wezzard.vm-service/internet-guests`, owned by the account that ran `sudo`, writes `/etc/pf.anchors/com.wezzard.vm-service` and the LaunchDaemon `com.wezzard.vm-service.guest-firewall`, enables pf, and loads the anchor into `com.apple/250.vm-service`. `print` shows the anchor and the LaunchDaemon without installing them.
+- Every vm-service instance on the host writes the same table file. `VM_SERVICE_GUEST_FIREWALL_TABLE` points an instance at another one, which the anchor must read.
 - Install the firewall while no `internet` lease is running, because SSH connections opened before the anchor loads have no pf state.
-- `VM_SERVICE_GUEST_DNS` sets the resolvers an `internet` guest gets, by default `1.1.1.1,8.8.8.8`.
+- `VM_SERVICE_GUEST_DNS` sets the resolvers an `internet` guest reaches over DNS over TLS, by default `1.1.1.1#cloudflare-dns.com,8.8.8.8#dns.google`.
+- A macOS `internet` guest needs `vm-service-dot-forwarder` beside vm-service, or `VM_SERVICE_DOT_FORWARDER`; the host-native build runs in a macOS guest.
 - `VM_SERVICE_GUEST_FIREWALL_ANCHOR` points the service at another anchor file, as the test fixtures do.
 
 ## Consul discovery

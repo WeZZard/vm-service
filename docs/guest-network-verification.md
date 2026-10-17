@@ -5,7 +5,7 @@
 - **With the guest firewall of commit `88aff2d`, an `internet` guest reaches neither the host nor any private address.** Every probe of the gateway timed out, and the lease's isolation check passed.
 - **Check 2 by name still fails.** The host's Surge intercepts plain DNS on UDP port 53 to any resolver and answers with `198.18.0.0/15` addresses, which Softnet drops. DNS over TLS to the same public resolvers returns real addresses, and the site then loads by name.
 - **The guest firewall also cuts off NAT guests while a Softnet guest runs.** A NAT guest started while a Softnet guest was running joined the same vmnet subnet, `192.168.2.0/24`. The anchor blocks by subnet, so that NAT guest lost the host, including the gateway's DNS and with it internet access by name.
-- DC-13 and DC-14 are therefore not yet met on this host. The first two runs below are the record of what stock Softnet and the first anchor allowed.
+- DC-13 and DC-14 are therefore not yet met on this host. DC-15 replaces the subnet with a table of guest addresses, and DC-16 moves the guests' DNS to DNS over TLS; their live run is pending the owner's reinstall of the anchor.
 
 ## Response
 
