@@ -1,15 +1,53 @@
-# Guest network live verification (DC-13)
+# Guest network live verification (DC-13 to DC-16)
 
 ## Current status
 
-- **With the guest firewall of commit `88aff2d`, an `internet` guest reaches neither the host nor any private address.** Every probe of the gateway timed out, and the lease's isolation check passed.
-- **Check 2 by name still fails.** The host's Surge intercepts plain DNS on UDP port 53 to any resolver and answers with `198.18.0.0/15` addresses, which Softnet drops. DNS over TLS to the same public resolvers returns real addresses, and the site then loads by name.
-- **The guest firewall also cuts off NAT guests while a Softnet guest runs.** A NAT guest started while a Softnet guest was running joined the same vmnet subnet, `192.168.2.0/24`. The anchor blocks by subnet, so that NAT guest lost the host, including the gateway's DNS and with it internet access by name.
-- DC-13 and DC-14 are therefore not yet met on this host. DC-15 replaces the subnet with a table of guest addresses, and DC-16 moves the guests' DNS to DNS over TLS; their live run is pending the owner's reinstall of the anchor.
+- **With the guest firewall of commit `5180740` (DC-15) and DNS over TLS (DC-16), every check passes on this host.** An `internet` guest, Linux or macOS, reaches the internet by name and by address, and it reaches neither the host nor any private address.
+- A NAT guest started while an `internet` guest ran shared its subnet, `192.168.2.0/24`, and kept the host, the gateway's resolver and the internet, because the firewall blocks guests by address.
+- The host still reached the `internet` guest over SSH and exec after more than 10 minutes without traffic.
+- The sections below the third run record the earlier runs and what each one showed.
 
 ## Response
 
-- DC-14 adds a pf anchor that drops the connections a Softnet guest opens to the host, public DNS resolvers for the guest, and an isolation check before every `internet` lease is ready. The design is in [the acquisition contract](acquisition-contract.md#guest-network).
+- DC-14 added a pf anchor that drops the connections a Softnet guest opens to the host, and an isolation check before every `internet` lease is ready. DC-15 keys the anchor on a table of the running `internet` guests' addresses, and DC-16 moves the guests' DNS to DNS over TLS. The design is in [the acquisition contract](acquisition-contract.md#guest-network).
+
+## Third run: table of guest addresses and DNS over TLS
+
+### Setup
+
+- The owner installed the anchor from commit `5180740` with `--owner 501`. The anchor reads `<vm_service_internet>` from `/var/db/com.wezzard.vm-service/internet-guests`, which belongs to `wezzard`. Its rules are `pass out quick inet to <vm_service_internet> keep state`, `pass in quick inet proto udp from <vm_service_internet> port 68 to any port 67`, and `block drop in quick inet proto { tcp udp } from <vm_service_internet> to self`.
+- A fresh second instance ran on `127.0.0.1:6260`, built from `5180740`, with `vm-service-dot-forwarder` staged beside it. The installed vm-service on port 6240 was not touched and held no leases before or after.
+- `GET /acquisition-capabilities` reported `{"available": true, "runtime": "tart-softnet"}` for `internet`.
+- The guests ran on the shared subnet `192.168.2.0/24` with gateway `192.168.2.1`. The macOS guest ran macOS 26.6.1.
+
+### Acquisitions
+
+- The `internet` lease `pilot-dc15-internet-5785b2` of `ubuntu2404` got `192.168.2.11` and was ready after 2 minutes 20 seconds. The service log shows, in order: the address added to the table, "guest resolvers set to 1.1.1.1#cloudflare-dns.com, 8.8.8.8#dns.google over DNS over TLS", "isolation verified; 192.168.2.1:58447 on this host did not answer the guest (attempt 1)", and "egress verified; example.com resolved to 172.66.147.243 and HTTPS answered 200".
+- Its record carried `"firewall_table": "/var/db/com.wezzard.vm-service/internet-guests"`, `"firewall_address": "192.168.2.11"`, and `"isolation": {"status": "verified", "address": "192.168.2.11", "gateway": "192.168.2.1", "probe_port": 58447, "probe_attempts": 1, "dns_transport": "dns-over-tls", "guest_dns": ["1.1.1.1#cloudflare-dns.com", "8.8.8.8#dns.google"], "egress": {"name": "example.com", "address": "172.66.147.243", "https": "200"}, ...}`.
+- The table file listed `192.168.2.11 # <the instance's state directory> pilot-dc15-internet-5785b2` while the lease ran, and only its header line after each release.
+- The NAT lease `pilot-dc15-nat-709906` was acquired while the `internet` lease ran. It got `192.168.2.12`, on the same subnet, and never entered the table.
+- The `internet` lease `pilot-mac-dc15-mac-ae54ea` of `macos26` was acquired right after the NAT lease was released at 21:04:21, while the Linux `internet` lease still ran. It got `192.168.2.13` and was ready after 22 seconds, with the forwarder running as `com.wezzard.vm-service.dot-forwarder`, the system resolver at `127.0.0.1`, "isolation verified; 192.168.2.1:61311 ... (attempt 1)", and egress `172.66.147.243`, HTTPS 200.
+- During each guest's checks, a listener on the host accepted connections on all addresses on port 47811. It recorded no connection from either `internet` guest, and one from the NAT guest.
+
+### Results
+
+| # | Check | Command in the guest | `internet`, Linux | `internet`, macOS | NAT, while an `internet` guest runs |
+|---|-------|----------------------|-------------------|-------------------|-------------------------------------|
+| 1 | The host reaches the guest | `POST /vms/<vm>/exec` with the check script | rc 0 | rc 0 | rc 0 |
+| 1 | The host reaches the guest after 10 minutes idle | A persistent `ssh -o TCPKeepAlive=no -o ServerAliveInterval=0` session, idle from 21:01:54 to 21:12:05, then one command; and `POST /vms/<vm>/exec {"argv":["uname","-n"]}` at 21:12:10, 10 minutes 25 seconds after the previous request to that lease | The session answered `after-idle: ubuntu`; exec rc 0, `ubuntu` | Not run | Not run |
+| 2 | An internet site loads by name | `curl -sI -m 15 https://example.com` | `HTTP/2 200` | `HTTP/2 200` | `HTTP/2 200` |
+| 2 | The name resolves to a public address | Linux `getent ahostsv4 example.com`; macOS `dscacheutil -q host -a name example.com` | `172.66.147.243` | `172.66.147.243` | `198.18.35.15`, Surge's address, which NAT reaches |
+| 2 | The guest's resolvers | Linux `resolvectl dns`; macOS `scutil --dns` | Global `1.1.1.1#cloudflare-dns.com 8.8.8.8#dns.google`; the interface has none | `127.0.0.1`, the forwarder | The gateway, `192.168.2.1` |
+| 3 | The gateway on 443, 22, 6240, 80, 53, 6420, 8443 and 47811 | Linux TCP probe `timeout 4 bash -c "exec 3<>/dev/tcp/192.168.2.1/<port>"`; macOS `nc -v -z -G 4 -w 4 192.168.2.1 <port>` | Timeout on every port | Timeout on every port | Open on every port |
+| 3 | The installed vm-service through the gateway | `curl -s -m 5 http://192.168.2.1:6240/health` | No answer | No answer | `{"ok": true, "service": "vm-service"}` |
+| 3 | The gateway's resolver | `dig @192.168.2.1 example.com` | Timed out | Timed out | `198.18.35.15` |
+| 3 | The vm-service isolation probe | The service's probe of `192.168.2.1:<ephemeral port>` | Timeout on the first attempt | Timeout on the first attempt | Not run for NAT |
+| 4 | The host's home-network address | TCP probes `192.168.50.3` on 443, 22 and 6240 | Timeout | Timeout | Open |
+| 5 | The home router and other private ranges | TCP probes `192.168.50.1:443`, `192.168.50.1:80`, `192.168.50.2:443`, `192.168.50.2:6152`, `10.0.0.1:443`, `172.16.0.1:443` | Timeout | Timeout | Refused, open, refused, open, open, open |
+
+- After the idle period, the Linux `internet` guest still had only the DNS-over-TLS resolvers, resolved `example.com` to `104.20.23.154`, loaded it with `HTTP/2 200`, and timed out on the gateway's 443, 22 and 6240.
+- Under NAT, `10.0.0.1:443` and `172.16.0.1:443` report "open" because the host's Surge enhanced mode most likely accepts these connections itself. The NAT column matches NAT before the guest firewall.
+- Every lease was released, the second instance was stopped, and no clone, `tart run` or `softnet` process remained.
 
 ## Second run with the guest firewall
 
