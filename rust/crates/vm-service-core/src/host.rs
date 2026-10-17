@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::time::{Duration, Instant};
 
+use acquisition_options::GuestNetwork;
 use serde_json::{Map, Value};
 
 use crate::config::Config;
@@ -125,8 +126,18 @@ pub trait Host: Send + Sync {
         timeout_s: f64,
     ) -> OpResult<()>;
 
-    /// Spawn `tart run <vm> --no-graphics` detached.
-    fn spawn_run(&self, vm: &str) -> OpResult<Box<dyn BootProcess>>;
+    /// Spawn `tart run <vm> --no-graphics` detached, with `--net-softnet` for
+    /// a guest on the `internet` network.
+    fn spawn_run(&self, vm: &str, network: GuestNetwork) -> OpResult<Box<dyn BootProcess>>;
+
+    /// The Softnet executable Tart would run for a guest on the `internet`
+    /// network, or the reason, naming Softnet, that Tart cannot run it.
+    ///
+    /// A host that cannot tell reports Softnet unavailable, so an `internet`
+    /// acquisition fails rather than falling back to NAT.
+    fn softnet(&self) -> Result<PathBuf, String> {
+        Err("Softnet unavailable: this host does not run Tart (no NAT fallback)".to_string())
+    }
 
     /// The boot-settle window, in seconds.
     fn boot_settle_s(&self) -> f64;
@@ -333,9 +344,13 @@ impl Host for RealHost {
             .map_err(|error| OpError::new(error.to_string()))
     }
 
-    fn spawn_run(&self, vm: &str) -> OpResult<Box<dyn BootProcess>> {
-        let child = crate::tart::spawn_run(&self.config, vm)?;
+    fn spawn_run(&self, vm: &str, network: GuestNetwork) -> OpResult<Box<dyn BootProcess>> {
+        let child = crate::tart::spawn_run(&self.config, vm, network)?;
         Ok(Box::new(ChildBootProcess { child }))
+    }
+
+    fn softnet(&self) -> Result<PathBuf, String> {
+        crate::network::softnet_executable(crate::tart::tart_path(&self.config).as_deref())
     }
 
     fn boot_settle_s(&self) -> f64 {

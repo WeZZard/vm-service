@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use acquisition_options::GuestNetwork;
 use guest_session::client::{Op, SessionError, Transfer};
 use serde_json::{Map, Value};
 
@@ -80,10 +81,20 @@ impl Service {
             request.insert("profile".to_string(), Value::String(profile.to_string()));
         }
         let request = Value::Object(request);
-        control_only::validate_request(&request)
-            .map_err(|error| OpError::new(error.to_string()))?;
-        if network == "control-only" {
-            control_only::require_available().map_err(|error| OpError::new(error.to_string()))?;
+        let guest_network = match crate::network::validate_request(&request)? {
+            crate::network::RequestedNetwork::ControlOnly => {
+                control_only::require_available()
+                    .map_err(|error| OpError::new(error.to_string()))?;
+                // This service has no way to boot the control-only network.
+                return Err(OpError::new(
+                    "control-only unavailable: this service cannot boot it; no NAT fallback",
+                ));
+            }
+            crate::network::RequestedNetwork::Guest(network) => network,
+        };
+        if guest_network == GuestNetwork::Internet {
+            // Before the reservation and the clone; never a NAT fallback.
+            self.host.softnet().map_err(OpError::new)?;
         }
 
         if !valid_purpose(purpose) {
@@ -113,6 +124,7 @@ impl Service {
             ttl_hours,
             vnc,
             image_defaults,
+            guest_network,
         )
         .map_err(|error| OpError::new(error.to_string()))?;
         let effective_resource = |name: &str| {
@@ -263,6 +275,10 @@ impl Service {
                     Value::String(uuid::Uuid::new_v4().simple().to_string()),
                 );
                 record.insert("configuration".to_string(), configuration.clone());
+                record.insert(
+                    "network".to_string(),
+                    Value::String(guest_network.as_str().to_string()),
+                );
                 if let Some(fingerprint) = &fingerprint {
                     record.insert(
                         "environment_fingerprint".to_string(),
@@ -522,11 +538,17 @@ impl Service {
             Option::<fn(&Map<String, Value>)>::None,
         )?;
 
+        let network = GuestNetwork::of_record(&record)
+            .ok_or_else(|| OpError::new(format!("{vm} has a network this service cannot boot")))?;
         self.log(&format!(
-            "booting {vm} headless (NAT); log {}",
+            "booting {vm} headless ({}); log {}",
+            match network {
+                GuestNetwork::Nat => "NAT",
+                GuestNetwork::Internet => "Softnet, internet only",
+            },
             crate::tart::run_log_path(vm)
         ));
-        let mut child = self.host.spawn_run(vm)?;
+        let mut child = self.host.spawn_run(vm, network)?;
         self.host.boot_refused(&mut *child, vm, None)?;
         let ip = self.host.wait_ip(vm, 420).ok_or_else(|| {
             OpError::new(format!(

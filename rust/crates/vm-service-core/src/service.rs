@@ -230,11 +230,9 @@ impl Service {
 
     /// Validate and return the lease key directory for a record.
     pub fn key_directory(&self, record: &Value) -> OpResult<PathBuf> {
-        let network = record
-            .get("network")
-            .and_then(Value::as_str)
-            .unwrap_or("nat");
-        if network != "nat" {
+        // NAT and internet guests are reached over the lease's SSH key; any
+        // other recorded network (control-only) has no ownership auditor.
+        if acquisition_options::GuestNetwork::of_record(record).is_none() {
             return Err(OpError::new(
                 "control-only ownership auditor unavailable; execution/transfers denied",
             ));

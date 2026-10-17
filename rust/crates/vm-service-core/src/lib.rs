@@ -7,6 +7,7 @@ pub mod error;
 pub mod guest_link;
 pub mod host;
 pub mod lines;
+pub mod network;
 pub mod ops;
 pub mod packs;
 pub mod proc;

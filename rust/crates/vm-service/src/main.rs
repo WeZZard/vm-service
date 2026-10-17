@@ -266,9 +266,14 @@ fn handle_get(service: &Service, request: &mut Request, url: &str) -> OpResult<(
             None
         };
         let capabilities = service.consoles.capabilities();
+        // A stat of the Softnet executable Tart would run; no process starts.
+        let internet = match service.host.softnet() {
+            Ok(_) => acquisition_options::InternetAvailability::Available,
+            Err(reason) => acquisition_options::InternetAvailability::Unavailable(reason),
+        };
         return Ok((
             200,
-            acquisition_options::descriptor(&capabilities, images.as_ref()),
+            acquisition_options::descriptor(&capabilities, images.as_ref(), &internet),
         ));
     }
     if path == "/images" {
@@ -320,7 +325,7 @@ fn handle_post(service: &Service, request: &mut Request, url: &str) -> OpResult<
     let path = url;
 
     if path == "/acquire" {
-        control_only::validate_request(&body).map_err(|error| OpError::new(error.to_string()))?;
+        vm_service_core::network::validate_request(&body)?;
         let Some(purpose) = body.get("purpose").and_then(Value::as_str) else {
             return Ok((409, json!({"error": "'purpose' (string) is required"})));
         };

@@ -125,12 +125,19 @@ pub fn wait_ip(config: &Config, name: &str, timeout_s: u64) -> Option<String> {
 }
 
 /// Spawn `tart run <vm> --no-graphics` detached, logging to
-/// `/tmp/tart-run-<vm>.log`, mirroring the Python `Popen`.
-pub fn spawn_run(config: &Config, vm: &str) -> OpResult<std::process::Child> {
+/// `/tmp/tart-run-<vm>.log`, mirroring the Python `Popen`. A guest on the
+/// `internet` network adds `--net-softnet` (`crate::network::run_args`).
+pub fn spawn_run(
+    config: &Config,
+    vm: &str,
+    network: acquisition_options::GuestNetwork,
+) -> OpResult<std::process::Child> {
     let log_path = format!("/tmp/tart-run-{vm}.log");
     let stdout = std::fs::File::create(&log_path)?;
     let stderr = stdout.try_clone()?;
-    let mut command = tart_command(config, &["run", vm, "--no-graphics"]);
+    let args = crate::network::run_args(vm, network);
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let mut command = tart_command(config, &args);
     command
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
@@ -141,6 +148,17 @@ pub fn spawn_run(config: &Config, vm: &str) -> OpResult<std::process::Child> {
         command.process_group(0);
     }
     command.spawn().map_err(OpError::from)
+}
+
+/// The `PATH` Tart runs with: the selected environment's, or the daemon's.
+pub fn tart_path(config: &Config) -> Option<std::ffi::OsString> {
+    match &config.subprocess_env {
+        Some(environment) => environment
+            .iter()
+            .find(|(key, _)| key == "PATH")
+            .map(|(_, value)| value.into()),
+        None => std::env::var_os("PATH"),
+    }
 }
 
 /// Log path for a running VM, matching the Python convention.

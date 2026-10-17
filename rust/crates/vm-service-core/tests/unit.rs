@@ -1342,3 +1342,96 @@ fn test_gauge_never_gates_acquire() {
     let rec = fixture.acquire("m1", "macos26", "none");
     assert_eq!(rec["state"], json!("running"));
 }
+
+// ------------------------------------------------------- guest network (DC-13)
+
+/// The arguments the fake Tart recorded for `vm`'s `tart run`.
+fn run_call(fixture: &common::Fixture, vm: &str) -> Vec<String> {
+    fixture
+        .host
+        .tart
+        .calls
+        .lock()
+        .expect("calls")
+        .iter()
+        .find(|(op, args)| op == "run" && args.first().map(String::as_str) == Some(vm))
+        .map(|(_, args)| args.clone())
+        .unwrap_or_else(|| panic!("no tart run for {vm}"))
+}
+
+#[test]
+fn test_default_network_is_nat_with_today_s_run_command() {
+    let fixture = common::Fixture::new();
+    let rec = fixture.acquire("t", "ubuntu2404", "none");
+    let vm = rec["vm"].as_str().expect("vm name").to_string();
+    assert_eq!(rec["network"], json!("nat"));
+    assert_eq!(rec["configuration"]["effective"]["network"], json!("nat"));
+    assert_eq!(run_call(&fixture, &vm), vec![vm.clone(), "--no-graphics".to_string()]);
+}
+
+#[test]
+fn test_internet_lease_boots_on_softnet_and_reports_its_network() {
+    let fixture = common::Fixture::new();
+    let rec = fixture.try_acquire_network("web", "internet").expect("acquire");
+    let vm = rec["vm"].as_str().expect("vm name").to_string();
+    assert_eq!(rec["network"], json!("internet"));
+    assert_eq!(rec["configuration"]["requested"]["network"], json!("internet"));
+    assert_eq!(rec["configuration"]["effective"]["network"], json!("internet"));
+    assert_eq!(
+        run_call(&fixture, &vm),
+        vec![vm.clone(), "--no-graphics".to_string(), "--net-softnet".to_string()]
+    );
+    assert_eq!(fixture.read_state()[&vm]["network"], json!("internet"));
+    assert_eq!(fixture.snapshot()["vms"][&vm]["network"], json!("internet"));
+    // The host still reaches an internet guest over its lease key.
+    let out = fixture
+        .service
+        .guest_exec(&vm, &json!({"argv": ["echo", "hi"]}))
+        .expect("guest_exec");
+    assert_eq!(out["rc"], json!(0));
+}
+
+#[test]
+fn test_internet_without_softnet_is_refused_before_the_clone() {
+    let fixture = common::Fixture::new();
+    *fixture.host.softnet_refusal.lock().expect("softnet_refusal") =
+        Some("Softnet unavailable: no softnet executable on Tart's PATH".to_string());
+    let err = fixture
+        .try_acquire_network("web", "internet")
+        .expect_err("internet without Softnet must fail");
+    assert!(err.to_string().starts_with("Softnet unavailable"), "{err}");
+    assert!(!fixture.host.tart.ops().contains(&"clone".to_string()));
+    assert!(
+        !fixture.state_file.exists() || fixture.read_state().is_empty(),
+        "a refused lease left a record"
+    );
+}
+
+#[test]
+fn test_unknown_network_is_rejected_before_reservation() {
+    let fixture = common::Fixture::new();
+    for network in ["bridged", "host", "softnet", ""] {
+        let err = fixture
+            .try_acquire_network("web", network)
+            .expect_err("unknown network must fail");
+        assert_eq!(err.to_string(), "network must be nat or internet");
+    }
+    let err = fixture
+        .try_acquire_network("web", "control-only")
+        .expect_err("control-only stays refused");
+    assert!(err.to_string().starts_with("control-only unavailable"), "{err}");
+    assert!(!fixture.host.tart.ops().contains(&"clone".to_string()));
+}
+
+#[test]
+fn test_a_record_on_another_network_cannot_use_the_lease_key() {
+    let fixture = common::Fixture::new();
+    let rec = fixture.acquire("t", "ubuntu2404", "none");
+    let vm = rec["vm"].as_str().expect("vm name").to_string();
+    set_fields(&fixture.service, &vm, &[("network", json!("control-only"))]);
+    let err = fixture
+        .service
+        .guest_exec(&vm, &json!({"argv": ["true"]}))
+        .expect_err("control-only record must be denied");
+    assert!(err.to_string().contains("control-only ownership auditor unavailable"), "{err}");
+}

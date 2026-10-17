@@ -39,3 +39,11 @@ COLUMNS=80 python3 vmctl acquire --help
 
 All captures are non-tty (`stdout` redirected to a file), so no ANSI escapes
 are present.
+
+## Changes after the Python implementation
+
+- `acquire.txt` at every width was regenerated from the Rust `vmctl` when
+  `--network` gained the `internet` choice (DC-13), because the Python
+  implementation no longer exists. Each file differs from its Python capture
+  only in the `{nat,internet,control-only}` choice list and the usage line it
+  rewraps.

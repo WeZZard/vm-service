@@ -119,7 +119,7 @@ struct AcquireArgs {
     /// default | none | <env-pack-name> (credential env vars)
     #[arg(long, default_value = "default", alias = "pack")]
     env: String,
-    #[arg(long, value_parser = ["nat", "control-only"], default_value = "nat")]
+    #[arg(long, value_parser = ["nat", "internet", "control-only"], default_value = "nat")]
     network: String,
     /// explicit control-only helper profile
     #[arg(long)]

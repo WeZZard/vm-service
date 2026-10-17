@@ -129,8 +129,16 @@ impl Host for TestHost {
         self.inner.bootstrap(ip, user, password, key_dir, timeout_s)
     }
 
-    fn spawn_run(&self, vm: &str) -> OpResult<Box<dyn BootProcess>> {
-        self.inner.spawn_run(vm)
+    fn spawn_run(
+        &self,
+        vm: &str,
+        network: vm_service_core::acquisition_options::GuestNetwork,
+    ) -> OpResult<Box<dyn BootProcess>> {
+        self.inner.spawn_run(vm, network)
+    }
+
+    fn softnet(&self) -> Result<PathBuf, String> {
+        self.inner.softnet()
     }
 
     fn boot_settle_s(&self) -> f64 {

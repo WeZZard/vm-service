@@ -494,7 +494,7 @@ mod tests {
         );
         assert_eq!(
             message(&["acquire", "--purpose", "p", "--network", "bogus"]),
-            "argument --network: invalid choice: 'bogus' (choose from 'nat', 'control-only')"
+            "argument --network: invalid choice: 'bogus' (choose from 'nat', 'internet', 'control-only')"
         );
         assert_eq!(
             message(&["acquire", "--purpose", "p", "--cpu", "1.5"]),
@@ -552,7 +552,7 @@ mod tests {
     fn unambiguous_prefixes_resolve_and_ambiguous_ones_are_reported() {
         assert_eq!(
             message(&["acquire", "--purp", "p", "--network", "bogus"]),
-            "argument --network: invalid choice: 'bogus' (choose from 'nat', 'control-only')"
+            "argument --network: invalid choice: 'bogus' (choose from 'nat', 'internet', 'control-only')"
         );
         assert_eq!(
             message(&["acquire", "--p", "x"]),

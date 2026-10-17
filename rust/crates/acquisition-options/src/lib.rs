@@ -25,6 +25,56 @@ pub enum ResolveError {
     /// `ttl_hours` was not a finite number within `[0.1, 720]`.
     #[error("ttl_hours must be finite and within [0.1, 720]")]
     InvalidTtl,
+    /// `network` was present but named no guest network.
+    #[error("network must be nat or internet")]
+    InvalidNetwork,
+}
+
+/// The network a lease's guest runs on (DC-13).
+///
+/// The control-only network is a separate contract, owned by the
+/// `control-only` crate; it is not a value of this type.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum GuestNetwork {
+    /// Tart's shared NAT: the guest reaches the internet, the host, and the
+    /// host's private networks. The default, and the only network before DC-13.
+    #[default]
+    Nat,
+    /// Tart's Softnet: the guest reaches the internet only.
+    Internet,
+}
+
+impl GuestNetwork {
+    /// The accepted request values, default first.
+    pub const NAMES: [&'static str; 2] = ["nat", "internet"];
+
+    /// The request and record value.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            GuestNetwork::Nat => "nat",
+            GuestNetwork::Internet => "internet",
+        }
+    }
+
+    /// Read a request's `network`: absent is NAT, and anything but the
+    /// string `nat` or `internet` is rejected.
+    pub fn parse(value: Option<&Value>) -> Result<Self, ResolveError> {
+        match value {
+            None => Ok(GuestNetwork::Nat),
+            Some(Value::String(text)) if text == "nat" => Ok(GuestNetwork::Nat),
+            Some(Value::String(text)) if text == "internet" => Ok(GuestNetwork::Internet),
+            Some(_) => Err(ResolveError::InvalidNetwork),
+        }
+    }
+
+    /// Read a lease record's `network`. A record from before DC-13 carries
+    /// none and ran on NAT; a value this type does not name is `None`.
+    pub fn of_record(record: &Value) -> Option<Self> {
+        match record.get("network") {
+            None => Some(GuestNetwork::Nat),
+            value => Self::parse(value).ok(),
+        }
+    }
 }
 
 /// CPU and memory defaults configured by an image's `line.conf`.
@@ -39,7 +89,8 @@ pub struct ImageDefaults {
     pub memory_mb: Option<i64>,
 }
 
-/// Resolve a requested acquisition configuration against service defaults.
+/// Resolve a requested acquisition configuration against service defaults,
+/// on the NAT network.
 ///
 /// `cpu`, `memory_mb`, and `disk_gb` are `None` when the caller did not request
 /// them. `ttl_hours` is a JSON value because the Python function accepts an
@@ -53,13 +104,24 @@ pub fn resolve(
     ttl_hours: &Value,
     vnc: bool,
 ) -> Result<Value, ResolveError> {
-    resolve_for_image(cpu, memory_mb, disk_gb, wait, ttl_hours, vnc, ImageDefaults::default())
+    resolve_for_image(
+        cpu,
+        memory_mb,
+        disk_gb,
+        wait,
+        ttl_hours,
+        vnc,
+        ImageDefaults::default(),
+        GuestNetwork::Nat,
+    )
 }
 
 /// Resolve a requested acquisition configuration against the image's defaults.
 ///
 /// An omitted CPU or memory takes the image's configured value, and the
-/// service default only when the image configures none.
+/// service default only when the image configures none. `network` is the
+/// guest network the request selected.
+#[allow(clippy::too_many_arguments)]
 pub fn resolve_for_image(
     cpu: Option<i64>,
     memory_mb: Option<i64>,
@@ -68,6 +130,7 @@ pub fn resolve_for_image(
     ttl_hours: &Value,
     vnc: bool,
     image: ImageDefaults,
+    network: GuestNetwork,
 ) -> Result<Value, ResolveError> {
     for (name, value) in [("cpu", cpu), ("memory_mb", memory_mb), ("disk_gb", disk_gb)] {
         if let Some(value) = value {
@@ -85,6 +148,7 @@ pub fn resolve_for_image(
         "wait": wait,
         "ttl_hours": ttl,
         "vnc": vnc,
+        "network": network.as_str(),
     });
 
     let effective = json!({
@@ -92,7 +156,7 @@ pub fn resolve_for_image(
         "memory_mb": memory_mb.or(image.memory_mb).unwrap_or(16384),
         "disk_gb": disk_gb,
         "disk_mode": if disk_gb.is_none() { "inherit" } else { "resize" },
-        "network": "nat",
+        "network": network.as_str(),
         "headless": true,
         "vnc": vnc,
         "initial_ttl_hours": ttl,
@@ -133,13 +197,40 @@ pub fn resolve_for_image(
     }))
 }
 
+/// Whether this host can run a guest on the `internet` network.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InternetAvailability {
+    /// Tart's Softnet is installed as Tart needs it.
+    Available,
+    /// It is not; the reason names what is missing.
+    Unavailable(String),
+}
+
+impl InternetAvailability {
+    fn describe(&self) -> Value {
+        match self {
+            InternetAvailability::Available => json!({"available": true, "runtime": "tart-softnet"}),
+            InternetAvailability::Unavailable(reason) => json!({
+                "available": false,
+                "runtime": "tart-softnet",
+                "reason": reason,
+            }),
+        }
+    }
+}
+
 /// Describe the acquisition options a client may send.
 ///
 /// `backends` is embedded verbatim under the `vnc` option. `images` is `None`
 /// when no startup image configuration was loaded; an empty list is treated the
 /// same way for `images` but still reports the configuration as `configured`,
 /// exactly as the Python `images or []` / `images is not None` pair does.
-pub fn descriptor(backends: &Value, images: Option<&Value>) -> Value {
+/// `internet` is reported under the `network` option.
+pub fn descriptor(
+    backends: &Value,
+    images: Option<&Value>,
+    internet: &InternetAvailability,
+) -> Value {
     let mut options = Map::new();
     options.insert(
         "purpose".into(),
@@ -167,7 +258,12 @@ pub fn descriptor(backends: &Value, images: Option<&Value>) -> Value {
     );
     options.insert(
         "network".into(),
-        json!({"type": "string", "default": "nat", "values": ["nat"]}),
+        json!({
+            "type": "string",
+            "default": "nat",
+            "values": GuestNetwork::NAMES,
+            "internet": internet.describe(),
+        }),
     );
     options.insert(
         "vnc".into(),
@@ -278,6 +374,85 @@ mod tests {
         assert!(result["resources_applied"]["observed_at"].is_null());
         assert!(result["requested"]["cpu"].is_null());
         assert!(result["requested"]["ttl_hours"].is_number());
+        assert_eq!(result["requested"]["network"], json!("nat"));
+    }
+
+    #[test]
+    fn network_parse_accepts_absent_nat_and_internet() {
+        assert_eq!(GuestNetwork::parse(None).unwrap(), GuestNetwork::Nat);
+        assert_eq!(
+            GuestNetwork::parse(Some(&json!("nat"))).unwrap(),
+            GuestNetwork::Nat
+        );
+        assert_eq!(
+            GuestNetwork::parse(Some(&json!("internet"))).unwrap(),
+            GuestNetwork::Internet
+        );
+    }
+
+    #[test]
+    fn network_parse_rejects_every_other_value() {
+        for value in [
+            json!("control-only"),
+            json!("softnet"),
+            json!("bridged"),
+            json!("host"),
+            json!("Internet"),
+            json!(""),
+            json!(null),
+            json!(true),
+            json!(1),
+            json!(["internet"]),
+            json!({"network": "internet"}),
+        ] {
+            let err = GuestNetwork::parse(Some(&value)).unwrap_err();
+            assert_eq!(err.to_string(), "network must be nat or internet", "value={value}");
+        }
+    }
+
+    #[test]
+    fn a_record_without_network_ran_on_nat() {
+        assert_eq!(GuestNetwork::of_record(&json!({})), Some(GuestNetwork::Nat));
+        assert_eq!(
+            GuestNetwork::of_record(&json!({"network": "internet"})),
+            Some(GuestNetwork::Internet)
+        );
+        assert_eq!(GuestNetwork::of_record(&json!({"network": "control-only"})), None);
+    }
+
+    #[test]
+    fn internet_is_requested_and_effective() {
+        let result = resolve_for_image(
+            None,
+            None,
+            None,
+            true,
+            &json!(24),
+            false,
+            ImageDefaults::default(),
+            GuestNetwork::Internet,
+        )
+        .unwrap();
+        assert_eq!(result["requested"]["network"], json!("internet"));
+        assert_eq!(result["effective"]["network"], json!("internet"));
+    }
+
+    #[test]
+    fn descriptor_reports_internet_availability() {
+        let available = descriptor(&json!({}), None, &InternetAvailability::Available);
+        let network = &available["options"]["network"];
+        assert_eq!(network["default"], json!("nat"));
+        assert_eq!(network["values"], json!(["nat", "internet"]));
+        assert_eq!(network["internet"]["available"], json!(true));
+        assert_eq!(network["internet"]["runtime"], json!("tart-softnet"));
+        assert!(network["internet"].get("reason").is_none());
+
+        let missing = InternetAvailability::Unavailable("Softnet is not installed".into());
+        let unavailable = descriptor(&json!({}), None, &missing);
+        let network = &unavailable["options"]["network"];
+        assert_eq!(network["values"], json!(["nat", "internet"]));
+        assert_eq!(network["internet"]["available"], json!(false));
+        assert_eq!(network["internet"]["reason"], json!("Softnet is not installed"));
     }
 
     #[test]
@@ -297,7 +472,7 @@ mod tests {
     #[test]
     fn omitted_resources_take_the_image_configuration() {
         let image = ImageDefaults { cpu: Some(4), memory_mb: Some(8192) };
-        let result = resolve_for_image(None, None, None, true, &json!(24), false, image).unwrap();
+        let result = resolve_for_image(None, None, None, true, &json!(24), false, image, GuestNetwork::Nat).unwrap();
         assert_eq!(result["effective"]["cpu"], json!(4));
         assert_eq!(result["effective"]["memory_mb"], json!(8192));
         assert_eq!(result["sources"]["cpu"], json!("image-configuration"));
@@ -310,7 +485,7 @@ mod tests {
     fn a_request_overrides_the_image_configuration() {
         let image = ImageDefaults { cpu: Some(4), memory_mb: Some(8192) };
         let result =
-            resolve_for_image(Some(2), None, None, true, &json!(24), false, image).unwrap();
+            resolve_for_image(Some(2), None, None, true, &json!(24), false, image, GuestNetwork::Nat).unwrap();
         assert_eq!(result["effective"]["cpu"], json!(2));
         assert_eq!(result["sources"]["cpu"], json!("request"));
         assert_eq!(result["effective"]["memory_mb"], json!(8192));
@@ -319,7 +494,7 @@ mod tests {
     #[test]
     fn an_unconfigured_image_dimension_takes_the_service_default() {
         let image = ImageDefaults { cpu: None, memory_mb: Some(8192) };
-        let result = resolve_for_image(None, None, None, true, &json!(24), false, image).unwrap();
+        let result = resolve_for_image(None, None, None, true, &json!(24), false, image, GuestNetwork::Nat).unwrap();
         assert_eq!(result["effective"]["cpu"], json!(6));
         assert_eq!(result["sources"]["cpu"], json!("service-default"));
     }
@@ -386,7 +561,7 @@ mod tests {
     #[test]
     fn descriptor_without_images() {
         let backends = json!({"tart": "unmodified"});
-        let descriptor = descriptor(&backends, None);
+        let descriptor = descriptor(&backends, None, &InternetAvailability::Available);
         assert_eq!(descriptor["schemaVersion"], json!(1));
         assert_eq!(descriptor["service"], json!("vm-service"));
         assert_eq!(descriptor["options"]["vnc"]["backends"], backends);
@@ -413,7 +588,7 @@ mod tests {
     fn descriptor_with_images() {
         let backends = json!({});
         let images = json!([{"name": "macos26"}]);
-        let descriptor = descriptor(&backends, Some(&images));
+        let descriptor = descriptor(&backends, Some(&images), &InternetAvailability::Available);
         assert_eq!(
             descriptor["image_configuration"]["status"],
             json!("configured")
@@ -425,7 +600,7 @@ mod tests {
     fn descriptor_with_empty_image_list_still_reports_configured() {
         let backends = json!({});
         let empty = json!([]);
-        let descriptor = descriptor(&backends, Some(&empty));
+        let descriptor = descriptor(&backends, Some(&empty), &InternetAvailability::Available);
         assert_eq!(
             descriptor["image_configuration"]["status"],
             json!("configured")

@@ -2,7 +2,7 @@ usage: vmctl acquire [-h]
                      --purpose PURPOSE
                      [--image IMAGE]
                      [--env ENV]
-                     [--network {nat,control-only}]
+                     [--network {nat,internet,control-only}]
                      [--profile PROFILE]
                      [--ttl-hours TTL_HOURS]
                      [--cpu CPU]
@@ -29,7 +29,7 @@ options:
            <env-pack-name>
            (credential env
            vars)
-  --network {nat,control-only}
+  --network {nat,internet,control-only}
   --profile PROFILE
            explicit control-
            only helper profile

@@ -19,6 +19,7 @@ use std::sync::{Arc, Mutex};
 use serde_json::{json, Map, Value};
 use tempfile::TempDir;
 
+use vm_service_core::acquisition_options::GuestNetwork;
 use vm_service_core::config::{Config, GuestLink};
 use vm_service_core::console_api::ConsoleController;
 use vm_service_core::error::{OpError, OpResult};
@@ -360,6 +361,8 @@ pub struct FakeHost {
     pub tart_store: Mutex<PathBuf>,
     /// The in-process guest behind guest session channels.
     pub guest: guest::FakeGuest,
+    /// When set, `softnet` reports Softnet unusable with this reason.
+    pub softnet_refusal: Mutex<Option<String>>,
 }
 
 impl FakeHost {
@@ -385,6 +388,7 @@ impl FakeHost {
             transfer_hook: Mutex::new(None),
             tart_store: Mutex::new(home_tart_store),
             guest: guest::FakeGuest::new(home.join("guest")),
+            softnet_refusal: Mutex::new(None),
             home,
         }
     }
@@ -495,12 +499,14 @@ impl Host for FakeHost {
         Ok(())
     }
 
-    fn spawn_run(&self, vm: &str) -> OpResult<Box<dyn BootProcess>> {
+    fn spawn_run(&self, vm: &str, network: GuestNetwork) -> OpResult<Box<dyn BootProcess>> {
+        // Record the arguments after `run`, as the real `tart run` gets them.
+        let args = vm_service_core::network::run_args(vm, network);
         self.tart
             .calls
             .lock()
             .expect("calls")
-            .push(("run".to_string(), vec![vm.to_string()]));
+            .push(("run".to_string(), args[1..].to_vec()));
         if let Some(code) = *self.boot_exit.lock().expect("boot_exit") {
             return Ok(Box::new(FakeBootProcess { exit: Some(code) }));
         }
@@ -510,6 +516,13 @@ impl Host for FakeHost {
             .expect("vms")
             .insert(vm.to_string(), true);
         Ok(Box::new(FakeBootProcess { exit: None }))
+    }
+
+    fn softnet(&self) -> Result<PathBuf, String> {
+        match self.softnet_refusal.lock().expect("softnet_refusal").clone() {
+            Some(reason) => Err(reason),
+            None => Ok(PathBuf::from("/opt/homebrew/bin/softnet")),
+        }
     }
 
     fn boot_settle_s(&self) -> f64 {
@@ -720,6 +733,14 @@ impl Fixture {
         wait: bool,
     ) -> OpResult<Value> {
         self.try_acquire_vnc(purpose, image, env, ttl_hours, wait, false)
+    }
+
+    /// Acquire `ubuntu2404` with `env: none` on an explicit network.
+    pub fn try_acquire_network(&self, purpose: &str, network: &str) -> OpResult<Value> {
+        self.service.acquire(
+            purpose, "ubuntu2404", "none", &json!(24), None, None, None, true, network, None,
+            "base", None, false,
+        )
     }
 
     /// Acquire with an explicit console flag, mirroring `vnc=True`.
