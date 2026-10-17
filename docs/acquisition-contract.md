@@ -36,6 +36,7 @@
 - The lease's record and its reporting carry its network.
 - Discovery reports whether `internet` is available on this host.
 - The control-only network is a separate contract, and stays as it is.
+- [The live verification](guest-network-verification.md) records what an `internet` guest reaches on this host. Stock Softnet passes the guest's traffic to the host's address on the VM network, so the host's services listening on all addresses are still reachable, and DC-13 is not yet met.
 
 ## New lease identity and reporting
 
