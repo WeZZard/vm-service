@@ -61,7 +61,10 @@ struct TcpProbeListener {
 
 impl ProbeListener for TcpProbeListener {
     fn port(&self) -> u16 {
-        self.listener.local_addr().map(|address| address.port()).unwrap_or(0)
+        self.listener
+            .local_addr()
+            .map(|address| address.port())
+            .unwrap_or(0)
     }
 
     fn accepted(&mut self) -> bool {
@@ -190,7 +193,9 @@ pub trait Host: Send + Sync {
 
     /// Open a listener on all of this host's addresses, on an ephemeral port.
     fn open_probe(&self) -> OpResult<Box<dyn ProbeListener>> {
-        Err(OpError::new("guest isolation probes are unavailable on this host"))
+        Err(OpError::new(
+            "guest isolation probes are unavailable on this host",
+        ))
     }
 
     /// The boot-settle window, in seconds.

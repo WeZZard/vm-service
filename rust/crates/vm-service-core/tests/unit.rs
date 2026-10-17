@@ -216,7 +216,10 @@ fn test_omitted_resources_use_the_image_configuration() {
     assert_eq!(tart_set_args(&fixture), ["--cpu", "4", "--memory", "8192"]);
     let configuration = &rec["configuration"];
     assert_eq!(configuration["effective"]["memory_mb"], json!(8192));
-    assert_eq!(configuration["sources"]["memory_mb"], json!("image-configuration"));
+    assert_eq!(
+        configuration["sources"]["memory_mb"],
+        json!("image-configuration")
+    );
     // The top-level fields still report only what the client requested.
     assert!(rec["memory_mb"].is_null());
 }
@@ -230,8 +233,19 @@ fn test_requested_resources_override_the_image_configuration() {
     fixture
         .service
         .acquire(
-            "task-a", "ubuntu2404", "none", &json!(24), Some(2), Some(4096), None, true, "nat",
-            None, "base", None, false,
+            "task-a",
+            "ubuntu2404",
+            "none",
+            &json!(24),
+            Some(2),
+            Some(4096),
+            None,
+            true,
+            "nat",
+            None,
+            "base",
+            None,
+            false,
         )
         .expect("acquire");
     assert_eq!(tart_set_args(&fixture), ["--cpu", "2", "--memory", "4096"]);
@@ -1366,20 +1380,35 @@ fn test_default_network_is_nat_with_today_s_run_command() {
     let vm = rec["vm"].as_str().expect("vm name").to_string();
     assert_eq!(rec["network"], json!("nat"));
     assert_eq!(rec["configuration"]["effective"]["network"], json!("nat"));
-    assert_eq!(run_call(&fixture, &vm), vec![vm.clone(), "--no-graphics".to_string()]);
+    assert_eq!(
+        run_call(&fixture, &vm),
+        vec![vm.clone(), "--no-graphics".to_string()]
+    );
 }
 
 #[test]
 fn test_internet_lease_boots_on_softnet_and_reports_its_network() {
     let fixture = common::Fixture::new();
-    let rec = fixture.try_acquire_network("web", "internet").expect("acquire");
+    let rec = fixture
+        .try_acquire_network("web", "internet")
+        .expect("acquire");
     let vm = rec["vm"].as_str().expect("vm name").to_string();
     assert_eq!(rec["network"], json!("internet"));
-    assert_eq!(rec["configuration"]["requested"]["network"], json!("internet"));
-    assert_eq!(rec["configuration"]["effective"]["network"], json!("internet"));
+    assert_eq!(
+        rec["configuration"]["requested"]["network"],
+        json!("internet")
+    );
+    assert_eq!(
+        rec["configuration"]["effective"]["network"],
+        json!("internet")
+    );
     assert_eq!(
         run_call(&fixture, &vm),
-        vec![vm.clone(), "--no-graphics".to_string(), "--net-softnet".to_string()]
+        vec![
+            vm.clone(),
+            "--no-graphics".to_string(),
+            "--net-softnet".to_string()
+        ]
     );
     assert_eq!(fixture.read_state()[&vm]["network"], json!("internet"));
     assert_eq!(fixture.snapshot()["vms"][&vm]["network"], json!("internet"));
@@ -1394,7 +1423,11 @@ fn test_internet_lease_boots_on_softnet_and_reports_its_network() {
 #[test]
 fn test_internet_without_softnet_is_refused_before_the_clone() {
     let fixture = common::Fixture::new();
-    *fixture.host.softnet_refusal.lock().expect("softnet_refusal") =
+    *fixture
+        .host
+        .softnet_refusal
+        .lock()
+        .expect("softnet_refusal") =
         Some("Softnet unavailable: no softnet executable on Tart's PATH".to_string());
     let err = fixture
         .try_acquire_network("web", "internet")
@@ -1419,7 +1452,10 @@ fn test_unknown_network_is_rejected_before_reservation() {
     let err = fixture
         .try_acquire_network("web", "control-only")
         .expect_err("control-only stays refused");
-    assert!(err.to_string().starts_with("control-only unavailable"), "{err}");
+    assert!(
+        err.to_string().starts_with("control-only unavailable"),
+        "{err}"
+    );
     assert!(!fixture.host.tart.ops().contains(&"clone".to_string()));
 }
 
@@ -1433,7 +1469,11 @@ fn test_a_record_on_another_network_cannot_use_the_lease_key() {
         .service
         .guest_exec(&vm, &json!({"argv": ["true"]}))
         .expect_err("control-only record must be denied");
-    assert!(err.to_string().contains("control-only ownership auditor unavailable"), "{err}");
+    assert!(
+        err.to_string()
+            .contains("control-only ownership auditor unavailable"),
+        "{err}"
+    );
 }
 
 // ------------------------------------------- internet guest isolation (DC-14)
@@ -1448,7 +1488,10 @@ fn test_internet_without_the_guest_firewall_is_refused_before_the_clone() {
     let err = fixture
         .try_acquire_network("web", "internet")
         .expect_err("internet without the firewall must fail");
-    assert!(err.to_string().starts_with("guest firewall not installed"), "{err}");
+    assert!(
+        err.to_string().starts_with("guest firewall not installed"),
+        "{err}"
+    );
     assert!(!fixture.host.tart.ops().contains(&"clone".to_string()));
     // NAT does not need the firewall.
     fixture.acquire("nat-ok", "ubuntu2404", "none");
@@ -1472,9 +1515,14 @@ fn table_guests(fixture: &common::Fixture) -> Vec<String> {
 #[test]
 fn test_internet_guest_gets_dot_resolvers_a_table_entry_and_a_verified_isolation() {
     let fixture = common::Fixture::new();
-    let rec = fixture.try_acquire_network("web", "internet").expect("acquire");
+    let rec = fixture
+        .try_acquire_network("web", "internet")
+        .expect("acquire");
     let vm = rec["vm"].as_str().expect("vm").to_string();
-    assert_eq!(rec["guest_dns"], json!(["1.1.1.1#cloudflare-dns.com", "8.8.8.8#dns.google"]));
+    assert_eq!(
+        rec["guest_dns"],
+        json!(["1.1.1.1#cloudflare-dns.com", "8.8.8.8#dns.google"])
+    );
     let isolation = &rec["isolation"];
     assert_eq!(isolation["status"], json!("verified"));
     assert_eq!(isolation["address"], json!(common::FAKE_IP));
@@ -1485,14 +1533,26 @@ fn test_internet_guest_gets_dot_resolvers_a_table_entry_and_a_verified_isolation
     assert_eq!(isolation["egress"]["address"], json!("104.20.23.154"));
     assert_eq!(isolation["egress"]["https"], json!("200"));
     let table = fixture.host.home.join("internet-guests");
-    assert_eq!(isolation["firewall_table"], json!(table.display().to_string()));
+    assert_eq!(
+        isolation["firewall_table"],
+        json!(table.display().to_string())
+    );
     assert_eq!(rec["firewall_address"], json!(common::FAKE_IP));
 
     // The address is in the shared table under this instance's name.
     let instance = fixture.service.config.state_dir.display().to_string();
-    assert_eq!(table_guests(&fixture), vec![format!("{} {instance} {vm}", common::FAKE_IP)]);
+    assert_eq!(
+        table_guests(&fixture),
+        vec![format!("{} {instance} {vm}", common::FAKE_IP)]
+    );
 
-    let calls = fixture.host.ssh.ssh_calls.lock().expect("ssh_calls").clone();
+    let calls = fixture
+        .host
+        .ssh
+        .ssh_calls
+        .lock()
+        .expect("ssh_calls")
+        .clone();
     let position = |needle: &str| {
         calls
             .iter()
@@ -1502,7 +1562,10 @@ fn test_internet_guest_gets_dot_resolvers_a_table_entry_and_a_verified_isolation
     let dns = position("DNSOverTLS=yes");
     let probe = position(vm_service_core::isolation::PROBE_MARKER);
     let egress = position(vm_service_core::isolation::EGRESS_MARKER);
-    assert!(dns < probe && probe < egress, "resolvers, then probe, then egress");
+    assert!(
+        dns < probe && probe < egress,
+        "resolvers, then probe, then egress"
+    );
     let (command, stdin, _) = &calls[dns];
     assert!(command.starts_with("sudo -S -p '' sh -c "), "{command}");
     assert_eq!(stdin.as_deref(), Some("admin\n"));
@@ -1518,15 +1581,34 @@ fn test_a_macos_internet_guest_runs_the_dot_forwarder() {
     let rec = fixture
         .service
         .acquire(
-            "web", "macos26", "none", &json!(24), None, None, None, true, "internet", None,
-            "base", None, false,
+            "web",
+            "macos26",
+            "none",
+            &json!(24),
+            None,
+            None,
+            None,
+            true,
+            "internet",
+            None,
+            "base",
+            None,
+            false,
         )
         .expect("acquire");
     assert_eq!(rec["isolation"]["status"], json!("verified"));
-    let calls = fixture.host.ssh.ssh_calls.lock().expect("ssh_calls").clone();
+    let calls = fixture
+        .host
+        .ssh
+        .ssh_calls
+        .lock()
+        .expect("ssh_calls")
+        .clone();
     let upload = calls
         .iter()
-        .position(|(command, _, _)| command == &vm_service_core::isolation::forwarder_upload_command())
+        .position(|(command, _, _)| {
+            command == &vm_service_core::isolation::forwarder_upload_command()
+        })
         .expect("forwarder upload");
     assert_eq!(calls[upload].1.as_deref(), Some("fake forwarder"));
     let install = calls
@@ -1535,7 +1617,9 @@ fn test_a_macos_internet_guest_runs_the_dot_forwarder() {
         .expect("forwarder install");
     assert!(upload < install);
     assert_eq!(calls[install].1.as_deref(), Some("station\n"));
-    assert!(calls.iter().any(|(command, _, _)| command.contains("dscacheutil -q host")));
+    assert!(calls
+        .iter()
+        .any(|(command, _, _)| command.contains("dscacheutil -q host")));
 }
 
 #[test]
@@ -1544,7 +1628,12 @@ fn test_the_probe_is_retried_while_the_table_reloads() {
     let probes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let counter = probes.clone();
     *fixture.host.ssh_hook.lock().expect("ssh_hook") = Some(std::sync::Arc::new(
-        move |_ip: &str, _user: &str, _key: &std::path::Path, command: &str, _stdin: Option<&[u8]>, _timeout: u64| {
+        move |_ip: &str,
+              _user: &str,
+              _key: &std::path::Path,
+              command: &str,
+              _stdin: Option<&[u8]>,
+              _timeout: u64| {
             if command.contains(vm_service_core::isolation::PROBE_MARKER) {
                 let seen = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 let result = if seen == 0 { "open" } else { "timeout" };
@@ -1556,7 +1645,9 @@ fn test_the_probe_is_retried_while_the_table_reloads() {
             Some((0, String::new()))
         },
     ));
-    let rec = fixture.try_acquire_network("web", "internet").expect("acquire");
+    let rec = fixture
+        .try_acquire_network("web", "internet")
+        .expect("acquire");
     assert_eq!(rec["isolation"]["probe_attempts"], json!(2));
     assert_eq!(probes.load(std::sync::atomic::Ordering::SeqCst), 2);
 }
@@ -1568,14 +1659,23 @@ fn test_a_name_that_does_not_resolve_publicly_fails_the_acquisition() {
         0,
         (
             vm_service_core::isolation::EGRESS_MARKER.to_string(),
-            (0, "egress name=example.com address=198.18.35.15 https=000".to_string()),
+            (
+                0,
+                "egress name=example.com address=198.18.35.15 https=000".to_string(),
+            ),
         ),
     );
     let err = fixture
         .try_acquire_network("web", "internet")
         .expect_err("a fake-IP answer must fail the acquisition");
-    assert!(err.to_string().contains("resolved to 198.18.35.15"), "{err}");
-    assert!(table_guests(&fixture).is_empty(), "the failed lease left its address");
+    assert!(
+        err.to_string().contains("resolved to 198.18.35.15"),
+        "{err}"
+    );
+    assert!(
+        table_guests(&fixture).is_empty(),
+        "the failed lease left its address"
+    );
 }
 
 #[test]
@@ -1604,7 +1704,9 @@ fn test_stale_table_entries_of_this_instance_are_pruned_and_others_kept() {
         )
         .unwrap();
     }
-    let rec = fixture.try_acquire_network("web", "internet").expect("acquire");
+    let rec = fixture
+        .try_acquire_network("web", "internet")
+        .expect("acquire");
     let vm = rec["vm"].as_str().expect("vm").to_string();
     fixture.service.gc_once().expect("gc");
     assert_eq!(
@@ -1623,10 +1725,9 @@ fn test_nat_guest_is_not_probed_or_reconfigured() {
     assert!(rec.get("isolation").is_none());
     assert!(rec.get("guest_dns").is_none());
     let commands = fixture.host.ssh.commands();
-    assert!(!commands
-        .iter()
-        .any(|command| command.contains(vm_service_core::isolation::PROBE_MARKER)
-            || command.contains("resolved.conf.d")));
+    assert!(!commands.iter().any(|command| command
+        .contains(vm_service_core::isolation::PROBE_MARKER)
+        || command.contains("resolved.conf.d")));
 }
 
 /// A guest that reaches this host fails the acquisition, and the lease is
@@ -1636,12 +1737,20 @@ fn assert_isolation_failure(fixture: &common::Fixture, needle: &str) {
         .try_acquire_network("web", "internet")
         .expect_err("a reachable host must fail the acquisition");
     let message = err.to_string();
-    assert!(message.starts_with("guest isolation check failed"), "{message}");
+    assert!(
+        message.starts_with("guest isolation check failed"),
+        "{message}"
+    );
     assert!(message.contains(needle), "{message}");
-    assert!(message.contains("vm-service-guest-firewall install"), "{message}");
+    assert!(
+        message.contains("vm-service-guest-firewall install"),
+        "{message}"
+    );
     let state = fixture.read_state();
     assert!(
-        state.values().all(|record| record["state"] != json!("running")),
+        state
+            .values()
+            .all(|record| record["state"] != json!("running")),
         "a failed isolation left a running lease: {state:?}"
     );
     let vms = fixture.host.tart.vms.lock().expect("vms");
@@ -1650,7 +1759,10 @@ fn assert_isolation_failure(fixture: &common::Fixture, needle: &str) {
         "the clone was not deleted: {vms:?}"
     );
     drop(vms);
-    assert!(table_guests(fixture).is_empty(), "the failed lease left its address");
+    assert!(
+        table_guests(fixture).is_empty(),
+        "the failed lease left its address"
+    );
 }
 
 #[test]
@@ -1669,7 +1781,10 @@ fn test_a_guest_that_connects_to_the_gateway_fails_the_acquisition() {
 #[test]
 fn test_a_connection_seen_by_the_host_listener_fails_the_acquisition() {
     let fixture = common::Fixture::new();
-    fixture.host.probe_accepted.store(true, std::sync::atomic::Ordering::SeqCst);
+    fixture
+        .host
+        .probe_accepted
+        .store(true, std::sync::atomic::Ordering::SeqCst);
     assert_isolation_failure(&fixture, "connected to this host");
 }
 
@@ -1689,7 +1804,11 @@ fn test_a_probe_that_cannot_run_fails_the_acquisition() {
 #[test]
 fn test_resolvers_that_cannot_be_set_fail_the_acquisition() {
     let fixture = common::Fixture::new();
-    fixture.host.ssh.map("90-vm-service-guest-dns.conf", 1, "sudo: a password is required");
+    fixture.host.ssh.map(
+        "90-vm-service-guest-dns.conf",
+        1,
+        "sudo: a password is required",
+    );
     let err = fixture
         .try_acquire_network("web", "internet")
         .expect_err("resolvers must be set");

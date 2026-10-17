@@ -254,7 +254,7 @@ fn push_target_components(target: &Path, queue: &mut VecDeque<OsString>) {
             _ => {}
         }
     }
-    front.extend(queue.drain(..));
+    front.append(queue);
     *queue = front;
 }
 

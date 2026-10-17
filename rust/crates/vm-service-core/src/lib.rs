@@ -32,8 +32,8 @@ pub use acquisition_options;
 pub use application_catalog;
 pub use console as console_crate;
 pub use control_only;
-pub use guest_firewall;
 pub use environment;
+pub use guest_firewall;
 pub use lease_keys;
 
 pub use error::{OpError, OpResult};

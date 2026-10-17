@@ -560,11 +560,13 @@ pub fn decide_egress(egress: Option<&Egress>) -> Result<(), String> {
     let address: Option<Ipv4Addr> = egress.address.parse().ok();
     match address {
         Some(address) if globally_routable(address) => {}
-        _ => return Err(format!(
+        _ => {
+            return Err(format!(
             "guest egress check failed: {EGRESS_HOST} resolved to {} in the guest, not a public \
 address; the guest's DNS over TLS is not answering",
             egress.address
-        )),
+        ))
+        }
     }
     match egress.https.parse::<u16>() {
         Ok(status) if (200..400).contains(&status) => Ok(()),

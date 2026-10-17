@@ -551,14 +551,24 @@ impl Host for FakeHost {
     }
 
     fn softnet(&self) -> Result<PathBuf, String> {
-        match self.softnet_refusal.lock().expect("softnet_refusal").clone() {
+        match self
+            .softnet_refusal
+            .lock()
+            .expect("softnet_refusal")
+            .clone()
+        {
             Some(reason) => Err(reason),
             None => Ok(PathBuf::from("/opt/homebrew/bin/softnet")),
         }
     }
 
     fn guest_firewall(&self) -> Result<vm_service_core::isolation::GuestFirewall, String> {
-        match self.firewall_refusal.lock().expect("firewall_refusal").clone() {
+        match self
+            .firewall_refusal
+            .lock()
+            .expect("firewall_refusal")
+            .clone()
+        {
             Some(reason) => Err(reason),
             None => Ok(vm_service_core::isolation::GuestFirewall {
                 table: self.firewall_table(),
@@ -793,8 +803,19 @@ impl Fixture {
     /// Acquire `ubuntu2404` with `env: none` on an explicit network.
     pub fn try_acquire_network(&self, purpose: &str, network: &str) -> OpResult<Value> {
         self.service.acquire(
-            purpose, "ubuntu2404", "none", &json!(24), None, None, None, true, network, None,
-            "base", None, false,
+            purpose,
+            "ubuntu2404",
+            "none",
+            &json!(24),
+            None,
+            None,
+            None,
+            true,
+            network,
+            None,
+            "base",
+            None,
+            false,
         )
     }
 

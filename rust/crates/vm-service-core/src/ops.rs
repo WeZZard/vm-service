@@ -708,7 +708,9 @@ impl Service {
             },
         )
         .map_err(|error| OpError::new(format!("guest firewall table {table}: {error}")))?;
-        self.log(&format!("{vm}: {ip} added to the guest firewall table {table}"));
+        self.log(&format!(
+            "{vm}: {ip} added to the guest firewall table {table}"
+        ));
         Ok(())
     }
 
@@ -727,7 +729,9 @@ impl Service {
             &self.firewall_instance(),
             vm,
         ) {
-            Ok(()) => self.log(&format!("{vm}: removed from the guest firewall table {table}")),
+            Ok(()) => self.log(&format!(
+                "{vm}: removed from the guest firewall table {table}"
+            )),
             Err(error) => self.log(&format!(
                 "WARN: {vm}: could not remove it from the guest firewall table {table}: {error}; \
 the next GC pass retries"
@@ -750,8 +754,9 @@ the next GC pass retries"
                 .unwrap_or_default(),
             Err(_) => return,
         };
-        match guest_firewall::prune_guests(&table, &self.firewall_instance(), |vm| live.contains(vm))
-        {
+        match guest_firewall::prune_guests(&table, &self.firewall_instance(), |vm| {
+            live.contains(vm)
+        }) {
             Ok(removed) if !removed.is_empty() => self.log(&format!(
                 "guest firewall table {}: removed stale entries for {}",
                 table.display(),
@@ -796,7 +801,9 @@ the next GC pass retries"
             })
             .unwrap_or_default();
         if resolvers.is_empty() {
-            return Err(OpError::new(format!("{vm} has no guest resolvers recorded")));
+            return Err(OpError::new(format!(
+                "{vm} has no guest resolvers recorded"
+            )));
         }
         let listed = resolvers
             .iter()
@@ -896,7 +903,14 @@ the next GC pass retries"
         for attempt in 1..=crate::isolation::EGRESS_ATTEMPTS {
             let output = self
                 .host
-                .ssh(ip, ssh_user, key_dir, &crate::isolation::egress_command(kind), None, 60)
+                .ssh(
+                    ip,
+                    ssh_user,
+                    key_dir,
+                    &crate::isolation::egress_command(kind),
+                    None,
+                    60,
+                )
                 .map(|(_, output)| output)
                 .unwrap_or_default();
             egress = crate::isolation::parse_egress(&output);

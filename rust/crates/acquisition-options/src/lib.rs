@@ -209,7 +209,9 @@ pub enum InternetAvailability {
 impl InternetAvailability {
     fn describe(&self) -> Value {
         match self {
-            InternetAvailability::Available => json!({"available": true, "runtime": "tart-softnet"}),
+            InternetAvailability::Available => {
+                json!({"available": true, "runtime": "tart-softnet"})
+            }
             InternetAvailability::Unavailable(reason) => json!({
                 "available": false,
                 "runtime": "tart-softnet",
@@ -406,7 +408,11 @@ mod tests {
             json!({"network": "internet"}),
         ] {
             let err = GuestNetwork::parse(Some(&value)).unwrap_err();
-            assert_eq!(err.to_string(), "network must be nat or internet", "value={value}");
+            assert_eq!(
+                err.to_string(),
+                "network must be nat or internet",
+                "value={value}"
+            );
         }
     }
 
@@ -417,7 +423,10 @@ mod tests {
             GuestNetwork::of_record(&json!({"network": "internet"})),
             Some(GuestNetwork::Internet)
         );
-        assert_eq!(GuestNetwork::of_record(&json!({"network": "control-only"})), None);
+        assert_eq!(
+            GuestNetwork::of_record(&json!({"network": "control-only"})),
+            None
+        );
     }
 
     #[test]
@@ -452,7 +461,10 @@ mod tests {
         let network = &unavailable["options"]["network"];
         assert_eq!(network["values"], json!(["nat", "internet"]));
         assert_eq!(network["internet"]["available"], json!(false));
-        assert_eq!(network["internet"]["reason"], json!("Softnet is not installed"));
+        assert_eq!(
+            network["internet"]["reason"],
+            json!("Softnet is not installed")
+        );
     }
 
     #[test]
@@ -471,8 +483,21 @@ mod tests {
 
     #[test]
     fn omitted_resources_take_the_image_configuration() {
-        let image = ImageDefaults { cpu: Some(4), memory_mb: Some(8192) };
-        let result = resolve_for_image(None, None, None, true, &json!(24), false, image, GuestNetwork::Nat).unwrap();
+        let image = ImageDefaults {
+            cpu: Some(4),
+            memory_mb: Some(8192),
+        };
+        let result = resolve_for_image(
+            None,
+            None,
+            None,
+            true,
+            &json!(24),
+            false,
+            image,
+            GuestNetwork::Nat,
+        )
+        .unwrap();
         assert_eq!(result["effective"]["cpu"], json!(4));
         assert_eq!(result["effective"]["memory_mb"], json!(8192));
         assert_eq!(result["sources"]["cpu"], json!("image-configuration"));
@@ -483,9 +508,21 @@ mod tests {
 
     #[test]
     fn a_request_overrides_the_image_configuration() {
-        let image = ImageDefaults { cpu: Some(4), memory_mb: Some(8192) };
-        let result =
-            resolve_for_image(Some(2), None, None, true, &json!(24), false, image, GuestNetwork::Nat).unwrap();
+        let image = ImageDefaults {
+            cpu: Some(4),
+            memory_mb: Some(8192),
+        };
+        let result = resolve_for_image(
+            Some(2),
+            None,
+            None,
+            true,
+            &json!(24),
+            false,
+            image,
+            GuestNetwork::Nat,
+        )
+        .unwrap();
         assert_eq!(result["effective"]["cpu"], json!(2));
         assert_eq!(result["sources"]["cpu"], json!("request"));
         assert_eq!(result["effective"]["memory_mb"], json!(8192));
@@ -493,8 +530,21 @@ mod tests {
 
     #[test]
     fn an_unconfigured_image_dimension_takes_the_service_default() {
-        let image = ImageDefaults { cpu: None, memory_mb: Some(8192) };
-        let result = resolve_for_image(None, None, None, true, &json!(24), false, image, GuestNetwork::Nat).unwrap();
+        let image = ImageDefaults {
+            cpu: None,
+            memory_mb: Some(8192),
+        };
+        let result = resolve_for_image(
+            None,
+            None,
+            None,
+            true,
+            &json!(24),
+            false,
+            image,
+            GuestNetwork::Nat,
+        )
+        .unwrap();
         assert_eq!(result["effective"]["cpu"], json!(6));
         assert_eq!(result["sources"]["cpu"], json!("service-default"));
     }
