@@ -13,6 +13,15 @@
 - DC-14 closes the gap with a pf anchor that drops the connections a Softnet guest opens to the host's own addresses, public DNS resolvers for the guest, and an isolation check before every `internet` lease is ready. The design is in [the acquisition contract](acquisition-contract.md#guest-network).
 - The results below were taken before DC-14 was built. They remain the record of what stock Softnet allows.
 
+## First run with the guest firewall
+
+- The owner installed the first anchor on 2026-10-17 at 20:05. Its block rule was `block drop in quick inet proto { tcp udp } from $softnet_guests to (self)`, and its state rule was `pass out quick inet from (self) to $softnet_guests keep state`.
+- The installer confirmed that pf was enabled and the anchor was loaded, and the LaunchDaemon's log shows the anchor load exiting 0.
+- An `internet` acquisition of `ubuntu2404` on a second instance on port 6260 set the guest resolvers to `1.1.1.1, 8.8.8.8`. The isolation check then failed with: "guest isolation check failed: the guest connected to this host at 192.168.2.1:64427; the pf anchor com.apple/250.vm-service for 192.168.2.0/24 is not in force". The service released the lease and deleted its clone.
+- The likely cause is the dynamic address `(self)`. macOS pf has no interface groups, so `(self)` most likely resolves to no address, and neither rule matched. Confirming it needs root, which this session does not have.
+- The anchor now names the subnet itself, which holds the gateway address, and pf's static `self`, which `pfctl` expands each time the anchor loads. This version needs a reinstall by root before the next run.
+- A NAT lease on the same instance, with the first anchor loaded, gave the same results as the NAT column below. It reached the gateway on 443, 22, 6240, 80, 53, 6420, 8443 and a host listener on port 47811, and it reached the home network.
+
 ## Setup
 
 - The host is this Mac, with Tart 2.32.1 and Softnet 0.19.0 at `/opt/homebrew/bin/softnet`. That path is a symlink to a root-owned setuid file in Homebrew's Cellar.
