@@ -34,6 +34,56 @@ pub struct Config {
     pub host: String,
     /// The bind port.
     pub port: u16,
+    /// How exec, push and pull reach the guest.
+    pub guest_link: GuestLink,
+}
+
+/// How exec, push and pull reach the guest (`docs/arch/guest-session.md`,
+/// GS-2), chosen by `VM_SERVICE_GUEST_LINK`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GuestLink {
+    /// One `ssh` or `scp` process per operation.
+    #[default]
+    Ssh,
+    /// One guest session per lease, carried by `ssh` standard input and
+    /// output.
+    SshSession,
+}
+
+impl GuestLink {
+    /// The accepted configuration values.
+    pub const NAMES: [&'static str; 2] = ["ssh", "ssh-session"];
+
+    /// Parse a configuration value.
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "ssh" => Ok(GuestLink::Ssh),
+            "ssh-session" => Ok(GuestLink::SshSession),
+            other => Err(format!(
+                "VM_SERVICE_GUEST_LINK must be one of {}; got {other:?}",
+                Self::NAMES.join(", ")
+            )),
+        }
+    }
+
+    /// Read `VM_SERVICE_GUEST_LINK`; unset or empty selects [`GuestLink::Ssh`].
+    pub fn from_environment() -> Result<Self, String> {
+        match std::env::var("VM_SERVICE_GUEST_LINK") {
+            Ok(value) if !value.is_empty() => Self::parse(&value),
+            Ok(_) | Err(std::env::VarError::NotPresent) => Ok(GuestLink::Ssh),
+            Err(std::env::VarError::NotUnicode(_)) => {
+                Err("VM_SERVICE_GUEST_LINK is not valid UTF-8".to_string())
+            }
+        }
+    }
+
+    /// The configuration value naming this link.
+    pub fn name(self) -> &'static str {
+        match self {
+            GuestLink::Ssh => "ssh",
+            GuestLink::SshSession => "ssh-session",
+        }
+    }
 }
 
 impl Config {
@@ -68,6 +118,7 @@ impl Config {
             state_dir,
             host,
             port,
+            guest_link: GuestLink::Ssh,
         }
     }
 
@@ -108,6 +159,7 @@ impl Config {
             state_dir,
             host: get(exports, "VM_SERVICE_HOST"),
             port,
+            guest_link: GuestLink::Ssh,
         }
     }
 

@@ -14,10 +14,12 @@ use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::time::{Duration, Instant};
 
+use acquisition_options::GuestNetwork;
 use serde_json::{Map, Value};
 
 use crate::config::Config;
 use crate::error::{OpError, OpResult};
+use crate::guest_link::GuestChannel;
 use crate::lines::LineCache;
 
 /// A booting guest process, observed while the hypervisor settles.
@@ -41,6 +43,32 @@ impl BootProcess for ChildBootProcess {
             Ok(None) => None,
             Err(_) => Some(-1),
         }
+    }
+}
+
+/// A listener on this host that an `internet` guest must not reach (DC-14).
+pub trait ProbeListener: Send {
+    /// The port it listens on, on all of the host's addresses.
+    fn port(&self) -> u16;
+    /// Whether a connection has arrived.
+    fn accepted(&mut self) -> bool;
+}
+
+/// The real probe listener: a non-blocking TCP listener on `0.0.0.0`.
+struct TcpProbeListener {
+    listener: std::net::TcpListener,
+}
+
+impl ProbeListener for TcpProbeListener {
+    fn port(&self) -> u16 {
+        self.listener
+            .local_addr()
+            .map(|address| address.port())
+            .unwrap_or(0)
+    }
+
+    fn accepted(&mut self) -> bool {
+        self.listener.accept().is_ok()
     }
 }
 
@@ -85,6 +113,26 @@ pub trait Host: Send + Sync {
         timeout_s: u64,
     ) -> Option<(i32, String)>;
 
+    /// Start `remote_cmd` in the guest with its standard input and output
+    /// carrying a guest session (`docs/arch/guest-session.md`, GS-2).
+    fn open_guest_channel(
+        &self,
+        ip: &str,
+        user: &str,
+        key_dir: &Path,
+        remote_cmd: &str,
+    ) -> OpResult<GuestChannel> {
+        let _ = (ip, user, key_dir, remote_cmd);
+        Err(OpError::new(
+            "guest session channels are unavailable on this host",
+        ))
+    }
+
+    /// The guest session agent for a guest of `kind` (GS-3).
+    fn session_agent(&self, kind: &str) -> OpResult<Vec<u8>> {
+        crate::guest_link::agent_bytes_for(kind)
+    }
+
     /// Wait for a VM to report an IP within `timeout_s`.
     fn wait_ip(&self, name: &str, timeout_s: u64) -> Option<String>;
 
@@ -104,8 +152,51 @@ pub trait Host: Send + Sync {
         timeout_s: f64,
     ) -> OpResult<()>;
 
-    /// Spawn `tart run <vm> --no-graphics` detached.
-    fn spawn_run(&self, vm: &str) -> OpResult<Box<dyn BootProcess>>;
+    /// Spawn `tart run <vm> --no-graphics` detached, with `--net-softnet` for
+    /// a guest on the `internet` network.
+    fn spawn_run(&self, vm: &str, network: GuestNetwork) -> OpResult<Box<dyn BootProcess>>;
+
+    /// The Softnet executable Tart would run for a guest on the `internet`
+    /// network, or the reason, naming Softnet, that Tart cannot run it.
+    ///
+    /// A host that cannot tell reports Softnet unavailable, so an `internet`
+    /// acquisition fails rather than falling back to NAT.
+    fn softnet(&self) -> Result<PathBuf, String> {
+        Err("Softnet unavailable: this host does not run Tart (no NAT fallback)".to_string())
+    }
+
+    /// The installed guest firewall, or the reason, with its install
+    /// command, that an `internet` lease cannot be offered.
+    fn guest_firewall(&self) -> Result<crate::isolation::GuestFirewall, String> {
+        Err("guest firewall unknown on this host (no NAT fallback)".to_string())
+    }
+
+    /// The table file this service writes guest addresses to, whether or not
+    /// the firewall is installed; used to prune entries.
+    fn firewall_table(&self) -> PathBuf {
+        let variable = std::env::var(crate::isolation::TABLE_FILE_VARIABLE).ok();
+        crate::isolation::table_file(variable.as_deref())
+    }
+
+    /// The macOS DNS-over-TLS forwarder to upload into a guest (DC-16).
+    fn dot_forwarder(&self) -> OpResult<Vec<u8>> {
+        let variable = std::env::var(crate::isolation::FORWARDER_VARIABLE).ok();
+        let path = crate::isolation::forwarder_path(variable.as_deref());
+        std::fs::read(&path).map_err(|error| {
+            OpError::new(format!(
+                "DNS-over-TLS forwarder unavailable at {}: {error}; stage {} beside vm-service (no NAT fallback)",
+                path.display(),
+                crate::isolation::FORWARDER
+            ))
+        })
+    }
+
+    /// Open a listener on all of this host's addresses, on an ephemeral port.
+    fn open_probe(&self) -> OpResult<Box<dyn ProbeListener>> {
+        Err(OpError::new(
+            "guest isolation probes are unavailable on this host",
+        ))
+    }
 
     /// The boot-settle window, in seconds.
     fn boot_settle_s(&self) -> f64;
@@ -278,6 +369,16 @@ impl Host for RealHost {
         crate::ssh::scp(&self.config, ip, user, key_dir, src, dst, timeout_s)
     }
 
+    fn open_guest_channel(
+        &self,
+        ip: &str,
+        user: &str,
+        key_dir: &Path,
+        remote_cmd: &str,
+    ) -> OpResult<GuestChannel> {
+        crate::guest_link::ssh_channel(ip, user, key_dir, remote_cmd)
+    }
+
     fn wait_ip(&self, name: &str, timeout_s: u64) -> Option<String> {
         crate::tart::wait_ip(&self.config, name, timeout_s)
     }
@@ -302,9 +403,27 @@ impl Host for RealHost {
             .map_err(|error| OpError::new(error.to_string()))
     }
 
-    fn spawn_run(&self, vm: &str) -> OpResult<Box<dyn BootProcess>> {
-        let child = crate::tart::spawn_run(&self.config, vm)?;
+    fn spawn_run(&self, vm: &str, network: GuestNetwork) -> OpResult<Box<dyn BootProcess>> {
+        let child = crate::tart::spawn_run(&self.config, vm, network)?;
         Ok(Box::new(ChildBootProcess { child }))
+    }
+
+    fn softnet(&self) -> Result<PathBuf, String> {
+        crate::network::softnet_executable(crate::tart::tart_path(&self.config).as_deref())
+    }
+
+    fn guest_firewall(&self) -> Result<crate::isolation::GuestFirewall, String> {
+        let variable = std::env::var(crate::isolation::ANCHOR_FILE_VARIABLE).ok();
+        crate::isolation::check_guest_firewall(
+            &crate::isolation::anchor_file(variable.as_deref()),
+            &self.firewall_table(),
+        )
+    }
+
+    fn open_probe(&self) -> OpResult<Box<dyn ProbeListener>> {
+        let listener = std::net::TcpListener::bind(("0.0.0.0", 0))?;
+        listener.set_nonblocking(true)?;
+        Ok(Box::new(TcpProbeListener { listener }))
     }
 
     fn boot_settle_s(&self) -> f64 {

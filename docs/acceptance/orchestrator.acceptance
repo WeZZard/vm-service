@@ -1,0 +1,24 @@
+Feature: Lease teardown with guest sessions and remote sessions
+
+  @AC-12 @TL-2 @TL-4
+  Scenario: Release cancels a command running over a guest session
+    Given a running lease on guest link "ssh-session"
+    And an exec of "sleep 600" running
+    When the orchestrator releases the lease
+    Then the exec fails with "command cancelled by release"
+    And no "sleep 600" process remains in the guest or on the host
+
+  @AC-13 @TL-2 @TL-4
+  Scenario: Release and destroy leave no guest session behind
+    Given a lease with an open guest session
+    When the orchestrator releases the lease
+    Then the session's channel process has exited
+    And no guest session agent process remains for that lease
+
+  @AC-14 @TL-2
+  Scenario: A daemon restart makes in-flight calls uncertain, never repeated
+    Given a client with a remote session and an exec in flight
+    When vm-service restarts
+    Then the client's resume is answered "expired"
+    And a query of the exec's execution ID answers "unknown"
+    And the client reports the exec as uncertain without sending it again

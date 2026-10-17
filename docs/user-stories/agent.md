@@ -80,6 +80,20 @@ The agent's contract with the service is **lease-based**: it asks for a VM, work
 - `test_stock_console.py`, `test_console_worker.py`, `test_guest_console.py`, and `test_console_http.py` cover the controller, real supervised helper with synthetic processes, guest adapters, and public contract. These are not real VM/viewer acceptance.
 - [The console contract](../console-contract.md) defines the source interface. [The acceptance specification](../vnc-acceptance.md) still requires the installed relay path, actual viewer screenshots, live lifecycle behavior, and cleanup. macOS user authentication and display selection remain explicit unverified steps until observed.
 
+## US19 — Many operations without many SSH handshakes
+
+- As an agent, I want each exec, push and pull on my lease to cost one round trip on an open connection, so that an action made of many small operations is not dominated by connection setup.
+- Results must be the same as today, transferred bytes must arrive intact or fail loudly, and an exec whose connection was lost must be reported uncertain, never run again. See [guest session](../arch/guest-session.md).
+
+**Tests:** AC-1 to AC-5 in [agent.acceptance](../acceptance/agent.acceptance).
+
+## US20 — Keep working across an unreliable network
+
+- As an agent on another network or continent, I want my connection to vm-service to survive resets, silent drops and address changes, so that a long task does not fail because a network path broke.
+- No operation may run twice because of a reconnect. After any failure I can learn whether an operation completed. See [remote session](../arch/remote-session.md).
+
+**Tests:** AC-6 to AC-11 in [agent.acceptance](../acceptance/agent.acceptance).
+
 ## US-N1 — Bounded, predictable consumption
 
 - As an agent, I want explicit defaults and limits so that I can plan a bounded task. TTL defaults to 24 hours and is capped at 720 hours, and macOS concurrency is capped at two leases.

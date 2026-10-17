@@ -9,6 +9,8 @@
 
 #![allow(dead_code)]
 
+pub mod guest;
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -17,9 +19,11 @@ use std::sync::{Arc, Mutex};
 use serde_json::{json, Map, Value};
 use tempfile::TempDir;
 
-use vm_service_core::config::Config;
+use vm_service_core::acquisition_options::GuestNetwork;
+use vm_service_core::config::{Config, GuestLink};
 use vm_service_core::console_api::ConsoleController;
 use vm_service_core::error::{OpError, OpResult};
+use vm_service_core::guest_link::{GuestChannel, START_COMMAND, UPLOAD_COMMAND};
 use vm_service_core::host::{BootProcess, Host, TartOutput};
 use vm_service_core::lines::LineCache;
 use vm_service_core::service::Service;
@@ -355,15 +359,49 @@ pub struct FakeHost {
     pub transfer_hook: Mutex<Option<TransferHook>>,
     /// The Tart store root reported to the service.
     pub tart_store: Mutex<PathBuf>,
+    /// The in-process guest behind guest session channels.
+    pub guest: guest::FakeGuest,
+    /// When set, `softnet` reports Softnet unusable with this reason.
+    pub softnet_refusal: Mutex<Option<String>>,
+    /// When set, `guest_firewall` reports the firewall missing with this reason.
+    pub firewall_refusal: Mutex<Option<String>>,
+    /// Whether the isolation probe's listener reports a connection.
+    pub probe_accepted: AtomicBool,
 }
+
+/// The fake isolation probe listener.
+pub struct FakeProbe {
+    accepted: bool,
+}
+
+impl vm_service_core::host::ProbeListener for FakeProbe {
+    fn port(&self) -> u16 {
+        40000
+    }
+
+    fn accepted(&mut self) -> bool {
+        self.accepted
+    }
+}
+
+/// What a fake guest's isolation probe prints when the gateway is silent.
+pub const PROBE_CLOSED: &str = "gateway=192.168.2.1 result=timeout";
+/// What a fake guest's egress check prints when names and HTTPS work.
+pub const EGRESS_OK: &str = "egress name=example.com address=104.20.23.154 https=200";
 
 impl FakeHost {
     /// Build a host with the fixture's default image lines.
+    ///
+    /// The fake guest's isolation probe finds the gateway silent; a test
+    /// inserts an earlier `rc_map` entry to change that.
     pub fn new(home: PathBuf) -> Self {
         let home_tart_store = home.join(".tart");
+        let ssh = FakeSSH::new();
+        ssh.map(vm_service_core::isolation::PROBE_MARKER, 0, PROBE_CLOSED);
+        ssh.map(vm_service_core::isolation::EGRESS_MARKER, 0, EGRESS_OK);
         Self {
             tart: FakeTart::new(),
-            ssh: FakeSSH::new(),
+            ssh,
             lines: default_lines(),
             lines_override: Mutex::new(None),
             bases: default_bases(),
@@ -372,7 +410,6 @@ impl FakeHost {
             stub_transfer: AtomicBool::new(true),
             boot_settle: Mutex::new(0.05),
             gauge: Mutex::new(Some(0)),
-            home,
             boot_exit: Mutex::new(None),
             ssh_hook: Mutex::new(None),
             scp_hook: Mutex::new(None),
@@ -380,6 +417,11 @@ impl FakeHost {
             bootstrap_hook: Mutex::new(None),
             transfer_hook: Mutex::new(None),
             tart_store: Mutex::new(home_tart_store),
+            guest: guest::FakeGuest::new(home.join("guest")),
+            softnet_refusal: Mutex::new(None),
+            firewall_refusal: Mutex::new(None),
+            probe_accepted: AtomicBool::new(false),
+            home,
         }
     }
 
@@ -417,7 +459,29 @@ impl Host for FakeHost {
         if let Some(hook) = self.ssh_hook.lock().expect("ssh_hook").clone() {
             return hook(ip, user, key_dir, remote_cmd, stdin.as_deref(), timeout_s);
         }
+        if remote_cmd == UPLOAD_COMMAND {
+            self.guest.install(stdin.unwrap_or_default());
+            return Some((0, String::new()));
+        }
         self.ssh.ssh(remote_cmd, stdin, timeout_s)
+    }
+
+    fn open_guest_channel(
+        &self,
+        _ip: &str,
+        _user: &str,
+        _key_dir: &std::path::Path,
+        remote_cmd: &str,
+    ) -> OpResult<GuestChannel> {
+        assert_eq!(
+            remote_cmd, START_COMMAND,
+            "guest channels run the start command"
+        );
+        self.guest.open()
+    }
+
+    fn session_agent(&self, _kind: &str) -> OpResult<Vec<u8>> {
+        Ok(self.guest.offered.lock().expect("offered").clone())
     }
 
     fn scp(
@@ -467,12 +531,14 @@ impl Host for FakeHost {
         Ok(())
     }
 
-    fn spawn_run(&self, vm: &str) -> OpResult<Box<dyn BootProcess>> {
+    fn spawn_run(&self, vm: &str, network: GuestNetwork) -> OpResult<Box<dyn BootProcess>> {
+        // Record the arguments after `run`, as the real `tart run` gets them.
+        let args = vm_service_core::network::run_args(vm, network);
         self.tart
             .calls
             .lock()
             .expect("calls")
-            .push(("run".to_string(), vec![vm.to_string()]));
+            .push(("run".to_string(), args[1..].to_vec()));
         if let Some(code) = *self.boot_exit.lock().expect("boot_exit") {
             return Ok(Box::new(FakeBootProcess { exit: Some(code) }));
         }
@@ -482,6 +548,46 @@ impl Host for FakeHost {
             .expect("vms")
             .insert(vm.to_string(), true);
         Ok(Box::new(FakeBootProcess { exit: None }))
+    }
+
+    fn softnet(&self) -> Result<PathBuf, String> {
+        match self
+            .softnet_refusal
+            .lock()
+            .expect("softnet_refusal")
+            .clone()
+        {
+            Some(reason) => Err(reason),
+            None => Ok(PathBuf::from("/opt/homebrew/bin/softnet")),
+        }
+    }
+
+    fn guest_firewall(&self) -> Result<vm_service_core::isolation::GuestFirewall, String> {
+        match self
+            .firewall_refusal
+            .lock()
+            .expect("firewall_refusal")
+            .clone()
+        {
+            Some(reason) => Err(reason),
+            None => Ok(vm_service_core::isolation::GuestFirewall {
+                table: self.firewall_table(),
+            }),
+        }
+    }
+
+    fn firewall_table(&self) -> PathBuf {
+        self.home.join("internet-guests")
+    }
+
+    fn dot_forwarder(&self) -> OpResult<Vec<u8>> {
+        Ok(b"fake forwarder".to_vec())
+    }
+
+    fn open_probe(&self) -> OpResult<Box<dyn vm_service_core::host::ProbeListener>> {
+        Ok(Box::new(FakeProbe {
+            accepted: self.probe_accepted.load(Ordering::SeqCst),
+        }))
     }
 
     fn boot_settle_s(&self) -> f64 {
@@ -498,7 +604,10 @@ impl Host for FakeHost {
         _force: bool,
     ) -> OpResult<(Map<String, Value>, Map<String, Value>)> {
         let lines = self.lines_override.lock().expect("lines_override").clone();
-        Ok((lines.unwrap_or_else(|| self.lines.clone()), self.bases.clone()))
+        Ok((
+            lines.unwrap_or_else(|| self.lines.clone()),
+            self.bases.clone(),
+        ))
     }
 
     fn home_dir(&self) -> Option<PathBuf> {
@@ -574,15 +683,24 @@ impl Fixture {
     /// `self.svc.CONSOLES = <manager>` replacement, using the same
     /// `verify_transfer` stub as [`Fixture::new`].
     pub fn with_consoles(consoles: Arc<dyn ConsoleController>) -> Self {
-        Self::build(true, Some(consoles))
+        Self::build(true, Some(consoles), GuestLink::default())
     }
 
     /// Build a fixture, optionally exercising the real transfer check.
     pub fn with_transfer_stub(stub: bool) -> Self {
-        Self::build(stub, None)
+        Self::build(stub, None, GuestLink::default())
     }
 
-    fn build(stub: bool, consoles: Option<Arc<dyn ConsoleController>>) -> Self {
+    /// Build a fixture whose guest operations use `link`.
+    pub fn with_guest_link(link: GuestLink) -> Self {
+        Self::build(true, None, link)
+    }
+
+    fn build(
+        stub: bool,
+        consoles: Option<Arc<dyn ConsoleController>>,
+        guest_link: GuestLink,
+    ) -> Self {
         let dir = tempfile::tempdir().expect("tempdir");
         // macOS `/var` is a symlink; lease keys intentionally reject those.
         let root = dir.path().canonicalize().expect("canonicalize");
@@ -597,6 +715,7 @@ impl Fixture {
             log_file: root.join("service.log"),
             host: "127.0.0.1".to_string(),
             port: 6240,
+            guest_link,
         };
         let host = Arc::new(FakeHost::new(root.join("home")));
         host.stub_transfer.store(stub, Ordering::SeqCst);
@@ -679,6 +798,25 @@ impl Fixture {
         wait: bool,
     ) -> OpResult<Value> {
         self.try_acquire_vnc(purpose, image, env, ttl_hours, wait, false)
+    }
+
+    /// Acquire `ubuntu2404` with `env: none` on an explicit network.
+    pub fn try_acquire_network(&self, purpose: &str, network: &str) -> OpResult<Value> {
+        self.service.acquire(
+            purpose,
+            "ubuntu2404",
+            "none",
+            &json!(24),
+            None,
+            None,
+            None,
+            true,
+            network,
+            None,
+            "base",
+            None,
+            false,
+        )
     }
 
     /// Acquire with an explicit console flag, mirroring `vnc=True`.

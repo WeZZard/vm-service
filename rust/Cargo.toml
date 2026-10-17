@@ -5,6 +5,8 @@ members = [
   "crates/environment",
   "crates/acquisition-options",
   "crates/control-only",
+  "crates/guest-firewall",
+  "crates/guest-dot-forwarder",
   "crates/application-catalog",
   "crates/console",
   "crates/vm-service-core",
@@ -12,6 +14,7 @@ members = [
   "crates/vmctl",
   "crates/console-worker",
   "crates/guest-console-agent",
+  "crates/guest-session",
   "crates/vm-service-install",
   "crates/runtime-launcher",
 ]

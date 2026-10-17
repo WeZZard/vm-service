@@ -1,0 +1,18 @@
+[package]
+name = "guest-dot-forwarder"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "guest_dot_forwarder"
+path = "src/lib.rs"
+
+[[bin]]
+name = "vm-service-dot-forwarder"
+path = "src/main.rs"
+
+[dependencies]
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "1"

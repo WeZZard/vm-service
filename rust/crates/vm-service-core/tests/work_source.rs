@@ -129,8 +129,32 @@ impl Host for TestHost {
         self.inner.bootstrap(ip, user, password, key_dir, timeout_s)
     }
 
-    fn spawn_run(&self, vm: &str) -> OpResult<Box<dyn BootProcess>> {
-        self.inner.spawn_run(vm)
+    fn spawn_run(
+        &self,
+        vm: &str,
+        network: vm_service_core::acquisition_options::GuestNetwork,
+    ) -> OpResult<Box<dyn BootProcess>> {
+        self.inner.spawn_run(vm, network)
+    }
+
+    fn softnet(&self) -> Result<PathBuf, String> {
+        self.inner.softnet()
+    }
+
+    fn guest_firewall(&self) -> Result<vm_service_core::isolation::GuestFirewall, String> {
+        self.inner.guest_firewall()
+    }
+
+    fn firewall_table(&self) -> PathBuf {
+        self.inner.firewall_table()
+    }
+
+    fn dot_forwarder(&self) -> OpResult<Vec<u8>> {
+        self.inner.dot_forwarder()
+    }
+
+    fn open_probe(&self) -> OpResult<Box<dyn vm_service_core::host::ProbeListener>> {
+        self.inner.open_probe()
     }
 
     fn boot_settle_s(&self) -> f64 {

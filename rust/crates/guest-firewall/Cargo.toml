@@ -1,0 +1,19 @@
+[package]
+name = "guest-firewall"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "guest_firewall"
+path = "src/lib.rs"
+
+[[bin]]
+name = "vm-service-guest-firewall"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+libc.workspace = true
+tempfile.workspace = true

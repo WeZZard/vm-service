@@ -32,6 +32,10 @@ Consolidated, test-linked user stories for the lease-based VM service. Each stor
 | US16 | Agent / Operator | A fresh lease uses its own host-held SSH key; readiness verifies key-only command and transfer paths; cleanup retains keys until destruction | `test_lease_keys.py`, `test_key_lifecycle.py`; [contract](../lease-ssh-keys.md) |
 | US17 | Agent / Operator | Clients can discover acquisition options and distinguish applied settings from readiness. | New-source tests are `test_stock_console.py` and `test_console_http.py`; see the [contract](../acquisition-contract.md). |
 | US18 | Agent / Human observer | The source supports stock-Tart guest sharing while viewer closure leaves the VM running; installed/live acceptance remains pending. | Tests cover the controller, worker, guest adapter, installer, and relay consumer; see the [console contract](../console-contract.md) and [acceptance specification](../vnc-acceptance.md). |
+| US19 | Agent | Exec, push and pull on a lease share one guest session instead of one SSH connection each | AC-1 to AC-5; [guest session](../arch/guest-session.md) |
+| US20 | Agent | A client on a distant network survives link breaks; no operation runs twice | AC-6 to AC-11; [remote session](../arch/remote-session.md) |
+| US21 | Operator | Choose the guest link from one conformance suite run on real VMs | AC-15 to AC-18; [test layers](../arch/test-layers.md) |
+| US22 | Orchestrator | Release and destroy close guest sessions; a restart is reported uncertain | AC-12 to AC-14 |
 | US-N1 | Agent | Bounded resource consumption and predictable defaults | `TestAcquireValidation.test_ttl_bounds` (unit), `TestImagesSnapshot` (unit) |
 | US-N2 | Orchestrator | Failure at any provisioning step rolls back cleanly | `TestAcquireLifecycle.test_failure_rolls_back_clone_and_state`, `test_ssh_never_ready_rolls_back` (unit) |
 | US-N3 | Orchestrator | Concurrency correctness: races never oversubscribe or double-lease | `TestConcurrency` (unit) |

@@ -4,8 +4,11 @@
 pub mod config;
 pub mod console_api;
 pub mod error;
+pub mod guest_link;
 pub mod host;
+pub mod isolation;
 pub mod lines;
+pub mod network;
 pub mod ops;
 pub mod packs;
 pub mod proc;
@@ -30,6 +33,7 @@ pub use application_catalog;
 pub use console as console_crate;
 pub use control_only;
 pub use environment;
+pub use guest_firewall;
 pub use lease_keys;
 
 pub use error::{OpError, OpResult};

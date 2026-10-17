@@ -6,7 +6,7 @@ use std::sync::Arc;
 use serde_json::{json, Map, Value};
 use tiny_http::{Header, Method, Request, Response, Server};
 
-use vm_service_core::config::Config;
+use vm_service_core::config::{Config, GuestLink};
 use vm_service_core::error::{OpError, OpResult};
 use vm_service_core::service::Service;
 use vm_service_core::{
@@ -40,10 +40,11 @@ fn run(arguments: &[String]) -> Result<(), String> {
 
     let bundle = environment::load_environment(environment_path.as_deref())
         .map_err(|error| error.to_string())?;
-    let config = match &bundle {
+    let mut config = match &bundle {
         Some(bundle) => Config::from_selected(bundle),
         None => Config::legacy(),
     };
+    config.guest_link = GuestLink::from_environment()?;
 
     if bundle.is_none() {
         // A selected startup binds a store/state; legacy startup must not
@@ -130,10 +131,11 @@ fn serve(config: Config) -> Result<(), String> {
     };
     let server = Server::http(&address).map_err(|error| error.to_string())?;
     service.log(&format!(
-        "vm-service starting on {}:{} (pilot repo: {})",
+        "vm-service starting on {}:{} (pilot repo: {}, guest link: {})",
         service.config.host,
         service.config.port,
-        service.config.pilot.display()
+        service.config.pilot.display(),
+        service.config.guest_link.name()
     ));
 
     let gc_service = service.clone();
@@ -169,7 +171,11 @@ fn handle(service: &Service, mut request: Request) {
             }
         }
         Err(error) => {
-            let _ = send(request, 409, &json!({"error": error.to_string()}));
+            let mut body = json!({"error": error.to_string()});
+            if error.uncertain {
+                body["outcome"] = json!("uncertain");
+            }
+            let _ = send(request, 409, &body);
         }
     }
 }
@@ -260,9 +266,19 @@ fn handle_get(service: &Service, request: &mut Request, url: &str) -> OpResult<(
             None
         };
         let capabilities = service.consoles.capabilities();
+        // A stat of the Softnet executable Tart would run and a read of the
+        // guest firewall's anchor file; no process starts.
+        let internet = match service
+            .host
+            .softnet()
+            .and_then(|_| service.host.guest_firewall().map(|_| ()))
+        {
+            Ok(_) => acquisition_options::InternetAvailability::Available,
+            Err(reason) => acquisition_options::InternetAvailability::Unavailable(reason),
+        };
         return Ok((
             200,
-            acquisition_options::descriptor(&capabilities, images.as_ref()),
+            acquisition_options::descriptor(&capabilities, images.as_ref(), &internet),
         ));
     }
     if path == "/images" {
@@ -314,7 +330,7 @@ fn handle_post(service: &Service, request: &mut Request, url: &str) -> OpResult<
     let path = url;
 
     if path == "/acquire" {
-        control_only::validate_request(&body).map_err(|error| OpError::new(error.to_string()))?;
+        vm_service_core::network::validate_request(&body)?;
         let Some(purpose) = body.get("purpose").and_then(Value::as_str) else {
             return Ok((409, json!({"error": "'purpose' (string) is required"})));
         };

@@ -101,7 +101,7 @@ fn test_selected_state_failure_message_matches_python() {
         .read()
         .expect_err("a selected environment must refuse unreadable state");
     assert_eq!(
-        error.0, "selected service state is unreadable or invalid",
+        error.message, "selected service state is unreadable or invalid",
         "the failure message must match Python's"
     );
 
@@ -185,7 +185,7 @@ fn test_state_rejects_malformed_document_shapes() {
             .read()
             .expect_err("a selected environment must refuse a malformed state document");
         assert_eq!(
-            error.0, "selected service state is unreadable or invalid",
+            error.message, "selected service state is unreadable or invalid",
             "unexpected message for {text}"
         );
         let legacy = State::new(dir.path().to_path_buf(), state_file, lock_file, None);

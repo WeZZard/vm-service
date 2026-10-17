@@ -60,6 +60,13 @@ The human operator (WeZZard) who installs the service, keeps it healthy, trouble
 
 **Tests:** none — documentation contract, pinned by review like the non-goals section.
 
+## US21 — Choose the guest link by measured results
+
+- As the operator, I want both guest link candidates, SSH stdio and Tart exec over vsock, to pass one conformance suite on real VMs, so that I choose the default from evidence.
+- The link must be a configuration choice, offline tests must need no Tart, SSH or network, and live tests must leave the installed service alone. See [test layers](../arch/test-layers.md).
+
+**Tests:** AC-15 to AC-18 in [operator.acceptance](../acceptance/operator.acceptance).
+
 ## US-N4 — Tests run where they can, fast; e2e is explicitly real
 
 **As an** operator, **I want** a test suite with no Tart, SSH, or network dependencies, **so that** I can validate changes in seconds before touching the live daemon.

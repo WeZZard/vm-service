@@ -128,6 +128,7 @@ pub fn try_http_timeout(
         .and_then(|code| code.parse::<u16>().ok())
         .ok_or_else(|| format!("malformed status line: {status_line:?}"))?;
     let mut content_length: Option<usize> = None;
+    let mut chunked = false;
     loop {
         let mut line = String::new();
         let read = reader.read_line(&mut line)?;
@@ -138,11 +139,18 @@ pub fn try_http_timeout(
         if let Some(value) = lower.strip_prefix("content-length:") {
             content_length = value.trim().parse::<usize>().ok();
         }
+        if let Some(value) = lower.strip_prefix("transfer-encoding:") {
+            chunked = value.trim() == "chunked";
+        }
     }
-    let mut raw = vec![0u8; content_length.unwrap_or(0)];
-    if !raw.is_empty() {
+    // tiny_http sends bodies above 32 KiB chunked.
+    let raw = if chunked {
+        read_chunked(&mut reader)?
+    } else {
+        let mut raw = vec![0u8; content_length.unwrap_or(0)];
         reader.read_exact(&mut raw)?;
-    }
+        raw
+    };
     let body = if raw.is_empty() {
         json!({})
     } else {
@@ -154,6 +162,37 @@ pub fn try_http_timeout(
         })
     };
     Ok(Response { status, body })
+}
+
+/// A chunked HTTP/1.1 body, without trailers.
+fn read_chunked(reader: &mut impl BufRead) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let mut body = Vec::new();
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line)? == 0 {
+            return Err("chunked body ended early".into());
+        }
+        let size = line.trim().split(';').next().unwrap_or_default();
+        let size = usize::from_str_radix(size, 16)
+            .map_err(|_| format!("malformed chunk size: {line:?}"))?;
+        if size == 0 {
+            // The trailer section ends with an empty line.
+            loop {
+                let mut trailer = String::new();
+                if reader.read_line(&mut trailer)? == 0 || trailer.trim().is_empty() {
+                    return Ok(body);
+                }
+            }
+        }
+        let start = body.len();
+        body.resize(start + size, 0);
+        reader.read_exact(&mut body[start..])?;
+        let mut end = [0u8; 2];
+        reader.read_exact(&mut end)?;
+        if &end != b"\r\n" {
+            return Err("chunk not followed by CRLF".into());
+        }
+    }
 }
 
 // ------------------------------------------------------------------- helpers
@@ -292,7 +331,10 @@ exit 0
 /// Mirrors `tests/integration/_daemon_main.py::fake_ssh` where the subprocess
 /// boundary permits: the secrets probe answers `OK`, any stdin script answers
 /// `script-ran`, `true` answers empty success, a remote command containing
-/// `false` exits 1, and anything else echoes `ran: <remote>`. A remote command
+/// `false` exits 1, and anything else echoes `ran: <remote>`. The isolation
+/// probe of an `internet` lease (DC-14) prints the gateway and
+/// `FAKE_PROBE_RESULT`, `timeout` by default, and its egress check (DC-16)
+/// prints `FAKE_EGRESS_ADDRESS` and HTTPS 200. A remote command
 /// containing `fixture-sleep` replaces the shim with `sleep 60`, standing in
 /// for a guest command that runs far longer than any test.
 ///
@@ -308,6 +350,12 @@ mkdir -p "$root"
 printf '%s\n' "$*" >> "$root/ssh-calls.log"
 case "$*" in
   *fixture-sleep*) exec sleep 60 ;;
+  *"vm-service isolation probe"*)
+    printf 'gateway=192.168.2.1 result=%s\n' "${FAKE_PROBE_RESULT:-timeout}"
+    exit 0 ;;
+  *"vm-service egress check"*)
+    printf 'egress name=example.com address=%s https=200\n' "${FAKE_EGRESS_ADDRESS:-104.20.23.154}"
+    exit 0 ;;
 esac
 last=""
 for arg in "$@"; do last="$arg"; done
@@ -513,37 +561,49 @@ impl Drop for Daemon {
 /// vm-service`, which does not build sibling packages.
 pub fn vmctl_bin() -> &'static PathBuf {
     static PATH: OnceLock<PathBuf> = OnceLock::new();
-    PATH.get_or_init(|| {
-        let daemon = PathBuf::from(DAEMON);
-        let binary_dir = daemon
-            .parent()
-            .expect("daemon binary has a parent directory");
-        let candidate = binary_dir.join("vmctl");
-        if candidate.is_file() {
-            return candidate;
-        }
-        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .ancestors()
-            .nth(2)
-            .expect("workspace root")
-            .to_path_buf();
-        let target_dir = binary_dir.parent().expect("profile directory has a parent");
-        let status = Command::new("cargo")
-            .arg("build")
-            .arg("-p")
-            .arg("vmctl")
-            .current_dir(&workspace)
-            .env("CARGO_TARGET_DIR", target_dir)
-            .status()
-            .expect("build vmctl");
-        assert!(status.success(), "cargo build -p vmctl failed");
-        assert!(
-            candidate.is_file(),
-            "vmctl not found at {} after building",
-            candidate.display()
-        );
-        candidate
-    })
+    PATH.get_or_init(|| sibling_bin("vmctl", "vmctl"))
+}
+
+/// Locate the `guest-session-agent` binary, building it on demand as
+/// [`vmctl_bin`] builds `vmctl`.
+pub fn guest_agent_bin() -> &'static PathBuf {
+    static PATH: OnceLock<PathBuf> = OnceLock::new();
+    PATH.get_or_init(|| sibling_bin("guest-session", "guest-session-agent"))
+}
+
+/// Build `binary` of `package` into the daemon's target directory unless it
+/// is already there.
+fn sibling_bin(package: &str, binary: &str) -> PathBuf {
+    let daemon = PathBuf::from(DAEMON);
+    let binary_dir = daemon
+        .parent()
+        .expect("daemon binary has a parent directory");
+    let candidate = binary_dir.join(binary);
+    if candidate.is_file() {
+        return candidate;
+    }
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("workspace root")
+        .to_path_buf();
+    let target_dir = binary_dir.parent().expect("profile directory has a parent");
+    let status = Command::new("cargo")
+        .args(["build", "-p", package, "--bin", binary])
+        .current_dir(&workspace)
+        .env("CARGO_TARGET_DIR", target_dir)
+        .status()
+        .unwrap_or_else(|error| panic!("build {binary}: {error}"));
+    assert!(
+        status.success(),
+        "cargo build -p {package} --bin {binary} failed"
+    );
+    assert!(
+        candidate.is_file(),
+        "{binary} not found at {} after building",
+        candidate.display()
+    );
+    candidate
 }
 
 /// Run `vmctl` with the given arguments and extra environment overrides.
@@ -769,6 +829,22 @@ impl LegacyFixture {
             let port = free_port();
             self.port.set(port);
             if let Ok(daemon) = Daemon::try_start(&self.root, port, &[], &self.env()) {
+                return daemon;
+            }
+        }
+        panic!("could not start the daemon on a free port");
+    }
+
+    /// Start the daemon with `extra` environment overrides added to
+    /// [`LegacyFixture::env`], retrying on a fresh port like
+    /// [`LegacyFixture::start_daemon`].
+    pub fn start_daemon_with(&self, extra: &[(String, String)]) -> Daemon {
+        for _ in 0..16 {
+            let port = free_port();
+            self.port.set(port);
+            let mut env = self.env();
+            env.extend(extra.iter().cloned());
+            if let Ok(daemon) = Daemon::try_start(&self.root, port, &[], &env) {
                 return daemon;
             }
         }

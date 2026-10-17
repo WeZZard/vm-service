@@ -34,6 +34,12 @@ The orchestrator's defining duty: **teardown happens even when the work fails**.
 
 **Tests:** E2E via `examples/pi-subagents/vm-use.workflow.js`; `tests/e2e/test_e2e.py::TestLifecycleE2E` proves the real clone→exec→release path against live Tart.
 
+## US22 — Teardown covers sessions too
+
+- As an orchestrator, I want release and destroy to cancel commands running over a guest session and close the session, and a vm-service restart to be reported as uncertain, so that teardown stays guaranteed and nothing is repeated.
+
+**Tests:** AC-12 to AC-14 in [orchestrator.acceptance](../acceptance/orchestrator.acceptance).
+
 ## US-N2 — Failure rolls back cleanly
 
 **As an** orchestrator, **I want** a failed provisioning attempt to leave nothing behind, **so that** state and host stay consistent.
