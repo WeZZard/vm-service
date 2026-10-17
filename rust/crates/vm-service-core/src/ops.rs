@@ -92,10 +92,17 @@ impl Service {
             }
             crate::network::RequestedNetwork::Guest(network) => network,
         };
-        if guest_network == GuestNetwork::Internet {
-            // Before the reservation and the clone; never a NAT fallback.
+        // An internet guest needs Softnet, the guest firewall, and public
+        // resolvers; each is checked before the reservation and the clone,
+        // and none falls back to NAT (DC-13, DC-14).
+        let guest_dns = if guest_network == GuestNetwork::Internet {
             self.host.softnet().map_err(OpError::new)?;
-        }
+            self.host.guest_firewall().map_err(OpError::new)?;
+            let variable = std::env::var(crate::isolation::GUEST_DNS_VARIABLE).ok();
+            Some(crate::isolation::parse_guest_dns(variable.as_deref()).map_err(OpError::new)?)
+        } else {
+            None
+        };
 
         if !valid_purpose(purpose) {
             return Err(OpError::new("purpose must match [a-z0-9][a-z0-9-]{0,63}"));
@@ -279,6 +286,14 @@ impl Service {
                     "network".to_string(),
                     Value::String(guest_network.as_str().to_string()),
                 );
+                if let Some(servers) = &guest_dns {
+                    record.insert(
+                        "guest_dns".to_string(),
+                        Value::Array(
+                            servers.iter().map(|server| Value::String(server.to_string())).collect(),
+                        ),
+                    );
+                }
                 if let Some(fingerprint) = &fingerprint {
                     record.insert(
                         "environment_fingerprint".to_string(),
@@ -590,6 +605,11 @@ impl Service {
             )));
         }
         self.host.verify_transfer(&ip, &ssh_user, &key_dir)?;
+        let isolation = if network == GuestNetwork::Internet {
+            Some(self.isolate_guest(vm, &record, kind, &ip, &ssh_user, &ssh_pass, &key_dir)?)
+        } else {
+            None
+        };
         if let Some(name) = chosen {
             let pack = self
                 .pack_dir(name)?
@@ -635,6 +655,9 @@ impl Service {
                 if let Some(console) = &console_for_ready {
                     record["console"] = Value::Object(console.clone());
                 }
+                if let Some(isolation) = &isolation {
+                    record["isolation"] = isolation.clone();
+                }
                 Ok(())
             },
             Option::<fn(&Map<String, Value>)>::None,
@@ -644,6 +667,94 @@ impl Service {
             chosen.as_deref().unwrap_or("none")
         ));
         Ok(())
+    }
+
+    /// Point an `internet` guest at public resolvers, then show that it
+    /// cannot reach this host through its default gateway (DC-14).
+    ///
+    /// Returns the lease's `isolation` report. Any failure fails the
+    /// acquisition, whose rollback releases the lease.
+    #[allow(clippy::too_many_arguments)]
+    fn isolate_guest(
+        &self,
+        vm: &str,
+        record: &Value,
+        kind: &str,
+        ip: &str,
+        ssh_user: &str,
+        ssh_pass: &str,
+        key_dir: &std::path::Path,
+    ) -> OpResult<Value> {
+        let servers: Vec<std::net::Ipv4Addr> = record
+            .get("guest_dns")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .filter_map(|item| item.parse().ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+        if servers.is_empty() {
+            return Err(OpError::new(format!("{vm} has no guest resolvers recorded")));
+        }
+        let listed = servers
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let (command, stdin) = crate::isolation::as_root(
+            &crate::isolation::resolver_script(kind, &servers),
+            ssh_pass,
+        );
+        match self.host.ssh(ip, ssh_user, key_dir, &command, stdin, 120) {
+            Some((0, _)) => self.log(&format!("{vm}: guest resolvers set to {listed}")),
+            Some((rc, output)) => {
+                return Err(OpError::new(format!(
+                    "guest resolvers could not be set to {listed} (rc={rc}): {}",
+                    output.trim()
+                )))
+            }
+            None => {
+                return Err(OpError::new(format!(
+                    "guest resolvers could not be set to {listed}: SSH failed"
+                )))
+            }
+        }
+
+        let subnet = self.host.guest_firewall().map_err(OpError::new)?;
+        let mut listener = self.host.open_probe()?;
+        let port = listener.port();
+        let probe = crate::isolation::probe_command(kind, port);
+        let outcome = match self.host.ssh(
+            ip,
+            ssh_user,
+            key_dir,
+            &probe,
+            None,
+            crate::isolation::PROBE_TIMEOUT_S + 30,
+        ) {
+            Some((_, output)) => crate::isolation::parse_probe(&output),
+            None => crate::isolation::ProbeOutcome {
+                gateway: None,
+                result: crate::isolation::ProbeResult::Error("SSH failed".to_string()),
+            },
+        };
+        let accepted = listener.accepted();
+        crate::isolation::decide(&outcome, accepted, port, &subnet).map_err(OpError::new)?;
+        let gateway = outcome.gateway.map(|gateway| gateway.to_string()).unwrap_or_default();
+        self.log(&format!(
+            "{vm}: isolation verified; {gateway}:{port} on this host did not answer the guest"
+        ));
+        Ok(serde_json::json!({
+            "status": "verified",
+            "gateway": gateway,
+            "probe_port": port,
+            "firewall_subnet": subnet.to_string(),
+            "guest_dns": servers.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            "observed_at": unix_now(),
+        }))
     }
 
     /// Public release entry point, mirroring the Python lock decision.

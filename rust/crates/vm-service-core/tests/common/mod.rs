@@ -363,15 +363,42 @@ pub struct FakeHost {
     pub guest: guest::FakeGuest,
     /// When set, `softnet` reports Softnet unusable with this reason.
     pub softnet_refusal: Mutex<Option<String>>,
+    /// When set, `guest_firewall` reports the firewall missing with this reason.
+    pub firewall_refusal: Mutex<Option<String>>,
+    /// Whether the isolation probe's listener reports a connection.
+    pub probe_accepted: AtomicBool,
 }
+
+/// The fake isolation probe listener.
+pub struct FakeProbe {
+    accepted: bool,
+}
+
+impl vm_service_core::host::ProbeListener for FakeProbe {
+    fn port(&self) -> u16 {
+        40000
+    }
+
+    fn accepted(&mut self) -> bool {
+        self.accepted
+    }
+}
+
+/// What a fake guest's isolation probe prints when the gateway is silent.
+pub const PROBE_CLOSED: &str = "gateway=192.168.2.1 result=timeout";
 
 impl FakeHost {
     /// Build a host with the fixture's default image lines.
+    ///
+    /// The fake guest's isolation probe finds the gateway silent; a test
+    /// inserts an earlier `rc_map` entry to change that.
     pub fn new(home: PathBuf) -> Self {
         let home_tart_store = home.join(".tart");
+        let ssh = FakeSSH::new();
+        ssh.map(vm_service_core::isolation::PROBE_MARKER, 0, PROBE_CLOSED);
         Self {
             tart: FakeTart::new(),
-            ssh: FakeSSH::new(),
+            ssh,
             lines: default_lines(),
             lines_override: Mutex::new(None),
             bases: default_bases(),
@@ -389,6 +416,8 @@ impl FakeHost {
             tart_store: Mutex::new(home_tart_store),
             guest: guest::FakeGuest::new(home.join("guest")),
             softnet_refusal: Mutex::new(None),
+            firewall_refusal: Mutex::new(None),
+            probe_accepted: AtomicBool::new(false),
             home,
         }
     }
@@ -523,6 +552,21 @@ impl Host for FakeHost {
             Some(reason) => Err(reason),
             None => Ok(PathBuf::from("/opt/homebrew/bin/softnet")),
         }
+    }
+
+    fn guest_firewall(&self) -> Result<vm_service_core::guest_firewall::Subnet, String> {
+        match self.firewall_refusal.lock().expect("firewall_refusal").clone() {
+            Some(reason) => Err(reason),
+            None => Ok(vm_service_core::guest_firewall::DEFAULT_SUBNET
+                .parse()
+                .expect("default subnet")),
+        }
+    }
+
+    fn open_probe(&self) -> OpResult<Box<dyn vm_service_core::host::ProbeListener>> {
+        Ok(Box::new(FakeProbe {
+            accepted: self.probe_accepted.load(Ordering::SeqCst),
+        }))
     }
 
     fn boot_settle_s(&self) -> f64 {

@@ -46,6 +46,29 @@ impl BootProcess for ChildBootProcess {
     }
 }
 
+/// A listener on this host that an `internet` guest must not reach (DC-14).
+pub trait ProbeListener: Send {
+    /// The port it listens on, on all of the host's addresses.
+    fn port(&self) -> u16;
+    /// Whether a connection has arrived.
+    fn accepted(&mut self) -> bool;
+}
+
+/// The real probe listener: a non-blocking TCP listener on `0.0.0.0`.
+struct TcpProbeListener {
+    listener: std::net::TcpListener,
+}
+
+impl ProbeListener for TcpProbeListener {
+    fn port(&self) -> u16 {
+        self.listener.local_addr().map(|address| address.port()).unwrap_or(0)
+    }
+
+    fn accepted(&mut self) -> bool {
+        self.listener.accept().is_ok()
+    }
+}
+
 /// Raw captured output of one `tart` invocation.
 #[derive(Debug, Clone, Default)]
 pub struct TartOutput {
@@ -137,6 +160,17 @@ pub trait Host: Send + Sync {
     /// acquisition fails rather than falling back to NAT.
     fn softnet(&self) -> Result<PathBuf, String> {
         Err("Softnet unavailable: this host does not run Tart (no NAT fallback)".to_string())
+    }
+
+    /// The subnet the installed guest firewall covers, or the reason, with
+    /// its install command, that an `internet` lease cannot be offered.
+    fn guest_firewall(&self) -> Result<guest_firewall::Subnet, String> {
+        Err("guest firewall unknown on this host (no NAT fallback)".to_string())
+    }
+
+    /// Open a listener on all of this host's addresses, on an ephemeral port.
+    fn open_probe(&self) -> OpResult<Box<dyn ProbeListener>> {
+        Err(OpError::new("guest isolation probes are unavailable on this host"))
     }
 
     /// The boot-settle window, in seconds.
@@ -351,6 +385,17 @@ impl Host for RealHost {
 
     fn softnet(&self) -> Result<PathBuf, String> {
         crate::network::softnet_executable(crate::tart::tart_path(&self.config).as_deref())
+    }
+
+    fn guest_firewall(&self) -> Result<guest_firewall::Subnet, String> {
+        let variable = std::env::var(crate::isolation::ANCHOR_FILE_VARIABLE).ok();
+        crate::isolation::guest_firewall_subnet(&crate::isolation::anchor_file(variable.as_deref()))
+    }
+
+    fn open_probe(&self) -> OpResult<Box<dyn ProbeListener>> {
+        let listener = std::net::TcpListener::bind(("0.0.0.0", 0))?;
+        listener.set_nonblocking(true)?;
+        Ok(Box::new(TcpProbeListener { listener }))
     }
 
     fn boot_settle_s(&self) -> f64 {

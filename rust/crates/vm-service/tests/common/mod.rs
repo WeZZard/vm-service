@@ -331,7 +331,9 @@ exit 0
 /// Mirrors `tests/integration/_daemon_main.py::fake_ssh` where the subprocess
 /// boundary permits: the secrets probe answers `OK`, any stdin script answers
 /// `script-ran`, `true` answers empty success, a remote command containing
-/// `false` exits 1, and anything else echoes `ran: <remote>`. A remote command
+/// `false` exits 1, and anything else echoes `ran: <remote>`. The isolation
+/// probe of an `internet` lease (DC-14) prints the gateway and
+/// `FAKE_PROBE_RESULT`, `timeout` by default. A remote command
 /// containing `fixture-sleep` replaces the shim with `sleep 60`, standing in
 /// for a guest command that runs far longer than any test.
 ///
@@ -347,6 +349,9 @@ mkdir -p "$root"
 printf '%s\n' "$*" >> "$root/ssh-calls.log"
 case "$*" in
   *fixture-sleep*) exec sleep 60 ;;
+  *"vm-service isolation probe"*)
+    printf 'gateway=192.168.2.1 result=%s\n' "${FAKE_PROBE_RESULT:-timeout}"
+    exit 0 ;;
 esac
 last=""
 for arg in "$@"; do last="$arg"; done

@@ -266,8 +266,13 @@ fn handle_get(service: &Service, request: &mut Request, url: &str) -> OpResult<(
             None
         };
         let capabilities = service.consoles.capabilities();
-        // A stat of the Softnet executable Tart would run; no process starts.
-        let internet = match service.host.softnet() {
+        // A stat of the Softnet executable Tart would run and a read of the
+        // guest firewall's anchor file; no process starts.
+        let internet = match service
+            .host
+            .softnet()
+            .and_then(|_| service.host.guest_firewall().map(|_| ()))
+        {
             Ok(_) => acquisition_options::InternetAvailability::Available,
             Err(reason) => acquisition_options::InternetAvailability::Unavailable(reason),
         };

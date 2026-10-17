@@ -350,6 +350,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "guest-firewall"
+version = "0.1.1"
+dependencies = [
+ "clap",
+ "libc",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "guest-session"
 version = "0.1.1"
 dependencies = [
@@ -762,6 +772,7 @@ dependencies = [
  "console",
  "control-only",
  "environment",
+ "guest-firewall",
  "guest-session",
  "lease-keys",
  "libc",

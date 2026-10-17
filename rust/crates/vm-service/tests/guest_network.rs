@@ -5,6 +5,10 @@
 //! placed there is the one the daemon checks, as Tart would. A symlink to
 //! `/usr/bin/sudo` stands in for a setuid-root Softnet; a plain file stands in
 //! for one that Tart cannot run unattended.
+//!
+//! The guest firewall's anchor file is read from the fixture through
+//! `VM_SERVICE_GUEST_FIREWALL_ANCHOR`, and the fake `ssh` answers the
+//! isolation probe with `FAKE_PROBE_RESULT` (DC-14).
 
 mod common;
 
@@ -21,9 +25,33 @@ enum Softnet {
     NotSetuid,
 }
 
+/// The guest firewall as the fixture presents it.
+enum Firewall {
+    /// Installed, and the guest's probe of the gateway times out.
+    InForce,
+    /// No anchor file.
+    Missing,
+    /// Installed, but the guest's probe of the gateway connects.
+    NotInForce,
+}
+
 impl Live {
     fn new(softnet: Softnet) -> Live {
+        Self::with_firewall(softnet, Firewall::InForce)
+    }
+
+    fn with_firewall(softnet: Softnet, firewall: Firewall) -> Live {
         let fixture = LegacyFixture::new();
+        let anchor = fixture.root.join("guest-firewall.anchor");
+        if !matches!(firewall, Firewall::Missing) {
+            let subnet = guest_firewall_subnet();
+            std::fs::write(&anchor, vm_service_core::guest_firewall::anchor_rules(&subnet))
+                .expect("anchor file");
+        }
+        let probe = match firewall {
+            Firewall::NotInForce => "open",
+            _ => "timeout",
+        };
         let path = fixture.bin.join("softnet");
         match softnet {
             Softnet::SetuidRoot => {
@@ -31,7 +59,13 @@ impl Live {
             }
             Softnet::NotSetuid => std::fs::write(&path, "#!/bin/sh\n").expect("softnet file"),
         }
-        let daemon = fixture.start_daemon();
+        let daemon = fixture.start_daemon_with(&[
+            (
+                "VM_SERVICE_GUEST_FIREWALL_ANCHOR".to_string(),
+                anchor.display().to_string(),
+            ),
+            ("FAKE_PROBE_RESULT".to_string(), probe.to_string()),
+        ]);
         Live {
             fixture,
             _daemon: daemon,
@@ -66,6 +100,12 @@ impl Live {
     }
 }
 
+fn guest_firewall_subnet() -> vm_service_core::guest_firewall::Subnet {
+    vm_service_core::guest_firewall::DEFAULT_SUBNET
+        .parse()
+        .expect("default subnet")
+}
+
 #[test]
 fn internet_boots_on_softnet_and_is_reported() {
     let live = Live::new(Softnet::SetuidRoot);
@@ -84,6 +124,15 @@ fn internet_boots_on_softnet_and_is_reported() {
     assert_eq!(
         live.run_line(&vm),
         format!("run {vm} --no-graphics --net-softnet")
+    );
+
+    assert_eq!(response.body["guest_dns"], json!(["1.1.1.1", "8.8.8.8"]));
+    assert_eq!(response.body["isolation"]["status"], "verified");
+    assert_eq!(response.body["isolation"]["gateway"], "192.168.2.1");
+    assert!(
+        live.fixture.ssh_calls().contains("90-vm-service-guest-dns.conf"),
+        "the guest resolvers were not set: {}",
+        live.fixture.ssh_calls()
     );
 
     let one = live.request("GET", &format!("/vms/{vm}"), None);
@@ -183,9 +232,57 @@ fn discovery_reports_whether_internet_is_available() {
         .as_str()
         .expect("reason")
         .contains("is not a setuid-root file"));
+    let no_firewall = Live::with_firewall(Softnet::SetuidRoot, Firewall::Missing);
+    let response = no_firewall.request("GET", "/acquisition-capabilities", None);
+    let internet = &response.body["options"]["network"]["internet"];
+    assert_eq!(internet["available"], false);
+    assert!(internet["reason"]
+        .as_str()
+        .expect("reason")
+        .starts_with("guest firewall not installed"));
     assert!(
         unavailable.fixture.tart_calls().is_empty(),
         "discovery invoked Tart: {}",
         unavailable.fixture.tart_calls()
+    );
+}
+
+#[test]
+fn internet_without_the_guest_firewall_fails_before_the_clone() {
+    let live = Live::with_firewall(Softnet::SetuidRoot, Firewall::Missing);
+    let response = live.acquire("web-only", Some("internet"));
+    assert_eq!(response.status, 409, "{}", response.body);
+    let error = response.body["error"].as_str().expect("error");
+    assert!(error.starts_with("guest firewall not installed"), "{error}");
+    assert!(error.contains("vm-service-guest-firewall install"), "{error}");
+    assert!(
+        !live.fixture.tart_calls().contains("clone"),
+        "Tart cloned: {}",
+        live.fixture.tart_calls()
+    );
+    // NAT needs no guest firewall.
+    let response = live.acquire("nat-still", None);
+    assert_eq!(response.status, 200, "{}", response.body);
+    live.release(response.body["vm"].as_str().expect("vm"));
+}
+
+#[test]
+fn a_guest_that_reaches_the_host_is_released() {
+    let live = Live::with_firewall(Softnet::SetuidRoot, Firewall::NotInForce);
+    let response = live.acquire("web-only", Some("internet"));
+    assert_eq!(response.status, 409, "{}", response.body);
+    let error = response.body["error"].as_str().expect("error");
+    assert!(error.starts_with("guest isolation check failed"), "{error}");
+    assert!(error.contains("connected to this host at 192.168.2.1:"), "{error}");
+    assert!(error.contains("com.apple/250.vm-service"), "{error}");
+    let state = live.fixture.read_state();
+    assert!(
+        state.values().all(|record| record["state"] != "running"),
+        "the lease was not released: {state:?}"
+    );
+    assert!(
+        live.fixture.tart_calls().contains("delete pilot-web-only-"),
+        "the clone was not deleted: {}",
+        live.fixture.tart_calls()
     );
 }

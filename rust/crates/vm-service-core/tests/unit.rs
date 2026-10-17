@@ -1435,3 +1435,128 @@ fn test_a_record_on_another_network_cannot_use_the_lease_key() {
         .expect_err("control-only record must be denied");
     assert!(err.to_string().contains("control-only ownership auditor unavailable"), "{err}");
 }
+
+// ------------------------------------------- internet guest isolation (DC-14)
+
+#[test]
+fn test_internet_without_the_guest_firewall_is_refused_before_the_clone() {
+    let fixture = common::Fixture::new();
+    *fixture.host.firewall_refusal.lock().expect("firewall_refusal") = Some(
+        "guest firewall not installed: install it once with: sudo vm-service-guest-firewall install"
+            .to_string(),
+    );
+    let err = fixture
+        .try_acquire_network("web", "internet")
+        .expect_err("internet without the firewall must fail");
+    assert!(err.to_string().starts_with("guest firewall not installed"), "{err}");
+    assert!(!fixture.host.tart.ops().contains(&"clone".to_string()));
+    // NAT does not need the firewall.
+    fixture.acquire("nat-ok", "ubuntu2404", "none");
+}
+
+#[test]
+fn test_internet_guest_gets_public_resolvers_and_a_verified_isolation() {
+    let fixture = common::Fixture::new();
+    let rec = fixture.try_acquire_network("web", "internet").expect("acquire");
+    assert_eq!(rec["guest_dns"], json!(["1.1.1.1", "8.8.8.8"]));
+    assert_eq!(rec["isolation"]["status"], json!("verified"));
+    assert_eq!(rec["isolation"]["gateway"], json!("192.168.2.1"));
+    assert_eq!(rec["isolation"]["probe_port"], json!(40000));
+    assert_eq!(rec["isolation"]["firewall_subnet"], json!("192.168.2.0/24"));
+    let calls = fixture.host.ssh.ssh_calls.lock().expect("ssh_calls").clone();
+    let dns = calls
+        .iter()
+        .position(|(command, _, _)| command.contains("90-vm-service-guest-dns.conf"))
+        .expect("resolver command");
+    let probe = calls
+        .iter()
+        .position(|(command, _, _)| command.contains(vm_service_core::isolation::PROBE_MARKER))
+        .expect("probe command");
+    assert!(dns < probe, "resolvers are set before the probe");
+    // The resolver script runs as root with the line's password on stdin.
+    let (command, stdin, _) = &calls[dns];
+    assert!(command.starts_with("sudo -S -p '' sh -c "), "{command}");
+    assert_eq!(stdin.as_deref(), Some("admin\n"));
+    assert!(calls[probe].0.contains("/dev/tcp/$gw/40000"));
+}
+
+#[test]
+fn test_nat_guest_is_not_probed_or_reconfigured() {
+    let fixture = common::Fixture::new();
+    let rec = fixture.acquire("t", "ubuntu2404", "none");
+    assert!(rec.get("isolation").is_none());
+    assert!(rec.get("guest_dns").is_none());
+    let commands = fixture.host.ssh.commands();
+    assert!(!commands
+        .iter()
+        .any(|command| command.contains(vm_service_core::isolation::PROBE_MARKER)
+            || command.contains("resolved.conf.d")));
+}
+
+/// A guest that reaches this host fails the acquisition, and the lease is
+/// released; it never becomes a NAT lease.
+fn assert_isolation_failure(fixture: &common::Fixture, needle: &str) {
+    let err = fixture
+        .try_acquire_network("web", "internet")
+        .expect_err("a reachable host must fail the acquisition");
+    let message = err.to_string();
+    assert!(message.starts_with("guest isolation check failed"), "{message}");
+    assert!(message.contains(needle), "{message}");
+    assert!(message.contains("vm-service-guest-firewall install"), "{message}");
+    let state = fixture.read_state();
+    assert!(
+        state.values().all(|record| record["state"] != json!("running")),
+        "a failed isolation left a running lease: {state:?}"
+    );
+    let vms = fixture.host.tart.vms.lock().expect("vms");
+    assert!(
+        !vms.keys().any(|name| name.starts_with("pilot-web-")),
+        "the clone was not deleted: {vms:?}"
+    );
+}
+
+#[test]
+fn test_a_guest_that_connects_to_the_gateway_fails_the_acquisition() {
+    let fixture = common::Fixture::new();
+    fixture.host.ssh.rc_map.lock().expect("rc_map").insert(
+        0,
+        (
+            vm_service_core::isolation::PROBE_MARKER.to_string(),
+            (0, "gateway=192.168.2.1 result=open".to_string()),
+        ),
+    );
+    assert_isolation_failure(&fixture, "connected to this host at 192.168.2.1:40000");
+}
+
+#[test]
+fn test_a_connection_seen_by_the_host_listener_fails_the_acquisition() {
+    let fixture = common::Fixture::new();
+    fixture.host.probe_accepted.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert_isolation_failure(&fixture, "connected to this host");
+}
+
+#[test]
+fn test_a_probe_that_cannot_run_fails_the_acquisition() {
+    let fixture = common::Fixture::new();
+    fixture.host.ssh.rc_map.lock().expect("rc_map").insert(
+        0,
+        (
+            vm_service_core::isolation::PROBE_MARKER.to_string(),
+            (0, "gateway= result=error:no-default-route".to_string()),
+        ),
+    );
+    assert_isolation_failure(&fixture, "could not probe");
+}
+
+#[test]
+fn test_resolvers_that_cannot_be_set_fail_the_acquisition() {
+    let fixture = common::Fixture::new();
+    fixture.host.ssh.map("90-vm-service-guest-dns.conf", 1, "sudo: a password is required");
+    let err = fixture
+        .try_acquire_network("web", "internet")
+        .expect_err("resolvers must be set");
+    assert!(
+        err.to_string().starts_with("guest resolvers could not be set to 1.1.1.1, 8.8.8.8 (rc=1)"),
+        "{err}"
+    );
+}

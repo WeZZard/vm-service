@@ -174,6 +174,14 @@ impl Host for TestHost {
         self.inner.softnet()
     }
 
+    fn guest_firewall(&self) -> Result<vm_service_core::guest_firewall::Subnet, String> {
+        self.inner.guest_firewall()
+    }
+
+    fn open_probe(&self) -> OpResult<Box<dyn vm_service_core::host::ProbeListener>> {
+        self.inner.open_probe()
+    }
+
     fn boot_settle_s(&self) -> f64 {
         self.inner.boot_settle_s()
     }
