@@ -41,12 +41,20 @@ impl Live {
     }
 
     fn with_firewall(softnet: Softnet, firewall: Firewall) -> Live {
+        Self::with_env(softnet, firewall, &[])
+    }
+
+    fn with_env(softnet: Softnet, firewall: Firewall, extra: &[(&str, &str)]) -> Live {
         let fixture = LegacyFixture::new();
         let anchor = fixture.root.join("guest-firewall.anchor");
+        let table = fixture.root.join("internet-guests");
+        std::fs::write(&table, "").expect("table file");
         if !matches!(firewall, Firewall::Missing) {
-            let subnet = guest_firewall_subnet();
-            std::fs::write(&anchor, vm_service_core::guest_firewall::anchor_rules(&subnet))
-                .expect("anchor file");
+            std::fs::write(
+                &anchor,
+                vm_service_core::guest_firewall::anchor_rules(&table),
+            )
+            .expect("anchor file");
         }
         let probe = match firewall {
             Firewall::NotInForce => "open",
@@ -59,13 +67,23 @@ impl Live {
             }
             Softnet::NotSetuid => std::fs::write(&path, "#!/bin/sh\n").expect("softnet file"),
         }
-        let daemon = fixture.start_daemon_with(&[
+        let mut env = vec![
             (
                 "VM_SERVICE_GUEST_FIREWALL_ANCHOR".to_string(),
                 anchor.display().to_string(),
             ),
+            (
+                "VM_SERVICE_GUEST_FIREWALL_TABLE".to_string(),
+                table.display().to_string(),
+            ),
             ("FAKE_PROBE_RESULT".to_string(), probe.to_string()),
-        ]);
+        ];
+        env.extend(
+            extra
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.to_string())),
+        );
+        let daemon = fixture.start_daemon_with(&env);
         Live {
             fixture,
             _daemon: daemon,
@@ -100,10 +118,17 @@ impl Live {
     }
 }
 
-fn guest_firewall_subnet() -> vm_service_core::guest_firewall::Subnet {
-    vm_service_core::guest_firewall::DEFAULT_SUBNET
-        .parse()
-        .expect("default subnet")
+/// The guest addresses in a fixture's table file.
+fn table_addresses(live: &Live) -> Vec<String> {
+    let text =
+        std::fs::read_to_string(live.fixture.root.join("internet-guests")).unwrap_or_default();
+    vm_service_core::guest_firewall::parse_table(&text)
+        .into_iter()
+        .filter_map(|line| match line {
+            vm_service_core::guest_firewall::Line::Guest(guest) => Some(guest.address.to_string()),
+            vm_service_core::guest_firewall::Line::Other(_) => None,
+        })
+        .collect()
 }
 
 #[test]
@@ -126,14 +151,22 @@ fn internet_boots_on_softnet_and_is_reported() {
         format!("run {vm} --no-graphics --net-softnet")
     );
 
-    assert_eq!(response.body["guest_dns"], json!(["1.1.1.1", "8.8.8.8"]));
+    assert_eq!(
+        response.body["guest_dns"],
+        json!(["1.1.1.1#cloudflare-dns.com", "8.8.8.8#dns.google"])
+    );
     assert_eq!(response.body["isolation"]["status"], "verified");
     assert_eq!(response.body["isolation"]["gateway"], "192.168.2.1");
+    assert_eq!(
+        response.body["isolation"]["egress"]["address"],
+        "104.20.23.154"
+    );
     assert!(
-        live.fixture.ssh_calls().contains("90-vm-service-guest-dns.conf"),
+        live.fixture.ssh_calls().contains("DNSOverTLS=yes"),
         "the guest resolvers were not set: {}",
         live.fixture.ssh_calls()
     );
+    assert_eq!(table_addresses(&live), vec!["192.168.64.99".to_string()]);
 
     let one = live.request("GET", &format!("/vms/{vm}"), None);
     assert_eq!(one.body["network"], "internet");
@@ -148,6 +181,10 @@ fn internet_boots_on_softnet_and_is_reported() {
     );
     assert_eq!(exec.status, 200, "{}", exec.body);
     live.release(&vm);
+    assert!(
+        table_addresses(&live).is_empty(),
+        "release left the address in the table"
+    );
 }
 
 #[test]
@@ -163,6 +200,10 @@ fn nat_and_absent_network_keep_today_s_command() {
             "nat"
         );
         assert_eq!(live.run_line(&vm), format!("run {vm} --no-graphics"));
+        assert!(
+            table_addresses(&live).is_empty(),
+            "a NAT guest entered the table"
+        );
         live.release(&vm);
     }
 }
@@ -254,7 +295,10 @@ fn internet_without_the_guest_firewall_fails_before_the_clone() {
     assert_eq!(response.status, 409, "{}", response.body);
     let error = response.body["error"].as_str().expect("error");
     assert!(error.starts_with("guest firewall not installed"), "{error}");
-    assert!(error.contains("vm-service-guest-firewall install"), "{error}");
+    assert!(
+        error.contains("vm-service-guest-firewall install"),
+        "{error}"
+    );
     assert!(
         !live.fixture.tart_calls().contains("clone"),
         "Tart cloned: {}",
@@ -273,7 +317,14 @@ fn a_guest_that_reaches_the_host_is_released() {
     assert_eq!(response.status, 409, "{}", response.body);
     let error = response.body["error"].as_str().expect("error");
     assert!(error.starts_with("guest isolation check failed"), "{error}");
-    assert!(error.contains("connected to this host at 192.168.2.1:"), "{error}");
+    assert!(
+        error.contains("192.168.64.99 connected to this host at 192.168.2.1:"),
+        "{error}"
+    );
+    assert!(
+        table_addresses(&live).is_empty(),
+        "the failed lease left its address"
+    );
     assert!(error.contains("com.apple/250.vm-service"), "{error}");
     let state = live.fixture.read_state();
     assert!(
@@ -284,5 +335,23 @@ fn a_guest_that_reaches_the_host_is_released() {
         live.fixture.tart_calls().contains("delete pilot-web-only-"),
         "the clone was not deleted: {}",
         live.fixture.tart_calls()
+    );
+}
+
+#[test]
+fn a_guest_whose_names_resolve_to_private_addresses_is_released() {
+    let live = Live::with_env(
+        Softnet::SetuidRoot,
+        Firewall::InForce,
+        &[("FAKE_EGRESS_ADDRESS", "198.18.35.15")],
+    );
+    let response = live.acquire("web-only", Some("internet"));
+    assert_eq!(response.status, 409, "{}", response.body);
+    let error = response.body["error"].as_str().expect("error");
+    assert!(error.starts_with("guest egress check failed"), "{error}");
+    assert!(error.contains("198.18.35.15"), "{error}");
+    assert!(
+        table_addresses(&live).is_empty(),
+        "the failed lease left its address"
     );
 }

@@ -141,8 +141,16 @@ impl Host for TestHost {
         self.inner.softnet()
     }
 
-    fn guest_firewall(&self) -> Result<vm_service_core::guest_firewall::Subnet, String> {
+    fn guest_firewall(&self) -> Result<vm_service_core::isolation::GuestFirewall, String> {
         self.inner.guest_firewall()
+    }
+
+    fn firewall_table(&self) -> PathBuf {
+        self.inner.firewall_table()
+    }
+
+    fn dot_forwarder(&self) -> OpResult<Vec<u8>> {
+        self.inner.dot_forwarder()
     }
 
     fn open_probe(&self) -> OpResult<Box<dyn vm_service_core::host::ProbeListener>> {

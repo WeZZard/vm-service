@@ -333,7 +333,8 @@ exit 0
 /// `script-ran`, `true` answers empty success, a remote command containing
 /// `false` exits 1, and anything else echoes `ran: <remote>`. The isolation
 /// probe of an `internet` lease (DC-14) prints the gateway and
-/// `FAKE_PROBE_RESULT`, `timeout` by default. A remote command
+/// `FAKE_PROBE_RESULT`, `timeout` by default, and its egress check (DC-16)
+/// prints `FAKE_EGRESS_ADDRESS` and HTTPS 200. A remote command
 /// containing `fixture-sleep` replaces the shim with `sleep 60`, standing in
 /// for a guest command that runs far longer than any test.
 ///
@@ -351,6 +352,9 @@ case "$*" in
   *fixture-sleep*) exec sleep 60 ;;
   *"vm-service isolation probe"*)
     printf 'gateway=192.168.2.1 result=%s\n' "${FAKE_PROBE_RESULT:-timeout}"
+    exit 0 ;;
+  *"vm-service egress check"*)
+    printf 'egress name=example.com address=%s https=200\n' "${FAKE_EGRESS_ADDRESS:-104.20.23.154}"
     exit 0 ;;
 esac
 last=""

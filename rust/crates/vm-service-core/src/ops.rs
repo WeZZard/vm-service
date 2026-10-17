@@ -147,6 +147,10 @@ impl Service {
             .and_then(Value::as_str)
             .unwrap_or("macos")
             .to_string();
+        if guest_network == GuestNetwork::Internet && kind == "macos" {
+            // A macOS guest resolves over DNS over TLS through the forwarder.
+            self.host.dot_forwarder()?;
+        }
         if vnc {
             self.consoles
                 .require_available(&kind)
@@ -582,6 +586,11 @@ impl Service {
             },
             Option::<fn(&Map<String, Value>)>::None,
         )?;
+        if network == GuestNetwork::Internet {
+            // DC-15: the guest's address enters the firewall's table as soon
+            // as it is known, before the guest is reachable for any work.
+            self.add_to_firewall(vm, &ip)?;
+        }
 
         let ssh_user = cfg
             .get("ssh_user")
@@ -669,8 +678,97 @@ impl Service {
         Ok(())
     }
 
-    /// Point an `internet` guest at public resolvers, then show that it
-    /// cannot reach this host through its default gateway (DC-14).
+    /// Add an `internet` guest's address to the firewall's table and record
+    /// where, so release removes it (DC-15).
+    fn add_to_firewall(&self, vm: &str, ip: &str) -> OpResult<()> {
+        let firewall = self.host.guest_firewall().map_err(OpError::new)?;
+        let address: std::net::Ipv4Addr = ip
+            .parse()
+            .map_err(|_| OpError::new(format!("{vm} reported a non-IPv4 address {ip}")))?;
+        let table = firewall.table.display().to_string();
+        let table_for_record = table.clone();
+        let ip_for_record = ip.to_string();
+        self.state.update(
+            |data| {
+                let record = vms_mut(data)
+                    .get_mut(vm)
+                    .ok_or_else(|| OpError::new(format!("unknown VM: {vm}")))?;
+                record["firewall_table"] = Value::String(table_for_record.clone());
+                record["firewall_address"] = Value::String(ip_for_record.clone());
+                Ok(())
+            },
+            Option::<fn(&Map<String, Value>)>::None,
+        )?;
+        guest_firewall::add_guest(
+            &firewall.table,
+            guest_firewall::Guest {
+                address,
+                instance: self.firewall_instance(),
+                vm: vm.to_string(),
+            },
+        )
+        .map_err(|error| OpError::new(format!("guest firewall table {table}: {error}")))?;
+        self.log(&format!("{vm}: {ip} added to the guest firewall table {table}"));
+        Ok(())
+    }
+
+    /// The name this instance's entries carry in the shared table file.
+    fn firewall_instance(&self) -> String {
+        self.config.state_dir.display().to_string()
+    }
+
+    /// Remove a lease's entry from the firewall table it was added to.
+    fn remove_from_firewall(&self, vm: &str, record: &Value) {
+        let Some(table) = record.get("firewall_table").and_then(Value::as_str) else {
+            return;
+        };
+        match guest_firewall::remove_guest(
+            std::path::Path::new(table),
+            &self.firewall_instance(),
+            vm,
+        ) {
+            Ok(()) => self.log(&format!("{vm}: removed from the guest firewall table {table}")),
+            Err(error) => self.log(&format!(
+                "WARN: {vm}: could not remove it from the guest firewall table {table}: {error}; \
+the next GC pass retries"
+            )),
+        }
+    }
+
+    /// Drop this instance's table entries whose lease is gone, so a stale
+    /// address never cuts off a later guest that receives it (DC-15).
+    pub fn prune_firewall_table(&self) {
+        let table = self.host.firewall_table();
+        if !table.exists() {
+            return;
+        }
+        let live: std::collections::BTreeSet<String> = match self.state.read() {
+            Ok(data) => data
+                .get("vms")
+                .and_then(Value::as_object)
+                .map(|records| records.keys().cloned().collect())
+                .unwrap_or_default(),
+            Err(_) => return,
+        };
+        match guest_firewall::prune_guests(&table, &self.firewall_instance(), |vm| live.contains(vm))
+        {
+            Ok(removed) if !removed.is_empty() => self.log(&format!(
+                "guest firewall table {}: removed stale entries for {}",
+                table.display(),
+                removed.join(", ")
+            )),
+            Ok(_) => {}
+            Err(error) => self.log(&format!(
+                "WARN: guest firewall table {}: {error}",
+                table.display()
+            )),
+        }
+    }
+
+    /// Point an `internet` guest at resolvers over DNS over TLS, show that it
+    /// cannot reach this host through its default gateway, and show that it
+    /// resolves a name to a public address and loads it over HTTPS
+    /// (DC-14, DC-15, DC-16).
     ///
     /// Returns the lease's `isolation` report. Any failure fails the
     /// acquisition, whose rollback releases the lease.
@@ -685,31 +783,52 @@ impl Service {
         ssh_pass: &str,
         key_dir: &std::path::Path,
     ) -> OpResult<Value> {
-        let servers: Vec<std::net::Ipv4Addr> = record
+        let resolvers: Vec<crate::isolation::GuestResolver> = record
             .get("guest_dns")
             .and_then(Value::as_array)
             .map(|items| {
-                items
+                let text = items
                     .iter()
                     .filter_map(Value::as_str)
-                    .filter_map(|item| item.parse().ok())
-                    .collect()
+                    .collect::<Vec<_>>()
+                    .join(",");
+                crate::isolation::parse_guest_dns(Some(&text)).unwrap_or_default()
             })
             .unwrap_or_default();
-        if servers.is_empty() {
+        if resolvers.is_empty() {
             return Err(OpError::new(format!("{vm} has no guest resolvers recorded")));
         }
-        let listed = servers
+        let listed = resolvers
             .iter()
             .map(ToString::to_string)
             .collect::<Vec<_>>()
             .join(", ");
-        let (command, stdin) = crate::isolation::as_root(
-            &crate::isolation::resolver_script(kind, &servers),
-            ssh_pass,
-        );
-        match self.host.ssh(ip, ssh_user, key_dir, &command, stdin, 120) {
-            Some((0, _)) => self.log(&format!("{vm}: guest resolvers set to {listed}")),
+        let script = if kind == "macos" {
+            let forwarder = self.host.dot_forwarder()?;
+            match self.host.ssh(
+                ip,
+                ssh_user,
+                key_dir,
+                &crate::isolation::forwarder_upload_command(),
+                Some(forwarder),
+                120,
+            ) {
+                Some((0, _)) => {}
+                other => {
+                    return Err(OpError::new(format!(
+                        "the DNS-over-TLS forwarder could not be uploaded: {other:?}"
+                    )))
+                }
+            }
+            crate::isolation::macos_resolver_script(&resolvers)
+        } else {
+            crate::isolation::linux_resolver_script(&resolvers)
+        };
+        let (command, stdin) = crate::isolation::as_root(&script, ssh_pass);
+        match self.host.ssh(ip, ssh_user, key_dir, &command, stdin, 180) {
+            Some((0, _)) => self.log(&format!(
+                "{vm}: guest resolvers set to {listed} over DNS over TLS"
+            )),
             Some((rc, output)) => {
                 return Err(OpError::new(format!(
                     "guest resolvers could not be set to {listed} (rc={rc}): {}",
@@ -723,36 +842,93 @@ impl Service {
             }
         }
 
-        let subnet = self.host.guest_firewall().map_err(OpError::new)?;
-        let mut listener = self.host.open_probe()?;
-        let port = listener.port();
-        let probe = crate::isolation::probe_command(kind, port);
-        let outcome = match self.host.ssh(
-            ip,
-            ssh_user,
-            key_dir,
-            &probe,
-            None,
-            crate::isolation::PROBE_TIMEOUT_S + 30,
-        ) {
-            Some((_, output)) => crate::isolation::parse_probe(&output),
-            None => crate::isolation::ProbeOutcome {
-                gateway: None,
-                result: crate::isolation::ProbeResult::Error("SSH failed".to_string()),
-            },
+        // The isolation probe, retried while the LaunchDaemon reloads the
+        // table with this guest's address.
+        let firewall = self.host.guest_firewall().map_err(OpError::new)?;
+        let deadline = Instant::now() + Duration::from_secs(crate::isolation::PROBE_RETRY_S);
+        let mut attempts = 0u32;
+        let (outcome, port) = loop {
+            attempts += 1;
+            let mut listener = self.host.open_probe()?;
+            let port = listener.port();
+            let probe = crate::isolation::probe_command(kind, port);
+            let outcome = match self.host.ssh(
+                ip,
+                ssh_user,
+                key_dir,
+                &probe,
+                None,
+                crate::isolation::PROBE_TIMEOUT_S + 30,
+            ) {
+                Some((_, output)) => crate::isolation::parse_probe(&output),
+                None => crate::isolation::ProbeOutcome {
+                    gateway: None,
+                    result: crate::isolation::ProbeResult::Error("SSH failed".to_string()),
+                },
+            };
+            let accepted = listener.accepted();
+            if crate::isolation::isolated(&outcome, accepted) {
+                break (outcome, port);
+            }
+            if !crate::isolation::worth_retrying(&outcome, accepted) || Instant::now() >= deadline {
+                return Err(OpError::new(crate::isolation::probe_failure(
+                    &outcome,
+                    accepted,
+                    port,
+                    ip,
+                    &firewall.table,
+                )));
+            }
+            std::thread::sleep(Duration::from_secs(2));
         };
-        let accepted = listener.accepted();
-        crate::isolation::decide(&outcome, accepted, port, &subnet).map_err(OpError::new)?;
-        let gateway = outcome.gateway.map(|gateway| gateway.to_string()).unwrap_or_default();
+        let gateway = outcome
+            .gateway
+            .map(|gateway| gateway.to_string())
+            .unwrap_or_default();
         self.log(&format!(
-            "{vm}: isolation verified; {gateway}:{port} on this host did not answer the guest"
+            "{vm}: isolation verified; {gateway}:{port} on this host did not answer the guest \
+(attempt {attempts})"
+        ));
+
+        // The egress check: a name resolves to a public address over DNS
+        // over TLS, and HTTPS to it answers.
+        let mut egress = None;
+        for attempt in 1..=crate::isolation::EGRESS_ATTEMPTS {
+            let output = self
+                .host
+                .ssh(ip, ssh_user, key_dir, &crate::isolation::egress_command(kind), None, 60)
+                .map(|(_, output)| output)
+                .unwrap_or_default();
+            egress = crate::isolation::parse_egress(&output);
+            if crate::isolation::decide_egress(egress.as_ref()).is_ok() {
+                break;
+            }
+            if attempt < crate::isolation::EGRESS_ATTEMPTS {
+                std::thread::sleep(Duration::from_secs(3));
+            }
+        }
+        crate::isolation::decide_egress(egress.as_ref()).map_err(OpError::new)?;
+        let egress = egress.expect("decided egress has a result");
+        self.log(&format!(
+            "{vm}: egress verified; {} resolved to {} and HTTPS answered {}",
+            crate::isolation::EGRESS_HOST,
+            egress.address,
+            egress.https
         ));
         Ok(serde_json::json!({
             "status": "verified",
+            "address": ip,
             "gateway": gateway,
             "probe_port": port,
-            "firewall_subnet": subnet.to_string(),
-            "guest_dns": servers.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            "probe_attempts": attempts,
+            "firewall_table": firewall.table.display().to_string(),
+            "guest_dns": resolvers.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            "dns_transport": "dns-over-tls",
+            "egress": {
+                "name": crate::isolation::EGRESS_HOST,
+                "address": egress.address,
+                "https": egress.https,
+            },
             "observed_at": unix_now(),
         }))
     }
@@ -834,6 +1010,13 @@ impl Service {
         if !present {
             return Ok(serde_json::json!({"vm": vm, "released": true, "reason": reason}));
         }
+        let record_before = self
+            .state
+            .read()?
+            .get("vms")
+            .and_then(|vms| vms.get(vm))
+            .cloned()
+            .unwrap_or(Value::Null);
         let teardown = (|| -> OpResult<()> {
             if self.host.vm_running(vm)? {
                 self.log(&format!("stopping {vm} ({reason})"));
@@ -852,6 +1035,8 @@ impl Service {
             self.log(&format!(
                 "deleted {vm} ({reason}); lease credentials removed"
             ));
+            // Only once the guest is gone may its address leave the table.
+            self.remove_from_firewall(vm, &record_before);
             Ok(())
         })();
         if let Err(error) = teardown {
@@ -1277,6 +1462,7 @@ release it and acquire a new lease"
 
     /// Run the garbage collector once.
     pub fn gc_once(&self) -> OpResult<()> {
+        self.prune_firewall_table();
         let now = unix_now();
         let mut actions: Vec<(String, &'static str, Option<f64>)> = Vec::new();
         // One Tart snapshot per pass, taken outside the state lock and only
@@ -1471,6 +1657,7 @@ the daemon restart"
                 )),
             }
         }
+        self.prune_firewall_table();
         Ok(reconciled)
     }
 

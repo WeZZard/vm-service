@@ -386,6 +386,8 @@ impl vm_service_core::host::ProbeListener for FakeProbe {
 
 /// What a fake guest's isolation probe prints when the gateway is silent.
 pub const PROBE_CLOSED: &str = "gateway=192.168.2.1 result=timeout";
+/// What a fake guest's egress check prints when names and HTTPS work.
+pub const EGRESS_OK: &str = "egress name=example.com address=104.20.23.154 https=200";
 
 impl FakeHost {
     /// Build a host with the fixture's default image lines.
@@ -396,6 +398,7 @@ impl FakeHost {
         let home_tart_store = home.join(".tart");
         let ssh = FakeSSH::new();
         ssh.map(vm_service_core::isolation::PROBE_MARKER, 0, PROBE_CLOSED);
+        ssh.map(vm_service_core::isolation::EGRESS_MARKER, 0, EGRESS_OK);
         Self {
             tart: FakeTart::new(),
             ssh,
@@ -554,13 +557,21 @@ impl Host for FakeHost {
         }
     }
 
-    fn guest_firewall(&self) -> Result<vm_service_core::guest_firewall::Subnet, String> {
+    fn guest_firewall(&self) -> Result<vm_service_core::isolation::GuestFirewall, String> {
         match self.firewall_refusal.lock().expect("firewall_refusal").clone() {
             Some(reason) => Err(reason),
-            None => Ok(vm_service_core::guest_firewall::DEFAULT_SUBNET
-                .parse()
-                .expect("default subnet")),
+            None => Ok(vm_service_core::isolation::GuestFirewall {
+                table: self.firewall_table(),
+            }),
         }
+    }
+
+    fn firewall_table(&self) -> PathBuf {
+        self.home.join("internet-guests")
+    }
+
+    fn dot_forwarder(&self) -> OpResult<Vec<u8>> {
+        Ok(b"fake forwarder".to_vec())
     }
 
     fn open_probe(&self) -> OpResult<Box<dyn vm_service_core::host::ProbeListener>> {

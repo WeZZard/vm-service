@@ -6,6 +6,7 @@ members = [
   "crates/acquisition-options",
   "crates/control-only",
   "crates/guest-firewall",
+  "crates/guest-dot-forwarder",
   "crates/application-catalog",
   "crates/console",
   "crates/vm-service-core",

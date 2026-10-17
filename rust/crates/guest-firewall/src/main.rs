@@ -3,14 +3,14 @@
 //!
 //! `install` and `remove` need root once; `print` and `status` do not.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
 use guest_firewall::{
-    anchor_rules, daemon_plist, parse_anchor_subnet, Subnet, ANCHOR, ANCHOR_FILE, DAEMON_PLIST,
-    DEFAULT_SUBNET, LABEL,
+    anchor_rules, daemon_plist, parse_anchor_table, parse_table, Line, ANCHOR, ANCHOR_FILE,
+    DAEMON_PLIST, DEFAULT_TABLE_FILE, LABEL,
 };
 
 #[derive(Parser, Debug)]
@@ -25,19 +25,23 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Action {
-    /// Write the anchor and its LaunchDaemon, enable pf, and load the anchor now (root).
+    /// Write the anchor, its table file and its LaunchDaemon, enable pf, and load the anchor now (root).
     Install {
-        /// The Softnet guest subnet.
-        #[arg(long, default_value = DEFAULT_SUBNET)]
-        subnet: Subnet,
+        /// The table file every vm-service instance on this host writes.
+        #[arg(long, default_value = DEFAULT_TABLE_FILE)]
+        table: PathBuf,
+        /// The numeric user that runs vm-service and owns the table file;
+        /// defaults to the user that ran sudo.
+        #[arg(long)]
+        owner: Option<u32>,
     },
     /// Unload the anchor and remove its file and LaunchDaemon (root). pf stays enabled.
     Remove,
     /// Print the anchor rules and the LaunchDaemon without installing them.
     Print {
-        /// The Softnet guest subnet.
-        #[arg(long, default_value = DEFAULT_SUBNET)]
-        subnet: Subnet,
+        /// The table file every vm-service instance on this host writes.
+        #[arg(long, default_value = DEFAULT_TABLE_FILE)]
+        table: PathBuf,
     },
     /// Report what is installed, without root.
     Status,
@@ -46,13 +50,13 @@ enum Action {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
-        Action::Install { subnet } => install(&subnet),
+        Action::Install { table, owner } => install(&table, owner),
         Action::Remove => remove(),
-        Action::Print { subnet } => {
+        Action::Print { table } => {
             print!(
                 "# {ANCHOR_FILE}\n{}\n# {DAEMON_PLIST}\n{}",
-                anchor_rules(&subnet),
-                daemon_plist()
+                anchor_rules(&table),
+                daemon_plist(&table)
             );
             Ok(())
         }
@@ -78,9 +82,15 @@ fn require_root(action: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn install(subnet: &Subnet) -> Result<(), String> {
+fn install(table: &Path, owner: Option<u32>) -> Result<(), String> {
     require_root("install")?;
-    let rules = anchor_rules(subnet);
+    if !table.is_absolute() {
+        return Err(format!("--table must be absolute: {}", table.display()));
+    }
+    let (uid, gid) = owner_ids(owner)?;
+    prepare_table(table, uid, gid)?;
+
+    let rules = anchor_rules(table);
     let candidate = tempfile::NamedTempFile::new().map_err(|error| error.to_string())?;
     std::fs::write(candidate.path(), &rules).map_err(|error| error.to_string())?;
     run(
@@ -89,7 +99,7 @@ fn install(subnet: &Subnet) -> Result<(), String> {
     )?;
 
     write_root_file(Path::new(ANCHOR_FILE), &rules)?;
-    write_root_file(Path::new(DAEMON_PLIST), &daemon_plist())?;
+    write_root_file(Path::new(DAEMON_PLIST), &daemon_plist(table))?;
     run("/usr/bin/plutil", &["-lint", DAEMON_PLIST])?;
 
     // Replace a previous daemon; its absence is not an error.
@@ -106,7 +116,10 @@ fn install(subnet: &Subnet) -> Result<(), String> {
             .map(|info| info.lines().any(|line| line.starts_with("Status: Enabled")))
             .unwrap_or(false);
         if loaded.contains("block drop in quick") && enabled {
-            println!("installed: pf is enabled and anchor {ANCHOR} drops new connections from {subnet} to this host");
+            println!(
+                "installed: pf is enabled and anchor {ANCHOR} drops new connections to this host from the guests in {}",
+                table.display()
+            );
             println!("{}", loaded.trim_end());
             return Ok(());
         }
@@ -120,6 +133,67 @@ fn install(subnet: &Subnet) -> Result<(), String> {
     }
 }
 
+/// The account that owns the table file: `--owner`, or the user that ran
+/// sudo, with that user's primary group.
+fn owner_ids(owner: Option<u32>) -> Result<(u32, u32), String> {
+    let uid = match owner {
+        Some(uid) => uid,
+        None => std::env::var("SUDO_UID")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .ok_or("run it with sudo from the account that runs vm-service, or pass --owner UID")?,
+    };
+    if uid == 0 {
+        return Err(
+            "the table file must belong to the account that runs vm-service, not root".into(),
+        );
+    }
+    // SAFETY: `getpwuid` returns static storage, read at once.
+    let gid = unsafe {
+        let entry = libc::getpwuid(uid);
+        if entry.is_null() {
+            return Err(format!("no account with uid {uid}"));
+        }
+        (*entry).pw_gid
+    };
+    Ok((uid, gid))
+}
+
+/// Create the table file's directory and an empty table file, owned by the
+/// account that runs vm-service, so every instance on the host can write it
+/// and pf can read it.
+fn prepare_table(table: &Path, uid: u32, gid: u32) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = table.parent().ok_or("the table file has no directory")?;
+    std::fs::create_dir_all(directory)
+        .map_err(|error| format!("{}: {error}", directory.display()))?;
+    chown(directory, uid, gid)?;
+    std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o755))
+        .map_err(|error| error.to_string())?;
+    if !table.exists() {
+        std::fs::write(table, guest_firewall::render_table(&[]))
+            .map_err(|error| format!("{}: {error}", table.display()))?;
+    }
+    chown(table, uid, gid)?;
+    std::fs::set_permissions(table, std::fs::Permissions::from_mode(0o644))
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn chown(path: &Path, uid: u32, gid: u32) -> Result<(), String> {
+    let c_path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes())
+        .map_err(|error| error.to_string())?;
+    // SAFETY: the path is a valid C string for the duration of the call.
+    if unsafe { libc::chown(c_path.as_ptr(), uid, gid) } != 0 {
+        return Err(format!(
+            "chown {}: {}",
+            path.display(),
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(())
+}
+
 fn remove() -> Result<(), String> {
     require_root("remove")?;
     let _ = Command::new("/bin/launchctl")
@@ -129,25 +203,53 @@ fn remove() -> Result<(), String> {
     run("/sbin/pfctl", &["-a", ANCHOR, "-F", "all"])?;
     remove_if_present(Path::new(ANCHOR_FILE))?;
     println!("removed: anchor {ANCHOR} is flushed; pf stays enabled with the system's rules");
+    println!(
+        "the table file's directory is kept for running vm-service instances; delete it by hand"
+    );
     Ok(())
 }
 
 fn status() -> Result<(), String> {
-    match std::fs::read_to_string(ANCHOR_FILE) {
-        Ok(text) => match parse_anchor_subnet(&text) {
-            Some(subnet) => println!("anchor file: {ANCHOR_FILE} (subnet {subnet})"),
-            None => println!("anchor file: {ANCHOR_FILE} (no subnet; reinstall it)"),
+    let table = match std::fs::read_to_string(ANCHOR_FILE) {
+        Ok(text) => match parse_anchor_table(&text) {
+            Some(table) => {
+                println!(
+                    "anchor file: {ANCHOR_FILE} (table file {})",
+                    table.display()
+                );
+                Some(table)
+            }
+            None => {
+                println!("anchor file: {ANCHOR_FILE} (no table file; reinstall it)");
+                None
+            }
         },
-        Err(_) => println!("anchor file: missing ({ANCHOR_FILE})"),
-    }
+        Err(_) => {
+            println!("anchor file: missing ({ANCHOR_FILE})");
+            None
+        }
+    };
     if Path::new(DAEMON_PLIST).exists() {
         println!("LaunchDaemon: {DAEMON_PLIST}");
     } else {
         println!("LaunchDaemon: missing ({DAEMON_PLIST})");
     }
-    println!(
-        "loaded rules and pf status need root: sudo pfctl -a {ANCHOR} -s rules; sudo pfctl -s info"
-    );
+    if let Some(table) = table {
+        match std::fs::read_to_string(&table) {
+            Ok(text) => {
+                for line in parse_table(&text) {
+                    if let Line::Guest(guest) = line {
+                        println!(
+                            "guest: {} ({} in {})",
+                            guest.address, guest.vm, guest.instance
+                        );
+                    }
+                }
+            }
+            Err(error) => println!("table file: unreadable ({error})"),
+        }
+    }
+    println!("loaded rules and pf status need root: sudo pfctl -a {ANCHOR} -s rules; sudo pfctl -a {ANCHOR} -t {} -T show; sudo pfctl -s info", guest_firewall::TABLE);
     Ok(())
 }
 

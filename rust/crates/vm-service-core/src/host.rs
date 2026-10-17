@@ -162,10 +162,30 @@ pub trait Host: Send + Sync {
         Err("Softnet unavailable: this host does not run Tart (no NAT fallback)".to_string())
     }
 
-    /// The subnet the installed guest firewall covers, or the reason, with
-    /// its install command, that an `internet` lease cannot be offered.
-    fn guest_firewall(&self) -> Result<guest_firewall::Subnet, String> {
+    /// The installed guest firewall, or the reason, with its install
+    /// command, that an `internet` lease cannot be offered.
+    fn guest_firewall(&self) -> Result<crate::isolation::GuestFirewall, String> {
         Err("guest firewall unknown on this host (no NAT fallback)".to_string())
+    }
+
+    /// The table file this service writes guest addresses to, whether or not
+    /// the firewall is installed; used to prune entries.
+    fn firewall_table(&self) -> PathBuf {
+        let variable = std::env::var(crate::isolation::TABLE_FILE_VARIABLE).ok();
+        crate::isolation::table_file(variable.as_deref())
+    }
+
+    /// The macOS DNS-over-TLS forwarder to upload into a guest (DC-16).
+    fn dot_forwarder(&self) -> OpResult<Vec<u8>> {
+        let variable = std::env::var(crate::isolation::FORWARDER_VARIABLE).ok();
+        let path = crate::isolation::forwarder_path(variable.as_deref());
+        std::fs::read(&path).map_err(|error| {
+            OpError::new(format!(
+                "DNS-over-TLS forwarder unavailable at {}: {error}; stage {} beside vm-service (no NAT fallback)",
+                path.display(),
+                crate::isolation::FORWARDER
+            ))
+        })
     }
 
     /// Open a listener on all of this host's addresses, on an ephemeral port.
@@ -387,9 +407,12 @@ impl Host for RealHost {
         crate::network::softnet_executable(crate::tart::tart_path(&self.config).as_deref())
     }
 
-    fn guest_firewall(&self) -> Result<guest_firewall::Subnet, String> {
+    fn guest_firewall(&self) -> Result<crate::isolation::GuestFirewall, String> {
         let variable = std::env::var(crate::isolation::ANCHOR_FILE_VARIABLE).ok();
-        crate::isolation::guest_firewall_subnet(&crate::isolation::anchor_file(variable.as_deref()))
+        crate::isolation::check_guest_firewall(
+            &crate::isolation::anchor_file(variable.as_deref()),
+            &self.firewall_table(),
+        )
     }
 
     fn open_probe(&self) -> OpResult<Box<dyn ProbeListener>> {

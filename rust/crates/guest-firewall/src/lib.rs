@@ -1,26 +1,30 @@
-//! The host packet filter that keeps `internet` guests off this host (DC-14).
+//! The host packet filter that keeps `internet` guests off this host
+//! (DC-14, DC-15).
 //!
 //! Softnet passes a guest's traffic to the vmnet bridge's gateway address,
 //! which is this host. The guest firewall is a pf anchor, loaded under the
-//! default `/etc/pf.conf`'s `anchor "com.apple/*"`, that drops every
-//! connection a guest on the Softnet subnet opens to one of this host's own
-//! addresses or to its own subnet, which holds the gateway address. pf keeps
-//! state for the host's own connections to those guests,
-//! so the replies to the service's SSH still pass.
+//! default `/etc/pf.conf`'s `anchor "com.apple/*"`. It drops every TCP and
+//! UDP connection that an address in its table opens to one of this host's
+//! own addresses. The table lists the running `internet` guests one by one,
+//! never a subnet, because vmnet puts NAT and Softnet guests on one subnet
+//! when they run together. pf keeps state for the host's own connections to
+//! those guests, so the replies to the service's SSH still pass.
 //!
 //! This crate generates the anchor rules and the LaunchDaemon that loads
-//! them, and reads an installed anchor back. Installing needs root once; see
+//! them, reads an installed anchor back, and edits the table file that every
+//! vm-service instance on the host shares. Installing needs root once; see
 //! the `vm-service-guest-firewall` binary.
 
-use std::fmt;
+use std::io::Write;
 use std::net::Ipv4Addr;
-use std::str::FromStr;
+use std::os::unix::io::AsRawFd;
+use std::path::{Path, PathBuf};
 
 /// The pf anchor the rules are loaded into.
 pub const ANCHOR: &str = "com.apple/250.vm-service";
 /// The installed anchor file.
 pub const ANCHOR_FILE: &str = "/etc/pf.anchors/com.wezzard.vm-service";
-/// The LaunchDaemon label that loads the anchor at boot.
+/// The LaunchDaemon label that loads the anchor.
 pub const LABEL: &str = "com.wezzard.vm-service.guest-firewall";
 /// The installed LaunchDaemon property list.
 pub const DAEMON_PLIST: &str = "/Library/LaunchDaemons/com.wezzard.vm-service.guest-firewall.plist";
@@ -28,147 +32,63 @@ pub const DAEMON_PLIST: &str = "/Library/LaunchDaemons/com.wezzard.vm-service.gu
 pub const DAEMON_LOG: &str = "/var/log/com.wezzard.vm-service.guest-firewall.log";
 /// The installer executable's name; it is staged beside `vm-service`.
 pub const INSTALLER: &str = "vm-service-guest-firewall";
-/// How often, in seconds, the LaunchDaemon reloads the anchor, which also
-/// restores it after the system reloads `/etc/pf.conf` at boot.
+/// How often, in seconds, the LaunchDaemon reloads the anchor without a
+/// change to the table, which also restores it after the system reloads
+/// `/etc/pf.conf` at boot.
 pub const RELOAD_INTERVAL_S: u32 = 300;
+/// The pf table of the running `internet` guests' addresses.
+pub const TABLE: &str = "vm_service_internet";
+/// The table file every vm-service instance on the host writes. Its
+/// directory belongs to the account that runs vm-service.
+pub const DEFAULT_TABLE_FILE: &str = "/var/db/com.wezzard.vm-service/internet-guests";
 
-/// The subnet vmnet gave Softnet's guests on the host where DC-14 was
-/// designed (macOS 27, Tart 2.32.1, Softnet 0.19.0).
+/// The pf rules of the anchor, with the table read from `table_file`.
 ///
-/// Softnet passes no address to vmnet, so vmnet chooses the subnet; Softnet
-/// does not fix it. Concurrent Softnet guests share it. A host whose Softnet
-/// guests land elsewhere fails each `internet` acquisition's isolation check
-/// with the subnet it saw, and the anchor is reinstalled with `--subnet`.
-pub const DEFAULT_SUBNET: &str = "192.168.2.0/24";
-
-/// The marker line that carries the subnet in an anchor file.
-const SUBNET_MACRO: &str = "softnet_guests";
-
-/// An IPv4 private subnet, the network address and its prefix length.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Subnet {
-    network: Ipv4Addr,
-    prefix: u8,
-}
-
-/// A subnet that cannot be the Softnet subnet.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("{0}")]
-pub struct SubnetError(String);
-
-impl Subnet {
-    /// The network address.
-    pub fn network(&self) -> Ipv4Addr {
-        self.network
-    }
-
-    /// The prefix length.
-    pub fn prefix(&self) -> u8 {
-        self.prefix
-    }
-
-    /// Whether `address` lies in this subnet.
-    pub fn contains(&self, address: Ipv4Addr) -> bool {
-        u32::from(address) & self.mask() == u32::from(self.network)
-    }
-
-    /// The `/24` that holds `address`, which is how vmnet sizes its subnets.
-    pub fn around(address: Ipv4Addr) -> Subnet {
-        let octets = address.octets();
-        Subnet {
-            network: Ipv4Addr::new(octets[0], octets[1], octets[2], 0),
-            prefix: 24,
-        }
-    }
-
-    fn mask(&self) -> u32 {
-        if self.prefix == 0 {
-            0
-        } else {
-            u32::MAX << (32 - u32::from(self.prefix))
-        }
-    }
-}
-
-impl FromStr for Subnet {
-    type Err = SubnetError;
-
-    /// Parse `a.b.c.d/n`. The subnet must be private (RFC 1918), as vmnet's
-    /// are, between `/16` and `/30`, and written with its network address.
-    fn from_str(text: &str) -> Result<Self, Self::Err> {
-        let invalid = || SubnetError(format!("invalid subnet {text:?}: expected a.b.c.d/n"));
-        let (address, prefix) = text.split_once('/').ok_or_else(invalid)?;
-        let network: Ipv4Addr = address.parse().map_err(|_| invalid())?;
-        let prefix: u8 = prefix.parse().map_err(|_| invalid())?;
-        if !(16..=30).contains(&prefix) {
-            return Err(SubnetError(format!(
-                "invalid subnet {text:?}: the prefix must be between /16 and /30"
-            )));
-        }
-        if !network.is_private() {
-            return Err(SubnetError(format!(
-                "invalid subnet {text:?}: vmnet subnets are private (RFC 1918)"
-            )));
-        }
-        let subnet = Subnet { network, prefix };
-        if u32::from(network) & subnet.mask() != u32::from(network) {
-            return Err(SubnetError(format!(
-                "invalid subnet {text:?}: write it with its network address"
-            )));
-        }
-        Ok(subnet)
-    }
-}
-
-impl fmt::Display for Subnet {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "{}/{}", self.network, self.prefix)
-    }
-}
-
-/// The pf rules of the anchor for guests on `subnet`.
+/// - The host's connections to the table's guests create state, so their
+///   replies, such as the guest's side of the service's SSH, pass.
+/// - DHCP renewals from the table's guests reach bootpd(8) on the host.
+/// - Every other TCP or UDP packet from the table's guests to one of the
+///   host's own addresses is dropped.
 ///
-/// - The host's connections to the guests create state, so their replies,
-///   such as the guest's side of the service's SSH, pass.
-/// - DHCP renewals from the guests reach bootpd(8) on the host.
-/// - Every other TCP or UDP packet from the guests to the subnet itself,
-///   which holds the vmnet bridge's gateway address, or to one of the host's
-///   other addresses is dropped.
-///
-/// The rules name no dynamic interface address. macOS pf has no interface
-/// groups, so the dynamic `(self)` matched no address in the live test and
-/// the anchor dropped nothing. The static `self` is expanded when the anchor
-/// is loaded, and the LaunchDaemon reloads it every [`RELOAD_INTERVAL_S`]
-/// seconds; the gateway address is covered by the subnet whenever it exists.
+/// macOS pf has no interface groups, so the dynamic `(self)` matches no
+/// address. The static `self` is expanded each time the anchor is loaded;
+/// the LaunchDaemon reloads it whenever the table file changes, which is
+/// after a guest has its address and the bridge its gateway address.
 ///
 /// Softnet drops a guest's IPv6, so the rules are IPv4 only.
-pub fn anchor_rules(subnet: &Subnet) -> String {
+pub fn anchor_rules(table_file: &Path) -> String {
     format!(
-        "# vm-service guest firewall (DC-14), loaded into the pf anchor {ANCHOR}.\n\
+        "# vm-service guest firewall (DC-14, DC-15), loaded into the pf anchor {ANCHOR}.\n\
 # Generated by {INSTALLER}; reinstall it rather than editing this file.\n\
-{SUBNET_MACRO} = \"{subnet}\"\n\
+table <{TABLE}> persist file \"{}\"\n\
 # The host's connections to the guests keep state, so their replies pass.\n\
-pass out quick inet to ${SUBNET_MACRO} keep state\n\
+pass out quick inet to <{TABLE}> keep state\n\
 # DHCP renewals reach bootpd(8) on the host.\n\
-pass in quick inet proto udp from ${SUBNET_MACRO} port 68 to any port 67\n\
-# Any other connection a guest opens to the gateway or to this host is dropped.\n\
-block drop in quick inet proto {{ tcp udp }} from ${SUBNET_MACRO} to {{ ${SUBNET_MACRO} self }}\n"
+pass in quick inet proto udp from <{TABLE}> port 68 to any port 67\n\
+# Any other connection a guest opens to this host is dropped.\n\
+block drop in quick inet proto {{ tcp udp }} from <{TABLE}> to self\n",
+        table_file.display()
     )
 }
 
-/// Read the subnet from an installed anchor file's text.
-pub fn parse_anchor_subnet(text: &str) -> Option<Subnet> {
+/// Read the table file's path from an installed anchor file's text.
+pub fn parse_anchor_table(text: &str) -> Option<PathBuf> {
     text.lines().find_map(|line| {
-        let (name, value) = line.split_once('=')?;
-        if name.trim() != SUBNET_MACRO {
-            return None;
-        }
-        value.trim().trim_matches('"').parse().ok()
+        let rest = line.trim().strip_prefix(&format!("table <{TABLE}>"))?;
+        let rest = rest
+            .trim()
+            .strip_prefix("persist")?
+            .trim()
+            .strip_prefix("file")?;
+        let quoted = rest.trim();
+        let path = quoted.strip_prefix('"')?.strip_suffix('"')?;
+        (!path.is_empty()).then(|| PathBuf::from(path))
     })
 }
 
 /// The shell command the LaunchDaemon runs: enable pf if it is disabled, then
-/// load the anchor. Both steps are idempotent, so the daemon repeats them.
+/// load the anchor, which also reloads the table from its file. Both steps
+/// are idempotent, so the daemon repeats them.
 pub fn loader_command() -> String {
     format!(
         "/sbin/pfctl -s info 2>/dev/null | /usr/bin/grep -q '^Status: Enabled' || /sbin/pfctl -E; \
@@ -176,9 +96,11 @@ pub fn loader_command() -> String {
     )
 }
 
-/// The LaunchDaemon property list that loads the anchor at boot and every
+/// The LaunchDaemon property list that loads the anchor at boot, whenever
+/// the table file or its directory changes, and every
 /// [`RELOAD_INTERVAL_S`] seconds.
-pub fn daemon_plist() -> String {
+pub fn daemon_plist(table_file: &Path) -> String {
+    let directory = table_file.parent().unwrap_or_else(|| Path::new("/"));
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -194,8 +116,15 @@ pub fn daemon_plist() -> String {
 	</array>
 	<key>RunAtLoad</key>
 	<true/>
+	<key>WatchPaths</key>
+	<array>
+		<string>{table}</string>
+		<string>{directory}</string>
+	</array>
 	<key>StartInterval</key>
 	<integer>{interval}</integer>
+	<key>ThrottleInterval</key>
+	<integer>1</integer>
 	<key>StandardOutPath</key>
 	<string>{log}</string>
 	<key>StandardErrorPath</key>
@@ -205,18 +134,20 @@ pub fn daemon_plist() -> String {
 "#,
         label = xml_escape(LABEL),
         command = xml_escape(&loader_command()),
+        table = xml_escape(&table_file.display().to_string()),
+        directory = xml_escape(&directory.display().to_string()),
         interval = RELOAD_INTERVAL_S,
         log = xml_escape(DAEMON_LOG),
     )
 }
 
-/// The command an operator runs once, as root, to install the firewall for
-/// `subnet`. `installer` is the path of the installer executable.
-pub fn install_command(installer: &str, subnet: &Subnet) -> String {
-    if subnet.to_string() == DEFAULT_SUBNET {
+/// The command an operator runs once, as root, to install the firewall.
+/// `installer` is the path of the installer executable.
+pub fn install_command(installer: &str, table_file: &Path) -> String {
+    if table_file == Path::new(DEFAULT_TABLE_FILE) {
         format!("sudo {installer} install")
     } else {
-        format!("sudo {installer} install --subnet {subnet}")
+        format!("sudo {installer} install --table {}", table_file.display())
     }
 }
 
@@ -228,49 +159,179 @@ fn xml_escape(text: &str) -> String {
         .replace('\'', "&apos;")
 }
 
+// ------------------------------------------------------------------ table file
+
+/// One line of the table file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Line {
+    /// A guest added by a vm-service instance: `<address> # <instance> <vm>`.
+    Guest(Guest),
+    /// Any other line, kept as it is.
+    Other(String),
+}
+
+/// A guest's entry in the table file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Guest {
+    /// The guest's address.
+    pub address: Ipv4Addr,
+    /// The instance that owns the entry: its state directory.
+    pub instance: String,
+    /// The lease's VM name.
+    pub vm: String,
+}
+
+impl Guest {
+    fn render(&self) -> String {
+        format!("{} # {} {}", self.address, self.instance, self.vm)
+    }
+}
+
+/// Parse the table file's text.
+pub fn parse_table(text: &str) -> Vec<Line> {
+    text.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| parse_line(line).unwrap_or_else(|| Line::Other(line.to_string())))
+        .collect()
+}
+
+fn parse_line(line: &str) -> Option<Line> {
+    let (address, comment) = line.split_once('#')?;
+    let address: Ipv4Addr = address.trim().parse().ok()?;
+    let comment = comment.trim();
+    let (instance, vm) = comment.rsplit_once(' ')?;
+    if instance.is_empty() || vm.is_empty() {
+        return None;
+    }
+    Some(Line::Guest(Guest {
+        address,
+        instance: instance.to_string(),
+        vm: vm.to_string(),
+    }))
+}
+
+/// Render table lines as the file's text.
+pub fn render_table(lines: &[Line]) -> String {
+    let mut text = String::from("# vm-service internet guests (DC-15); one address per line.\n");
+    for line in lines {
+        match line {
+            Line::Guest(guest) => text.push_str(&guest.render()),
+            Line::Other(other) if other.starts_with("# vm-service internet guests") => continue,
+            Line::Other(other) => text.push_str(other),
+        }
+        text.push('\n');
+    }
+    text
+}
+
+/// Edit the table file under an exclusive lock, replacing it atomically.
+///
+/// The lock is `<file>.lock` beside it, so every instance on the host edits
+/// the file in turn. The new file is renamed over the old one, so pf never
+/// loads a half-written table, and the rename is what wakes the LaunchDaemon.
+pub fn edit_table(table_file: &Path, edit: impl FnOnce(&mut Vec<Line>)) -> std::io::Result<()> {
+    let directory = table_file.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "table file has no directory",
+        )
+    })?;
+    let lock_path = PathBuf::from(format!("{}.lock", table_file.display()));
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)?;
+    // SAFETY: the descriptor stays open for the lifetime of `lock`.
+    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let text = match std::fs::read_to_string(table_file) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error),
+    };
+    let mut lines = parse_table(&text);
+    let before = lines.clone();
+    edit(&mut lines);
+    if lines == before && !text.is_empty() {
+        return Ok(());
+    }
+    let mut file = tempfile::NamedTempFile::new_in(directory)?;
+    file.write_all(render_table(&lines).as_bytes())?;
+    file.as_file().sync_all()?;
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(file.path(), std::fs::Permissions::from_mode(0o644))?;
+    }
+    file.persist(table_file).map_err(|error| error.error)?;
+    Ok(())
+}
+
+/// Add `guest`, replacing any entry for the same instance and VM, or for the
+/// same address.
+pub fn add_guest(table_file: &Path, guest: Guest) -> std::io::Result<()> {
+    edit_table(table_file, |lines| {
+        lines.retain(|line| match line {
+            Line::Guest(existing) => {
+                existing.address != guest.address
+                    && !(existing.instance == guest.instance && existing.vm == guest.vm)
+            }
+            Line::Other(_) => true,
+        });
+        lines.push(Line::Guest(guest));
+    })
+}
+
+/// Remove the entries of `instance` for `vm`.
+pub fn remove_guest(table_file: &Path, instance: &str, vm: &str) -> std::io::Result<()> {
+    edit_table(table_file, |lines| {
+        lines.retain(|line| {
+            !matches!(line, Line::Guest(guest) if guest.instance == instance && guest.vm == vm)
+        });
+    })
+}
+
+/// Keep only the entries of `instance` whose VM `keep` accepts; the entries
+/// of other instances are left alone. Returns the VMs removed.
+pub fn prune_guests(
+    table_file: &Path,
+    instance: &str,
+    keep: impl Fn(&str) -> bool,
+) -> std::io::Result<Vec<String>> {
+    let mut removed = Vec::new();
+    edit_table(table_file, |lines| {
+        lines.retain(|line| match line {
+            Line::Guest(guest) if guest.instance == instance && !keep(&guest.vm) => {
+                removed.push(guest.vm.clone());
+                false
+            }
+            _ => true,
+        });
+    })?;
+    Ok(removed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
     use std::process::Command;
 
-    fn default_subnet() -> Subnet {
-        DEFAULT_SUBNET.parse().unwrap()
+    fn default_table() -> PathBuf {
+        PathBuf::from(DEFAULT_TABLE_FILE)
     }
 
-    #[test]
-    fn subnets_parse_and_display() {
-        let subnet = default_subnet();
-        assert_eq!(subnet.to_string(), "192.168.2.0/24");
-        assert!(subnet.contains("192.168.2.1".parse().unwrap()));
-        assert!(subnet.contains("192.168.2.254".parse().unwrap()));
-        assert!(!subnet.contains("192.168.64.1".parse().unwrap()));
-        assert_eq!(
-            Subnet::around("192.168.64.7".parse().unwrap()).to_string(),
-            "192.168.64.0/24"
-        );
-        assert!("10.20.0.0/16".parse::<Subnet>().is_ok());
-    }
-
-    #[test]
-    fn bad_subnets_are_refused() {
-        for text in [
-            "192.168.2.1/24",
-            "192.168.2.0",
-            "192.168.2.0/8",
-            "192.168.2.0/31",
-            "8.8.8.0/24",
-            "0.0.0.0/0",
-            "fd00::/64",
-            "",
-        ] {
-            assert!(text.parse::<Subnet>().is_err(), "{text}");
+    fn guest(address: &str, instance: &str, vm: &str) -> Guest {
+        Guest {
+            address: address.parse().unwrap(),
+            instance: instance.to_string(),
+            vm: vm.to_string(),
         }
     }
 
     #[test]
-    fn rules_keep_host_state_pass_dhcp_and_drop_the_rest() {
-        let rules = anchor_rules(&default_subnet());
+    fn rules_are_keyed_on_the_table_not_a_subnet() {
+        let rules = anchor_rules(&default_table());
         let lines: Vec<&str> = rules
             .lines()
             .filter(|line| !line.starts_with('#'))
@@ -278,33 +339,42 @@ mod tests {
         assert_eq!(
             lines,
             vec![
-                "softnet_guests = \"192.168.2.0/24\"",
-                "pass out quick inet to $softnet_guests keep state",
-                "pass in quick inet proto udp from $softnet_guests port 68 to any port 67",
-                "block drop in quick inet proto { tcp udp } from $softnet_guests to { $softnet_guests self }",
+                "table <vm_service_internet> persist file \"/var/db/com.wezzard.vm-service/internet-guests\"",
+                "pass out quick inet to <vm_service_internet> keep state",
+                "pass in quick inet proto udp from <vm_service_internet> port 68 to any port 67",
+                "block drop in quick inet proto { tcp udp } from <vm_service_internet> to self",
             ]
         );
+        assert!(!rules.contains("(self)"));
+        assert!(!rules.contains("/24"));
     }
 
     #[test]
-    fn the_subnet_is_read_back_from_an_anchor() {
-        let subnet: Subnet = "10.9.8.0/24".parse().unwrap();
-        assert_eq!(parse_anchor_subnet(&anchor_rules(&subnet)), Some(subnet));
-        assert_eq!(parse_anchor_subnet("block drop all\n"), None);
-        assert_eq!(parse_anchor_subnet("softnet_guests = \"nonsense\"\n"), None);
+    fn the_table_file_is_read_back_from_an_anchor() {
+        let path = PathBuf::from("/tmp/x y/guests");
+        assert_eq!(parse_anchor_table(&anchor_rules(&path)), Some(path));
+        assert_eq!(parse_anchor_table("block drop all\n"), None);
+        assert_eq!(
+            parse_anchor_table("softnet_guests = \"192.168.2.0/24\"\n"),
+            None
+        );
     }
 
-    /// `pfctl -n` parses without root and without touching the loaded rules.
+    /// `pfctl -n` parses without root and without touching the loaded rules,
+    /// but it still opens the table file.
     #[test]
     fn pfctl_accepts_the_rules() {
         if !Path::new("/sbin/pfctl").exists() {
             return;
         }
-        let file = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(file.path(), anchor_rules(&default_subnet())).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let table = directory.path().join("internet-guests");
+        add_guest(&table, guest("192.168.2.9", "/state", "pilot-a")).unwrap();
+        let anchor = directory.path().join("anchor");
+        std::fs::write(&anchor, anchor_rules(&table)).unwrap();
         let output = Command::new("/sbin/pfctl")
             .arg("-nf")
-            .arg(file.path())
+            .arg(&anchor)
             .output()
             .unwrap();
         assert!(
@@ -315,18 +385,16 @@ mod tests {
     }
 
     #[test]
-    fn the_daemon_loads_the_anchor_at_boot_and_repeats() {
-        let plist = daemon_plist();
+    fn the_daemon_reloads_on_table_changes_at_boot_and_periodically() {
+        let plist = daemon_plist(&default_table());
         assert!(plist.contains("<string>com.wezzard.vm-service.guest-firewall</string>"));
         assert!(plist.contains("<key>RunAtLoad</key>\n\t<true/>"));
-        assert!(plist.contains("<integer>300</integer>"));
         assert!(plist.contains(
-            "/sbin/pfctl -a com.apple/250.vm-service -f /etc/pf.anchors/com.wezzard.vm-service"
+            "<key>WatchPaths</key>\n\t<array>\n\t\t<string>/var/db/com.wezzard.vm-service/internet-guests</string>\n\t\t<string>/var/db/com.wezzard.vm-service</string>"
         ));
-        // The shell operators are escaped for XML.
-        assert!(plist.contains("|| /sbin/pfctl -E;"));
+        assert!(plist.contains("<key>ThrottleInterval</key>\n\t<integer>1</integer>"));
+        assert!(plist.contains("<integer>300</integer>"));
         assert!(plist.contains("&apos;^Status: Enabled&apos;"));
-        assert!(!plist.contains("'^Status"));
     }
 
     #[test]
@@ -335,7 +403,7 @@ mod tests {
             return;
         }
         let file = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(file.path(), daemon_plist()).unwrap();
+        std::fs::write(file.path(), daemon_plist(&default_table())).unwrap();
         let lint = Command::new("/usr/bin/plutil")
             .arg("-lint")
             .arg(file.path())
@@ -346,29 +414,120 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&lint.stdout)
         );
-        let json = Command::new("/usr/bin/plutil")
+        let command = Command::new("/usr/bin/plutil")
             .args(["-extract", "ProgramArguments.2", "raw", "-o", "-"])
             .arg(file.path())
             .output()
             .unwrap();
         assert_eq!(
-            String::from_utf8_lossy(&json.stdout).trim_end(),
+            String::from_utf8_lossy(&command.stdout).trim_end(),
             loader_command()
         );
     }
 
     #[test]
-    fn the_install_command_names_a_non_default_subnet() {
+    fn the_install_command_names_a_non_default_table() {
         assert_eq!(
-            install_command("/x/vm-service-guest-firewall", &default_subnet()),
+            install_command("/x/vm-service-guest-firewall", &default_table()),
             "sudo /x/vm-service-guest-firewall install"
         );
         assert_eq!(
-            install_command(
-                "/x/vm-service-guest-firewall",
-                &"192.168.3.0/24".parse().unwrap()
-            ),
-            "sudo /x/vm-service-guest-firewall install --subnet 192.168.3.0/24"
+            install_command("/x/vm-service-guest-firewall", Path::new("/srv/guests")),
+            "sudo /x/vm-service-guest-firewall install --table /srv/guests"
         );
+    }
+
+    #[test]
+    fn table_lines_round_trip_and_keep_foreign_lines() {
+        let text = "# vm-service internet guests (DC-15); one address per line.\n\
+192.168.2.9 # /a/state pilot-x\n10.0.0.7\n192.168.2.10 # /b b/state pilot-y\n";
+        let lines = parse_table(text);
+        assert_eq!(
+            lines,
+            vec![
+                Line::Other("# vm-service internet guests (DC-15); one address per line.".into()),
+                Line::Guest(guest("192.168.2.9", "/a/state", "pilot-x")),
+                Line::Other("10.0.0.7".into()),
+                Line::Guest(guest("192.168.2.10", "/b b/state", "pilot-y")),
+            ]
+        );
+        assert_eq!(render_table(&lines), text);
+    }
+
+    #[test]
+    fn guests_are_added_removed_and_pruned_per_instance() {
+        let directory = tempfile::tempdir().unwrap();
+        let table = directory.path().join("internet-guests");
+        add_guest(&table, guest("192.168.2.9", "/a", "vm-1")).unwrap();
+        add_guest(&table, guest("192.168.2.10", "/a", "vm-2")).unwrap();
+        add_guest(&table, guest("192.168.2.11", "/b", "vm-1")).unwrap();
+        // The same lease's new address replaces its old one, and an address
+        // moves to its newest owner.
+        add_guest(&table, guest("192.168.2.12", "/a", "vm-2")).unwrap();
+        add_guest(&table, guest("192.168.2.11", "/a", "vm-3")).unwrap();
+        let addresses = |table: &Path| -> Vec<String> {
+            parse_table(&std::fs::read_to_string(table).unwrap())
+                .into_iter()
+                .filter_map(|line| match line {
+                    Line::Guest(guest) => {
+                        Some(format!("{} {} {}", guest.address, guest.instance, guest.vm))
+                    }
+                    Line::Other(_) => None,
+                })
+                .collect()
+        };
+        assert_eq!(
+            addresses(&table),
+            vec![
+                "192.168.2.9 /a vm-1",
+                "192.168.2.12 /a vm-2",
+                "192.168.2.11 /a vm-3"
+            ]
+        );
+        remove_guest(&table, "/a", "vm-1").unwrap();
+        assert_eq!(
+            addresses(&table),
+            vec!["192.168.2.12 /a vm-2", "192.168.2.11 /a vm-3"]
+        );
+        add_guest(&table, guest("192.168.2.20", "/b", "vm-9")).unwrap();
+        let removed = prune_guests(&table, "/a", |vm| vm == "vm-3").unwrap();
+        assert_eq!(removed, vec!["vm-2".to_string()]);
+        assert_eq!(
+            addresses(&table),
+            vec!["192.168.2.11 /a vm-3", "192.168.2.20 /b vm-9"]
+        );
+        let mode = std::fs::metadata(&table).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(mode.permissions().mode() & 0o777, 0o644);
+    }
+
+    #[test]
+    fn concurrent_edits_lose_nothing() {
+        let directory = tempfile::tempdir().unwrap();
+        let table = directory.path().join("internet-guests");
+        let threads: Vec<_> = (0..16)
+            .map(|index| {
+                let table = table.clone();
+                std::thread::spawn(move || {
+                    add_guest(
+                        &table,
+                        guest(
+                            &format!("192.168.2.{}", index + 2),
+                            "/a",
+                            &format!("vm-{index}"),
+                        ),
+                    )
+                    .unwrap();
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        let guests = parse_table(&std::fs::read_to_string(&table).unwrap())
+            .into_iter()
+            .filter(|line| matches!(line, Line::Guest(_)))
+            .count();
+        assert_eq!(guests, 16);
     }
 }
