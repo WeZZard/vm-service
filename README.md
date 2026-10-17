@@ -13,7 +13,7 @@ AGENTS.md mechanically:
   base; every release destroys it (AGENTS.md "MUST create a clean VM instance /
   destroy when done").
 - **Max 2 concurrent macOS VMs** (Virtualization.framework limit); Linux unlimited.
-- **NAT only** — no bridged networking is ever offered (MAC-whitelist doctrine).
+- **NAT or internet-only** — no bridged networking is ever offered (MAC-whitelist doctrine). A lease may ask for `network: "internet"`, which runs its guest on Tart's Softnet with no route to the host or the private networks (DC-13).
 - **Lifecycle-managed images are unbootable through the service** — only
   purpose clones are ever started; `-base`/`-seed`/`-work` are never booted by the service. Explicit work-source acceptance reads and clones the configured stopped work image without changing it.
 - **Credential env packs are env-var-only** (gateway era) — `env.extra` carries

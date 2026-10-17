@@ -28,6 +28,15 @@
 - For VNC, the service must verify the actual guest console and adapter prerequisites after existing SSH readiness. A missing graphical session, unsupported Wayland environment, failed macOS sharing policy, or incompatible stock boot produces a specific failure and rollback outcome.
 - The service must not silently enable stock experimental VNC, switch desktops, modify a golden image, relax networking policy, or use a patched runtime as fallback.
 
+## Guest network
+
+- `network` is optional. `nat`, the default, keeps today's NAT: the guest reaches the internet, the host and the host's private networks (DC-13).
+- `internet` starts the guest with `tart run --net-softnet`. Softnet lets the guest reach the internet only: traffic to the host and to the private address ranges is dropped.
+- A request for `internet` on a host where Softnet is not installed as Tart needs it fails before the clone, with a reason that names Softnet. It never falls back to NAT.
+- The lease's record and its reporting carry its network.
+- Discovery reports whether `internet` is available on this host.
+- The control-only network is a separate contract, and stays as it is.
+
 ## New lease identity and reporting
 
 - A new acquisition receives an immutable fresh `lease_id`. It prevents accidental name reuse in console operations but does not introduce general caller authentication.

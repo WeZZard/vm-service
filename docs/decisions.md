@@ -37,3 +37,9 @@ Entries from this date carry identifiers. The design is in [architecture](arch/i
 - Guest execution timeouts have no maximum. The 4200-second cap is removed. See [V4](lifecycle-fixes.md#v4-a-long-guest-operation-blocks-release-and-gc).
 - A release preempts a running exec, push, or pull on its VM. The operation is killed and returns an error that says it was cancelled by release. See [V4](lifecycle-fixes.md#design-release-preempts-the-operation-lock).
 - GC never blocks on one VM. It defers the teardown of a VM whose operation lock is held and reclaims it on a later pass. See [V4](lifecycle-fixes.md#design-gc-does-not-wait-on-a-busy-vm).
+
+## 2026-10-17: guests that reach the internet only
+
+The design is in [the acquisition contract](acquisition-contract.md#guest-network).
+
+- DC-13: A lease may ask for the network `internet`. Its guest runs on Tart's Softnet, reaches the internet, and reaches neither the host nor any private network. NAT stays the default. The agents that run code in guests through mcp-relay must not reach the host's own services, such as an application's page served on the home network, through a guest. Decided by the agent under DC-7.
