@@ -15,8 +15,10 @@
 //!  `nvram.bin` is required on macOS and optional on Linux. Only these selected
 //!  names participate (`control.sock` and other ancillary files are ignored).
 //!  All present selected files must be regular, not symlinks. Root/base symlinks
-//!  are rejected. Validation compares the entire selected file set and all four
-//!  integer stat fields exactly, plus `base_vm`/`path`. This is local staleness
+//!  are rejected. Validation compares the entire selected file set and the
+//!  `st_ino`, `st_size` and `st_mtime_ns` fields exactly, plus `base_vm`/`path`.
+//!  `st_dev` is recorded but not compared, because macOS renumbers a volume each
+//!  time it mounts it (DC-17). This is local staleness
 //!  detection, NOT a hash or attestation. Publication must compare fingerprints
 //!  before and after association and abort if they differ.
 //!
@@ -447,6 +449,23 @@ fn fingerprint_base_inner(
         }))
     })();
     outcome.map_err(|_| FingerprintFailure::Unavailable)
+}
+
+/// Whether a base fingerprint matches the recorded one. `st_dev` is recorded
+/// but not compared: macOS numbers a volume when it mounts it, so a reboot
+/// gives an unchanged base a new `st_dev` (DC-17). The canonical `path`
+/// already names the volume.
+fn same_base(current: &Value, recorded: &Value) -> bool {
+    fn without_device(base: &Value) -> Value {
+        let mut base = base.clone();
+        if let Some(files) = base.get_mut("files").and_then(Value::as_object_mut) {
+            for stat in files.values_mut().filter_map(Value::as_object_mut) {
+                stat.remove("st_dev");
+            }
+        }
+        base
+    }
+    without_device(current) == without_device(recorded)
 }
 
 fn default_fingerprint(root: &Path, vm: &str, os: &str) -> Result<Value, CatalogError> {
@@ -1066,7 +1085,7 @@ fn load_catalog_impl(
                 continue;
             }
         };
-        if current != association_doc["base"] {
+        if !same_base(&current, &association_doc["base"]) {
             excluded("base fingerprint changed");
             continue;
         }
@@ -1882,6 +1901,39 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("no usable"));
+    }
+
+    /// macOS numbers a volume when it mounts it, so after a reboot every
+    /// unchanged base file reports a new `st_dev` (DC-17).
+    #[test]
+    fn renumbered_volume_keeps_the_inventory() {
+        let mut fixture = Fixture::new();
+        for stat in fixture.doc["base"]["files"]
+            .as_object_mut()
+            .unwrap()
+            .values_mut()
+        {
+            stat["st_dev"] = json!(stat["st_dev"].as_u64().unwrap() + 3);
+        }
+        fixture.save(None);
+        let result = fixture.load(None).unwrap();
+        assert_eq!(result["images"].as_array().unwrap().len(), 1);
+
+        // Any other stat field still marks the base as changed.
+        for field in ["st_ino", "st_size", "st_mtime_ns"] {
+            let mut doc = fixture.doc.clone();
+            let stat = &mut doc["base"]["files"]["disk.img"];
+            stat[field] = json!(stat[field].as_u64().unwrap() + 1);
+            fixture.save(Some(&doc));
+            let messages = RefCell::new(Vec::<String>::new());
+            let record = |message: &str| messages.borrow_mut().push(message.to_string());
+            assert!(fixture
+                .load(Some(&record))
+                .unwrap_err()
+                .to_string()
+                .contains("no usable"));
+            assert!(messages.borrow()[0].contains("base fingerprint changed"));
+        }
     }
 
     #[test]
