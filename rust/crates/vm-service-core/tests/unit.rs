@@ -1223,6 +1223,74 @@ fn test_refused_boot_fails_fast_with_diagnosis() {
         .any(|name| name.starts_with("pilot-mac-refused-")));
 }
 
+/// DC-18: the hypervisor's refusal for the host's macOS VM limit, as when
+/// another program's macOS guests hold both slots, is the capacity refusal a
+/// client waits on, and it leaves nothing behind.
+#[test]
+fn test_system_limit_boot_refusal_is_a_capacity_refusal() {
+    let fixture = common::Fixture::new();
+    fixture.host.set_boot_settle(1.0);
+    fixture.host.refuse_boot(1);
+    fixture.host.set_run_log(
+        "The number of VMs exceeds the system limit (other running VMs: pilot-macos15-work, other-vm)\n\
+failed to write to the VM: Connection reset by peer (os error 54)\n",
+    );
+    let err = fixture
+        .try_acquire("crowded", "macos26", "none", &json!(24), true)
+        .expect_err("a full host must refuse");
+    let msg = err.to_string();
+    assert!(
+        msg.starts_with("macOS VM limit reached (the host refused to start pilot-mac-crowded-"),
+        "{msg}"
+    );
+    assert!(
+        msg.contains("other running VMs: pilot-macos15-work, other-vm"),
+        "{msg}"
+    );
+    assert!(fixture.read_state().is_empty(), "nothing was reserved");
+    assert!(!fixture
+        .host
+        .tart
+        .vms
+        .lock()
+        .expect("vms")
+        .keys()
+        .any(|name| name.starts_with("pilot-mac-crowded-")));
+}
+
+/// DC-18: `/images` reports a macOS image not acquirable when the host's
+/// Virtualization.framework guests, less this service's other guests, fill
+/// the macOS slots; the figure is advisory and never gates an acquisition.
+#[test]
+fn test_acquirable_counts_other_programs_macos_guests() {
+    let fixture = common::Fixture::new();
+    let acquirable = |fixture: &common::Fixture| {
+        fixture.images_snapshot()["images"]["macos26"]["concurrency"]["acquirable"].clone()
+    };
+    fixture.host.set_gauge(Some(2));
+    assert_eq!(
+        acquirable(&fixture),
+        json!(false),
+        "two foreign guests fill the slots"
+    );
+    assert_eq!(
+        fixture.images_snapshot()["capacity"]["macos_taken"],
+        json!(2)
+    );
+    fixture.acquire("u1", "ubuntu2404", "none");
+    assert_eq!(
+        acquirable(&fixture),
+        json!(true),
+        "one of the two guests is this service's Linux guest"
+    );
+    fixture.host.set_gauge(None);
+    assert_eq!(
+        acquirable(&fixture),
+        json!(true),
+        "without a gauge, only this service's leases count"
+    );
+}
+
 #[test]
 fn test_alive_boot_process_is_no_false_failure() {
     // Default fake boot process is alive (poll() -> None). acquire proceeds to

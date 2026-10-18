@@ -342,6 +342,8 @@ pub struct FakeHost {
     pub boot_settle: Mutex<f64>,
     /// The advisory host-wide guest gauge.
     pub gauge: Mutex<Option<usize>>,
+    /// What every `tart run` log reads.
+    pub run_log: Mutex<String>,
     /// The home directory used for credential packs and the Tart store.
     pub home: PathBuf,
     /// When set, `spawn_run` reports an immediately-exited boot process with
@@ -410,6 +412,7 @@ impl FakeHost {
             stub_transfer: AtomicBool::new(true),
             boot_settle: Mutex::new(0.05),
             gauge: Mutex::new(Some(0)),
+            run_log: Mutex::new(String::new()),
             boot_exit: Mutex::new(None),
             ssh_hook: Mutex::new(None),
             scp_hook: Mutex::new(None),
@@ -433,6 +436,11 @@ impl FakeHost {
     /// Make the next `spawn_run` report an immediately-exited process.
     pub fn refuse_boot(&self, code: i32) {
         *self.boot_exit.lock().expect("boot_exit") = Some(code);
+    }
+
+    /// Set what every `tart run` log reads.
+    pub fn set_run_log(&self, text: &str) {
+        *self.run_log.lock().expect("run_log") = text.to_string();
     }
 
     /// Replace the advisory host gauge.
@@ -529,6 +537,10 @@ impl Host for FakeHost {
             hook(ip, user, password, key_dir, timeout_s);
         }
         Ok(())
+    }
+
+    fn run_log(&self, _vm: &str) -> String {
+        self.run_log.lock().expect("run_log").clone()
     }
 
     fn spawn_run(&self, vm: &str, network: GuestNetwork) -> OpResult<Box<dyn BootProcess>> {

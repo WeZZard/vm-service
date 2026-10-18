@@ -109,10 +109,25 @@ pub fn images_snapshot(service: &Service) -> OpResult<Value> {
         "macos_running": running_macos,
         "macos_limit": MAX_MACOS_RUNNING,
     });
-    if let Some(guests) = service.host.host_macos_guests() {
+    let host_guests = service.host.host_macos_guests();
+    if let Some(guests) = host_guests {
         capacity["host_macos_guests"] = json!(guests);
         capacity["foreign_macos_guests"] = json!(guests.saturating_sub(running_macos));
     }
+    let active_records: Vec<&Value> = records
+        .iter()
+        .copied()
+        .filter(|record| {
+            record
+                .get("state")
+                .and_then(Value::as_str)
+                .map(|state| crate::lines::ACTIVE_STATES.contains(&state))
+                .unwrap_or(false)
+        })
+        .collect();
+    // Slots another program's macOS guests hold count too (DC-18).
+    let macos_taken = macos_slots_taken(active_records.iter().copied(), host_guests);
+    capacity["macos_taken"] = json!(macos_taken);
 
     let mut out = Map::new();
     let mut names: Vec<&String> = lines.keys().collect();
@@ -156,7 +171,7 @@ pub fn images_snapshot(service: &Service) -> OpResult<Value> {
         } else {
             Value::Null
         };
-        let acquirable = exists && (kind != "macos" || running_macos < MAX_MACOS_RUNNING);
+        let acquirable = exists && (kind != "macos" || macos_taken < MAX_MACOS_RUNNING);
         out.insert(
             name.clone(),
             json!({
@@ -178,4 +193,22 @@ fn number(value: f64) -> Value {
     serde_json::Number::from_f64(value)
         .map(Value::Number)
         .unwrap_or(Value::Null)
+}
+
+/// macOS slots taken on the host, as an advisory figure for `acquirable`
+/// (DC-18): this service's active macOS leases, or, when more, the host's
+/// Virtualization.framework guests less this service's other active guests.
+fn macos_slots_taken<'a>(
+    active: impl IntoIterator<Item = &'a Value>,
+    host_guests: Option<usize>,
+) -> usize {
+    let (mut macos, mut other) = (0usize, 0usize);
+    for record in active {
+        if record.get("image_kind").and_then(Value::as_str) == Some("macos") {
+            macos += 1
+        } else {
+            other += 1
+        }
+    }
+    host_guests.map_or(macos, |guests| macos.max(guests.saturating_sub(other)))
 }

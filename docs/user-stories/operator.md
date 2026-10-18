@@ -39,6 +39,7 @@ The human operator (WeZZard) who installs the service, keeps it healthy, trouble
 - Apple's 2-macOS-guest limit is host-wide across all Virtualization.framework consumers. If an external tool holds a slot, our `tart run` exits almost immediately — the daemon watches for that early exit and aborts the acquire at once, with an error naming the likely cause (`macOS VM refused to start — the host-wide 2-VM limit may be consumed by another Virtualization.framework user`).
 - A guest that boots normally is indistinguishable from the old behavior: no false aborts, `wait_ip` continues as before.
 - The failure is a clean rollback (US-N2): VM stopped, deleted, lease record dropped.
+- When the `tart run` log says the hypervisor refused the guest because the number of VMs exceeds the system limit, the error is the capacity refusal, `macOS VM limit reached (the host refused to start <vm>: <the log line>)`, so a client that waits for capacity, such as mcp-relay, waits instead of failing (DC-18).
 
 **Tests:** `TestRefusedBoot` (unit — Popen stub whose process exits immediately → fail-fast with diagnostic; alive process → no false failure).
 
@@ -47,7 +48,7 @@ The human operator (WeZZard) who installs the service, keeps it healthy, trouble
 **As an** operator, **I want** the capacity report to separate vm-service's own macOS leases from host-wide Virtualization.framework guests, **so that** I can tell "our two slots are busy" apart from "an external tool took a slot" when the limit trips.
 
 - `GET /images` capacity carries `host_macos_guests` (a pgrep gauge of running `com.apple.Virtualization.VirtualMachine` XPC processes — one per booted macOS guest, regardless of which tool started it) and `foreign_macos_guests` (host total minus our active macOS leases).
-- The gauge is **advisory**: it appears in snapshot output and in the limit-tripped 409 message, but never gates acquires. Its snapshot semantics cannot see a foreign boot in flight, so enforcement stays on our own `ACTIVE_STATES` counter (US8).
+- The gauge is **advisory**: it appears in snapshot output and in the limit-tripped 409 message, but never gates acquires. A macOS image's `acquirable` uses it: the image is not acquirable when this service's active macOS leases, or the gauge less this service's other active guests when that is more, fill the limit. Capacity reports that figure as `macos_taken` (DC-18). Its snapshot semantics cannot see a foreign boot in flight, so enforcement stays on our own `ACTIVE_STATES` counter (US8).
 - QEMU-based tools (e.g. UTM's QEMU backend) do not use Virtualization.framework, do not consume slots, and correctly do not appear in the gauge.
 
 **Tests:** `TestHostGauge` (unit — stubbed process count drives gauge values in snapshot and 409 text).
