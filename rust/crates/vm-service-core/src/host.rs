@@ -273,6 +273,11 @@ pub trait Host: Send + Sync {
             .map(str::to_string)
     }
 
+    /// The log of `vm`'s `tart run`, empty when it cannot be read.
+    fn run_log(&self, vm: &str) -> String {
+        std::fs::read_to_string(crate::tart::run_log_path(vm)).unwrap_or_default()
+    }
+
     /// Detect a guest the hypervisor refused to start within the settle window.
     ///
     /// A `tart run` process that exits during the window is a refusal; a process
@@ -287,6 +292,20 @@ pub trait Host: Send + Sync {
         let deadline = Instant::now() + Duration::from_secs_f64(settle.max(0.0));
         while Instant::now() < deadline {
             if let Some(code) = process.poll() {
+                // The hypervisor's own refusal for the host's macOS VM limit,
+                // such as when another program's guests hold the slots, is
+                // vm-service's capacity refusal, so a client may wait (DC-18).
+                let log = self.run_log(vm);
+                if let Some(line) = log
+                    .lines()
+                    .find(|line| line.contains("exceeds the system limit"))
+                {
+                    return Err(OpError::new(format!(
+                        "macOS VM limit reached (the host refused to start {vm}: {}); \
+release one first, or wait for another program's macOS guest to stop",
+                        line.trim()
+                    )));
+                }
                 return Err(OpError::new(format!(
                     "{vm} refused to start (boot process exited rc={code} within {}s) — \
 for macOS images the host-wide 2-VM limit may be consumed by another \
