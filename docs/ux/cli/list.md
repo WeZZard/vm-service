@@ -8,6 +8,10 @@
 - An unreachable instance keeps one row, which names the error and its Consul health status.
 - `--json` prints the merged list as JSON: one object per instance with its `instance`, `address`, `reachable`, `error` and `machines`, where each machine is the record of [MM-3](../../arch/machines.md#mm-3-capability-report).
 - `--local` lists only the local instance. `--kind durable` or `--kind virtual` filters by kind. `--require <capability>` filters by capability, as CL-2 describes.
+- `--instance <ID or address>` lists one instance. An address that Consul does not list is asked directly.
+- The JSON objects also carry `local`, `consul` (the instance's Consul health) and `catalog` (its image catalog status) (DC-63).
+- A reachable instance with no machine shows one row with the state `none`, so that it is never missing from the list. While a filter is active, an instance with no matching machine is left out, and an unreachable instance is kept.
+- `machctl list` exits 0 when any instance answered, and 2 with the hint to start the service when none did.
 
 ```text
 $ machctl list
@@ -34,6 +38,7 @@ mac-mini-m4-2    -                               -        unreachable  connectio
 
 - `machctl acquire --purpose <slug> --require metal3 --require unreal` asks for any machine that has every listed capability.
 - The capabilities a client can require are names over the capability report: `metal3`, `durable`, `virtual`, `unity`, `unreal`, `xcode`, `cua-driver`, `claude-code`, `codex`, `screen-recording` and `ci-idle`.
+- A requirement over a fact the report does not know never matches. `claude-code` and `codex` need the program and, where the record reports agent keys, a present key and gateway endpoint. `ci-idle` matches a Mac without a CI runner or with an idle one (DC-63).
 - The CLI lists the machines, keeps those that match, and prefers in order: an available durable machine whose CI runner is idle, then any available durable machine, then a virtual machine offer that is acquirable. It acquires from the instance that owns the first candidate and tries the next candidate when that acquisition is refused for capacity.
 - `--machine <name>` acquires a named durable machine, and `--image <image>` acquires a virtual machine, as `vmctl acquire` did. `--instance <ID>` chooses the instance for an image.
 - The CLI prints the machine it chose and why, before the lease, so a person can see the choice: `chose mac-mini-m4-2 (durable, metal3, CI idle)`.
@@ -43,3 +48,5 @@ mac-mini-m4-2    -                               -        unreachable  connectio
 - `exec`, `push`, `pull`, `heartbeat`, `release` and `status` take a machine name. A durable machine's name is unique. A virtual machine may be written `<vm>@<instance>`, and the CLI requires that form when two instances have a machine of that name.
 - The CLI finds the owning instance from the merged list and remembers the `lease_id` of the leases it acquired in `~/.local/state/machine-service/cli-leases.json`, so a person does not type it. `--lease-id` overrides it.
 - `push` and `pull` to a remote instance send the bytes ([FD-4](../../arch/federation.md#fd-4-working-on-a-remote-instance)). The command line is the same as for a local instance.
+- `wait` finds its machine the same way. A name that no instance lists goes to the local instance, whose answer says it is unknown. Two instances listing the name is refused with the `<vm>@<instance>` form in the error (DC-64).
+- The console commands stay with the local instance, because their viewer runs on the service host. A selected environment keeps every command on its own instance and refuses `<vm>@<instance>` (DC-64).

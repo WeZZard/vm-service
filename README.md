@@ -48,7 +48,7 @@ recoverable from this repository's history.
 | Path | Role |
 |------|------|
 | `rust/crates/machine-service` | Daemon binary: HTTP API on the configured bind address (loopback port 6240 by default), state in `~/.local/state/machine-service/state.json`, GC loop every 60s |
-| `rust/crates/machctl` | CLI client (same operations as the HTTP API) |
+| `rust/crates/machctl` | CLI client (same operations as the HTTP API), and the federated machine list across every instance Consul knows |
 | `rust/crates/machine-service-core` | Lease records, Tart lifecycle, SSH access, env packs, and operations |
 | `rust/crates/lease-keys` | Standard OpenSSH per-lease key generation, bootstrap, and safe cleanup |
 | `rust/crates/acquisition-options` | Pure option validation, configuration reporting, and discovery descriptions |
@@ -59,7 +59,7 @@ recoverable from this repository's history.
 | `rust/crates/console-worker` | Independently expiring loopback broker, SSH stream, and standard viewer launch |
 | `rust/crates/guest-console-agent` | Guest-side sharing agent, built once per guest operating system |
 | `rust/crates/runtime-launcher` | Service-owned guest launcher |
-| `rust/crates/machine-service-install` | Install/remove the launchd agent `com.wezzard.machine-service` (RunAtLoad + KeepAlive) |
+| `rust/crates/machine-service-install` | Install/remove the launchd agent `com.wezzard.machine-service` (RunAtLoad + KeepAlive), and print this Mac's service-catalog description |
 | `bin/runtime-launcher.c` | C source of the service-owned guest launcher |
 | `examples/pi-subagents/vm-use.workflow.js` | Workflow: acquire → child works via machctl → pull evidence → release in `finally` |
 
@@ -187,19 +187,36 @@ sudo ~/.local/libexec/machine-service/vm-service-guest-firewall remove
 - `MACHINE_SERVICE_GUEST_DNS` sets the resolvers an `internet` guest reaches over DNS over TLS, by default `1.1.1.1#cloudflare-dns.com,8.8.8.8#dns.google`.
 - A macOS `internet` guest needs `vm-service-dot-forwarder` beside machine-service, or `MACHINE_SERVICE_DOT_FORWARDER`; the host-native build runs in a macOS guest.
 - `MACHINE_SERVICE_GUEST_FIREWALL_ANCHOR` points the service at another anchor file, as the test fixtures do.
+- `--expose-durable on|off` writes `MACHINE_SERVICE_EXPOSE_DURABLE` into the
+  LaunchAgent, and later installs preserve it. Exposure is off unless the
+  operator turns it on (DC-39).
 
 ## Consul discovery
 
-On machines running the home Consul agent + service-catalog registrar, drop a
-description at `~/.config/service-catalog/services/machine-service.json` (see the
-service-catalog repo; the file used on this Mac is in this repo at
-`services/machine-service.json`). The registrar then keeps this in Consul:
+Each Mac's service-catalog registrar publishes its instance in Consul from a
+description file in the registrar's own folder. The installer prints that file
+for the Mac it runs on; the operator places it:
 
-- service `machine-service`, tags `vm tart disposable-infra agents`, address = this
-  machine's LAN IP, port 6240, `loopback_only: false` when bound to `0.0.0.0`.
-- HTTP health check `GET /health` every 30 s.
-- DNS: `dig @<consul> -p 8600 machine-service.service.home.consul A +short`
-- HTTP: `GET /v1/health/service/machine-service?passing=true` on the agent (8500).
+```zsh
+machine-service-install catalog-description > \
+  ~/.config/service-catalog/services/machine-service.json
+```
+
+- The tags say what the instance offers: `machines` and `agents` always,
+  `durable` when durable exposure is on, and `vm`, `tart` and
+  `disposable-infra` when the instance can create virtual machines (Tart is
+  installed, the image catalog builds, and a line's base VM is in the Tart
+  store).
+- Exposure is `--expose-durable on|off` when given, else what the installed
+  LaunchAgent sets. The command explains each tag on stderr, warns when the
+  instance binds loopback, and never writes the file itself.
+- `services/machine-service.json` is its output for a Mac with Tart and images
+  and exposure off.
+- The registrar keeps service `machine-service` in Consul with the file's tags,
+  this Mac's LAN address and port 6240 (`loopback_only: false` when the
+  instance binds `0.0.0.0`), and an HTTP check on `GET /health` every 30 s.
+- `machctl list` reads the registrations from the local agent
+  (`GET /v1/health/service/machine-service`); see [CLI](#cli).
 
 The API itself has no authentication — LAN exposure assumes the household
 trust model (same as the LLM gateway). Keep the loopback-only bind where that
@@ -514,17 +531,54 @@ machctl acquire --purpose acceptance-example --image ubuntu2404 --source work --
 machctl images                    # images, capacity and the catalog's status
 machctl images --reload           # rebuild the catalog now; exit 1 unless current
 machctl acquire --purpose build-test --image macos26 --ttl-hours 4
-machctl list
+machctl list                      # every machine from every instance
+machctl list --local              # only this Mac's instance; Consul is not asked
+machctl list --kind durable --require metal3
 machctl exec pilot-mac-build-test-<id> -- swift --version
+machctl status <vm>@<instance>    # when two instances have a machine of that name
 machctl push  <vm> ./artifact.zip /tmp/artifact.zip
 machctl pull  <vm> /tmp/build.log ./build.log
 machctl heartbeat <vm>            # call periodically for long tasks
 machctl release <vm>
 ```
 
-`machctl list` and `machctl images` print one warning line above their rows
-while the catalog is `stale` or `unavailable`, naming the failing file, the
-error and the time of the failure.
+`machctl list` asks the local instance, then the local Consul agent
+(`CONSUL_HTTP_ADDR`, default `http://127.0.0.1:8500`) for every instance
+registered as `machine-service`, then every instance at once, and prints one
+table: grouped by instance, local first, the durable machine, then virtual
+machines, then offers. Each instance gets one 5-second budget, so a dead
+instance never hangs the list.
+
+- An instance that does not answer keeps one row with its error and its Consul
+  health, for example `unreachable  connection refused (Consul: critical)`. A
+  registration published loopback-only on another Mac is not asked.
+- A Consul agent that does not answer is named on stderr, and the local
+  instance is still listed.
+- `--json` prints one object per instance: `instance`, `address`, `local`,
+  `reachable`, `error`, `consul`, `catalog` and `machines`.
+- `--instance <ID or address>`, `--kind durable|virtual` and
+  `--require <capability>` (repeatable; `metal3`, `durable`, `virtual`,
+  `unity`, `unreal`, `xcode`, `cua-driver`, `claude-code`, `codex`,
+  `screen-recording`, `ci-idle`) filter the list.
+- The exit status is 0 when any instance answered and 2 when none did.
+- `machctl list` and `machctl images` print one warning line above an
+  instance's rows while its catalog is `stale` or `unavailable`, naming the
+  failing file, the error and the time of the failure.
+
+`status`, `heartbeat`, `release`, `wait`, `exec`, `push` and `pull` send the
+command to the instance that lists the machine. `<vm>@<instance>` names the
+instance, and is required when two instances list the name. A name no instance
+lists goes to the local instance. Not built yet:
+
+- Push and pull to a machine on another Mac are refused until the
+  byte-carrying file endpoints (FD-4) exist.
+- `machctl acquire --require` and `--machine` (CL-2) wait for durable leases;
+  the capability filters above already serve `list`.
+- The CLI does not yet remember `lease_id`s in
+  `~/.local/state/machine-service/cli-leases.json` (CL-3).
+
+A selected environment (`--environment` or `VM_ENVIRONMENT_FILE`) keeps every
+command on its own instance and never asks Consul.
 
 (The installer links `~/.local/bin/machctl` to
 `~/.local/libexec/machine-service/machctl`. launchd starts the daemon, so

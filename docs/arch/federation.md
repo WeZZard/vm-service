@@ -24,6 +24,9 @@ flowchart LR
 - The description names the Consul service `machine-service`, the supervisor `com.wezzard.machine-service`, port 6240 and the health path `/health`.
 - The description's tags say what the instance offers. Every instance carries `machines` and `agents`. An instance with durable exposure on also carries `durable` (DC-39). An instance that can create virtual machines also carries `vm` and `tart`. Consul shows tags as they are in the file, so the tags are written per Mac: 192.168.50.3 carries `vm` and `tart` without `durable`, and 192.168.50.4 and 192.168.50.5 carry `durable`.
 - `machine-service-install catalog-description` prints the description for the Mac it runs on, with the tags that its exposure setting and its capability check warrant. The operator places the file. The installer never writes into service-catalog's folder, because service-catalog's files belong to it.
+  - The exposure setting is `--expose-durable on|off` when given, else the installed LaunchAgent's `MACHINE_SERVICE_EXPOSE_DURABLE`, else off (DC-60).
+  - The capability check reads the installed LaunchAgent's environment: Tart is found as the installer finds it, the image catalog is built with the daemon's own strict builder ([IC-4](image-catalog.md)), and at least one line's base VM must be listed by `tart list` in the selected store.
+  - The command explains each tag on standard error and warns when the instance binds loopback. `services/machine-service.json` in this repository is the command's output for a Mac with Tart and images and exposure off.
 - The instance must bind all interfaces, `MACHINE_SERVICE_HOST=0.0.0.0`, to be reachable from the other Macs. The registrar then publishes `loopback_only: false`. An instance bound to loopback is registered, but the CLI on another Mac reports it as not reachable.
 - `GET /health` answers `{"ok": true, "service": "machine-service", "instance": "<instance ID>", "kinds": [...]}`. `kinds` holds `"durable"` when exposure is on and `"virtual"` when the instance can create virtual machines.
 
@@ -31,12 +34,16 @@ flowchart LR
 
 - The CLI always asks the local instance first, at the configured address, which defaults to `http://127.0.0.1:6240`. This works with no Consul agent.
 - The CLI then asks the local Consul agent for every registered instance, healthy or not, with `GET /v1/health/service/machine-service`. The agent's address is `CONSUL_HTTP_ADDR`, Consul's standard variable, and defaults to `http://127.0.0.1:8500`.
-- The local instance and its Consul registration are the same instance when their instance IDs match. The CLI lists it once.
+- The local instance and its Consul registration are the same instance when their instance IDs match. The CLI lists it once. The ports must match too, so that a second instance on the same Mac stays a separate instance, and the CLI then names both `<instance ID>:<port>` (DC-61).
+- The local instance's ID is the `instance` of its `/health`. Before an instance reports it, the CLI uses the local Consul agent's node name from `GET /v1/agent/self`, and without Consul the Mac's local host name (DC-61).
 - `--local` limits the CLI to the local instance. `--instance <ID or address>` limits it to one instance.
 
 ## FD-3: Aggregation
 
 - The CLI sends `GET /machines` to every discovered instance at once, with a timeout of 5 seconds each, and merges the answers into one list ([CL-1](../ux/cli/list.md#cl-1-the-machine-list)).
+- The 5 seconds are one budget for every request to an instance, and the Consul agent has its own 5 seconds, so a list takes at most about 10 seconds whatever is down. The requests ignore proxy variables and follow no redirect (DC-62).
+- A registration that the registrar published as `loopback_only` on another Mac is not asked. Its row says `bound to loopback on <node>` (DC-62).
+- When the Consul agent does not answer, the CLI says so on standard error and lists the local instance.
 - An instance that does not answer stays in the list as `unreachable`, with the error and its Consul health status. An empty answer would read as "this Mac has no machines" and send someone to rebuild what already exists, which the service-catalog design warns against.
 - The merged list is a view at one moment. A machine shown as available may be leased by the time a client asks for it, and the acquisition then fails with its usual refusal.
 
