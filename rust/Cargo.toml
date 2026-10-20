@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
   "crates/lease-keys",
+  "crates/byte-transfer",
   "crates/environment",
   "crates/acquisition-options",
   "crates/control-only",
@@ -37,6 +38,7 @@ libc = "0.2"
 rand = "0.10"
 tempfile = "3"
 thiserror = "2"
+tar = { version = "0.4", default-features = false }
 
 [profile.release]
 strip = true

@@ -1,0 +1,16 @@
+[package]
+name = "byte-transfer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+sha2.workspace = true
+tar.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

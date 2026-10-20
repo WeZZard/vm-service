@@ -1165,3 +1165,182 @@ fn ac38_instance_without_tart_offers_only_its_durable_machine() {
     let (_, lease) = daemon.acquired("durable-check", "none");
     assert_eq!(daemon.release(&name, &lease).status, 200);
 }
+
+fn sha256(bytes: &[u8]) -> String {
+    common::sha256_hex(bytes)
+}
+
+fn header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    headers
+        .iter()
+        .find(|(field, _)| field == name)
+        .map(|(_, value)| value.as_str())
+}
+
+/// AC-28, FD-4 (DC-70, DC-71): bytes travel over HTTP to and from a
+/// durable machine: a file as itself and a folder as a tar stream, each
+/// checked against `X-Content-SHA256`. A wrong digest places nothing, a
+/// missing lease is refused before any byte is kept, and `machctl push`
+/// and `pull --bytes` take the same endpoints.
+#[test]
+fn ac28_byte_transfers_to_and_from_a_durable_machine() {
+    let fixture = Fixture::new();
+    let daemon = fixture.start("state", true);
+    let (name, lease) = daemon.acquired("bytes", "none");
+    let files = |path: &str| format!("/machines/{name}/files?lease_id={lease}&path={path}");
+
+    let hello = b"hello over http";
+    let digest = sha256(hello);
+    let (status, _, body) = common::raw_http(
+        daemon.port,
+        "PUT",
+        &files("in.txt"),
+        &[
+            ("Content-Type", "application/octet-stream"),
+            ("X-Content-SHA256", &digest),
+        ],
+        hello,
+    );
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+    let answer: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(answer["sha256"], digest);
+    assert_eq!(answer["bytes"], hello.len());
+    assert_eq!(
+        daemon.output(&name, &lease, "cat in.txt"),
+        "hello over http"
+    );
+
+    // A digest that does not match the body places nothing.
+    let (status, _, body) = common::raw_http(
+        daemon.port,
+        "PUT",
+        &files("bad.txt"),
+        &[
+            ("Content-Type", "application/octet-stream"),
+            ("X-Content-SHA256", &sha256(b"something else")),
+        ],
+        hello,
+    );
+    assert_eq!(status, 400);
+    assert!(String::from_utf8_lossy(&body).contains("digest mismatch"));
+    assert_eq!(
+        daemon.output(
+            &name,
+            &lease,
+            "test -e bad.txt && echo there || echo absent"
+        ),
+        "absent\n"
+    );
+    // No lease, no transfer.
+    let (status, _, body) = common::raw_http(
+        daemon.port,
+        "PUT",
+        &format!("/machines/{name}/files?path=x.txt"),
+        &[
+            ("Content-Type", "application/octet-stream"),
+            ("X-Content-SHA256", &digest),
+        ],
+        hello,
+    );
+    assert_eq!(status, 409, "{}", String::from_utf8_lossy(&body));
+
+    // A folder travels as a tar stream of its contents.
+    let tree = fixture.root.join("tree");
+    std::fs::create_dir_all(tree.join("nested")).unwrap();
+    std::fs::write(tree.join("nested/b.txt"), "bee").unwrap();
+    let archive = fixture.root.join("tree.tar");
+    byte_transfer::pack(&tree, &archive).unwrap();
+    let tar = std::fs::read(&archive).unwrap();
+    let (status, _, body) = common::raw_http(
+        daemon.port,
+        "PUT",
+        &format!("{}&name=tree", files("tree")),
+        &[
+            ("Content-Type", "application/x-tar"),
+            ("X-Content-SHA256", &sha256(&tar)),
+        ],
+        &tar,
+    );
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+    assert_eq!(daemon.output(&name, &lease, "cat tree/nested/b.txt"), "bee");
+
+    // Back again: a file as bytes, a folder as a tar stream.
+    let (status, headers, body) = common::raw_http(daemon.port, "GET", &files("in.txt"), &[], b"");
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+    assert_eq!(body, hello);
+    assert_eq!(header(&headers, "x-content-sha256"), Some(digest.as_str()));
+    assert_eq!(
+        header(&headers, "content-type"),
+        Some("application/octet-stream")
+    );
+    let (status, headers, body) = common::raw_http(daemon.port, "GET", &files("tree"), &[], b"");
+    assert_eq!(status, 200);
+    assert_eq!(header(&headers, "content-type"), Some("application/x-tar"));
+    assert_eq!(header(&headers, "x-content-name"), Some("tree"));
+    let fetched = fixture.root.join("fetched.tar");
+    std::fs::write(&fetched, &body).unwrap();
+    let unpacked = fixture.root.join("unpacked");
+    byte_transfer::unpack(&fetched, &unpacked).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(unpacked.join("nested/b.txt")).unwrap(),
+        "bee"
+    );
+
+    // The CLI, with `--bytes` on loopback, and the lease it was given.
+    let cli_home = fixture.root.join("cli-home");
+    std::fs::create_dir_all(&cli_home).unwrap();
+    let env = vec![
+        ("MACHINE_SERVICE_PORT".to_string(), daemon.port.to_string()),
+        ("HOME".to_string(), cli_home.display().to_string()),
+    ];
+    let source = fixture.root.join("cli.txt");
+    std::fs::write(&source, "from the cli").unwrap();
+    let pushed = common::run_machctl(
+        &[
+            "push",
+            "--bytes",
+            "--lease-id",
+            &lease,
+            &name,
+            source.to_str().unwrap(),
+            "cli.txt",
+        ],
+        &env,
+    );
+    assert!(
+        pushed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&pushed.stderr)
+    );
+    let back = fixture.root.join("cli-back");
+    std::fs::create_dir_all(&back).unwrap();
+    let pulled = common::run_machctl(
+        &[
+            "pull",
+            "--bytes",
+            "--lease-id",
+            &lease,
+            &name,
+            "tree",
+            back.to_str().unwrap(),
+        ],
+        &env,
+    );
+    assert!(
+        pulled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&pulled.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(back.join("tree/nested/b.txt")).unwrap(),
+        "bee"
+    );
+    assert_eq!(daemon.output(&name, &lease, "cat cli.txt"), "from the cli");
+    // Nothing of a transfer is left in the state folder.
+    let staged = daemon.state.join("transfers");
+    let left: Vec<_> = std::fs::read_dir(&staged)
+        .map(|entries| entries.flatten().map(|entry| entry.path()).collect())
+        .unwrap_or_default();
+    assert!(left.is_empty(), "{left:?}");
+    assert_eq!(daemon.release(&name, &lease).status, 200);
+}

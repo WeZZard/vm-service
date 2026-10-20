@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 environment = { path = "../environment" }
+byte-transfer = { path = "../byte-transfer" }
 clap.workspace = true
 # `argparse` reads the terminal width from an ioctl when `COLUMNS` is unset.
 libc.workspace = true

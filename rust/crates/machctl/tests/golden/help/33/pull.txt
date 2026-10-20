@@ -1,4 +1,5 @@
 usage: machctl pull [-h]
+                    [--bytes]
                     [--lease-id LEASE_ID]
                     vm remote
                     local
@@ -12,6 +13,9 @@ options:
   -h, --help
            show this help
            message and exit
+  --bytes  send the bytes over
+           HTTP even to an
+           instance on loopback
   --lease-id LEASE_ID
            the lease to act
            under (default: the

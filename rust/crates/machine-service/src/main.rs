@@ -14,6 +14,7 @@ use machine_service_core::{
 };
 
 mod durable_routes;
+mod files;
 mod probe;
 
 fn main() {
@@ -169,6 +170,12 @@ fn handle(service: &Service, mut request: Request) {
     let url = request.url().to_string();
     if let Some(body) = removed_route(&url) {
         let _ = send(request, 410, &body);
+        return;
+    }
+    // The byte-carrying endpoints stream their bodies, so they are answered
+    // before any JSON body is read (FD-4).
+    if let Some(name) = files::machine_of(&url) {
+        files::handle(service, request, &name);
         return;
     }
     let response = match method {
@@ -463,6 +470,16 @@ fn handle_post(service: &Service, request: &mut Request, url: &str) -> OpResult<
                 return Ok((200, result));
             }
             "exec" => return Ok((200, service.guest_exec(&vm, &body)?)),
+            // A host path means nothing on another Mac, and from another
+            // Mac it would name this host's files: path-based transfers
+            // serve loopback clients only; others use the byte-carrying
+            // endpoints (FD-4, DC-70).
+            "push" | "pull" if !loopback => {
+                return Ok((
+                    409,
+                    json!({"error": "path-based push and pull need a loopback client; a host path means nothing on another Mac (use PUT or GET /machines/<name>/files)"}),
+                ));
+            }
             "push" => return Ok((200, service.guest_push(&vm, &body)?)),
             "pull" => return Ok((200, service.guest_pull(&vm, &body)?)),
             _ => {}

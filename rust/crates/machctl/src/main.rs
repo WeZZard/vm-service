@@ -12,6 +12,7 @@ mod argparse_help;
 mod capability;
 mod consul;
 mod federation;
+mod files;
 mod http;
 mod leases;
 mod listing;
@@ -98,6 +99,9 @@ enum Cmd {
         vm: String,
         local: String,
         remote: String,
+        /// send the bytes over HTTP even to an instance on loopback
+        #[arg(long)]
+        bytes: bool,
         /// the lease to act under (default: the one machctl remembered)
         #[arg(long)]
         lease_id: Option<String>,
@@ -107,6 +111,9 @@ enum Cmd {
         vm: String,
         remote: String,
         local: String,
+        /// send the bytes over HTTP even to an instance on loopback
+        #[arg(long)]
+        bytes: bool,
         /// the lease to act under (default: the one machctl remembered)
         #[arg(long)]
         lease_id: Option<String>,
@@ -402,7 +409,10 @@ fn main() {
         timeout: federation::INSTANCE_TIMEOUT,
         consul_timeout: federation::CONSUL_TIMEOUT,
     };
-    if let Some((name, transfers)) = machine_argument(&mut cli.cmd) {
+    // Whether the machine's owner is this Mac's own instance; push and pull
+    // to any other send the bytes (FD-4, DC-70).
+    let mut owner_is_local = true;
+    if let Some(name) = machine_argument(&mut cli.cmd) {
         if environment.is_some() {
             if federation::split_name(name).1.is_some() {
                 usage_error(
@@ -412,13 +422,7 @@ fn main() {
         } else {
             match federation::route(&federation_settings(true), name) {
                 Ok(route) => {
-                    if transfers && !route.local {
-                        eprintln!(
-                            "machctl: {} is on another instance; push and pull there need the byte-carrying file endpoints (FD-4), which machctl does not use yet",
-                            route.machine
-                        );
-                        std::process::exit(1);
-                    }
+                    owner_is_local = route.local;
                     *name = route.machine;
                     base = route.base;
                 }
@@ -777,8 +781,29 @@ fn main() {
         }
 
         Cmd::Push {
-            vm, local, remote, ..
+            vm,
+            local,
+            remote,
+            bytes,
+            ..
         } => {
+            if bytes || !owner_is_local || !files::is_loopback(&base) {
+                match files::push(
+                    &base,
+                    client.fingerprint(),
+                    &vm,
+                    std::path::Path::new(&local),
+                    &remote,
+                    lease_id.as_deref(),
+                ) {
+                    Ok(_) => println!("pushed {local} -> {vm}:{remote}"),
+                    Err(error) => {
+                        eprintln!("machctl: push to {vm} failed: {error}");
+                        std::process::exit(1);
+                    }
+                }
+                return;
+            }
             let mut body = Map::new();
             insert_lease(&mut body, &lease_id);
             body.insert("local_path".to_string(), Value::String(local.clone()));
@@ -796,8 +821,29 @@ fn main() {
         }
 
         Cmd::Pull {
-            vm, remote, local, ..
+            vm,
+            remote,
+            local,
+            bytes,
+            ..
         } => {
+            if bytes || !owner_is_local || !files::is_loopback(&base) {
+                match files::pull(
+                    &base,
+                    client.fingerprint(),
+                    &vm,
+                    &remote,
+                    std::path::Path::new(&local),
+                    lease_id.as_deref(),
+                ) {
+                    Ok(target) => println!("pulled {vm}:{remote} -> {}", target.display()),
+                    Err(error) => {
+                        eprintln!("machctl: pull from {vm} failed: {error}");
+                        std::process::exit(1);
+                    }
+                }
+                return;
+            }
             let mut body = Map::new();
             insert_lease(&mut body, &lease_id);
             body.insert("remote_path".to_string(), Value::String(remote.clone()));
@@ -1111,17 +1157,17 @@ fn remember_lease(resp: &Value, owner: &str) {
     }
 }
 
-/// The machine a lease command names, and whether the command moves files
-/// by host path (CL-3). Console commands stay with the local instance: their
-/// viewer runs on the service host.
-fn machine_argument(cmd: &mut Cmd) -> Option<(&mut String, bool)> {
+/// The machine a lease command names (CL-3). Console commands stay with
+/// the local instance: their viewer runs on the service host.
+fn machine_argument(cmd: &mut Cmd) -> Option<&mut String> {
     match cmd {
-        Cmd::Status { vm } | Cmd::Heartbeat { vm, .. } | Cmd::Release { vm, .. } => {
-            Some((vm, false))
-        }
-        Cmd::Wait(args) => Some((&mut args.vm, false)),
-        Cmd::Exec(args) => Some((&mut args.vm, false)),
-        Cmd::Push { vm, .. } | Cmd::Pull { vm, .. } => Some((vm, true)),
+        Cmd::Status { vm }
+        | Cmd::Heartbeat { vm, .. }
+        | Cmd::Release { vm, .. }
+        | Cmd::Push { vm, .. }
+        | Cmd::Pull { vm, .. } => Some(vm),
+        Cmd::Wait(args) => Some(&mut args.vm),
+        Cmd::Exec(args) => Some(&mut args.vm),
         _ => None,
     }
 }

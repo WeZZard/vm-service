@@ -1,4 +1,4 @@
-usage: machctl push [-h] [--lease-id LEASE_ID] vm local remote
+usage: machctl push [-h] [--bytes] [--lease-id LEASE_ID] vm local remote
 
 positional arguments:
   vm
@@ -7,5 +7,7 @@ positional arguments:
 
 options:
   -h, --help           show this help message and exit
+  --bytes              send the bytes over HTTP even to an instance on
+                       loopback
   --lease-id LEASE_ID  the lease to act under (default: the one machctl
                        remembered)

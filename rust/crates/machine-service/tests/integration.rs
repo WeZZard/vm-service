@@ -983,3 +983,92 @@ fn test_gc_cli() {
     let output = live.machctl_ok(&["gc"]);
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "gc done");
 }
+
+/// AC-28, FD-4 (DC-70): bytes travel over HTTP to and from a virtual
+/// machine through its guest link, a file as itself and a folder as a tar
+/// stream; the staging folder is gone afterwards.
+#[test]
+fn test_ac28_byte_transfers_to_and_from_a_virtual_machine() {
+    let live = Live::new();
+    let lease = live.request(
+        "POST",
+        "/acquire",
+        Some(&json!({"purpose": "bytes", "image": "ubuntu2404", "env": "none"})),
+    );
+    assert_eq!(lease.status, 200, "{}", lease.body);
+    let vm = lease.body["vm"].as_str().expect("vm").to_string();
+    let port = live.fixture.port();
+    let files = |path: &str| format!("/machines/{vm}/files?path={path}");
+
+    let bytes = b"guest bytes";
+    let digest = common::sha256_hex(bytes);
+    let (status, _, body) = common::raw_http(
+        port,
+        "PUT",
+        &files("/tmp/in.txt"),
+        &[
+            ("Content-Type", "application/octet-stream"),
+            ("X-Content-SHA256", &digest),
+        ],
+        bytes,
+    );
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+    let (status, headers, body) = common::raw_http(port, "GET", &files("/tmp/in.txt"), &[], b"");
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+    assert_eq!(body, bytes);
+    assert!(headers
+        .iter()
+        .any(|(name, value)| name == "x-content-sha256" && *value == digest));
+
+    let scratch = tempfile::tempdir().expect("scratch");
+    let tree = scratch.path().join("tree");
+    std::fs::create_dir_all(tree.join("nested")).expect("tree");
+    std::fs::write(tree.join("nested/c.txt"), "sea").expect("c.txt");
+    let archive = scratch.path().join("tree.tar");
+    byte_transfer::pack(&tree, &archive).expect("pack");
+    let tar = std::fs::read(&archive).expect("tar");
+    let (status, _, body) = common::raw_http(
+        port,
+        "PUT",
+        &format!("{}&name=tree", files("/tmp/tree")),
+        &[
+            ("Content-Type", "application/x-tar"),
+            ("X-Content-SHA256", &common::sha256_hex(&tar)),
+        ],
+        &tar,
+    );
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+    let (status, headers, body) = common::raw_http(port, "GET", &files("/tmp/tree"), &[], b"");
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+    assert!(headers
+        .iter()
+        .any(|(name, value)| name == "content-type" && value == "application/x-tar"));
+    let fetched = scratch.path().join("fetched.tar");
+    std::fs::write(&fetched, &body).expect("fetched");
+    let unpacked = scratch.path().join("unpacked");
+    byte_transfer::unpack(&fetched, &unpacked).expect("unpack");
+    assert_eq!(
+        std::fs::read_to_string(unpacked.join("nested/c.txt")).expect("c.txt"),
+        "sea"
+    );
+
+    // An unknown machine is refused before any byte is kept.
+    let (status, _, _) = common::raw_http(
+        port,
+        "PUT",
+        "/machines/nope/files?path=/tmp/x",
+        &[
+            ("Content-Type", "application/octet-stream"),
+            ("X-Content-SHA256", &digest),
+        ],
+        bytes,
+    );
+    assert_eq!(status, 404);
+    let staged = live.fixture.state_dir.join("transfers");
+    let left: Vec<_> = std::fs::read_dir(&staged)
+        .map(|entries| entries.flatten().map(|entry| entry.path()).collect())
+        .unwrap_or_default();
+    assert!(left.is_empty(), "{left:?}");
+    let released = live.request("POST", &format!("/machines/{vm}/release"), Some(&json!({})));
+    assert_eq!(released.status, 200, "{}", released.body);
+}

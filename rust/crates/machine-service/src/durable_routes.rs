@@ -167,3 +167,35 @@ pub fn post(path: &str, body: &Value, loopback: bool) -> Option<(u16, Value)> {
         _ => reply((404, json!({"error": "not found"}))),
     }
 }
+
+/// For the byte-carrying file endpoints (FD-4): `None` when `name` is not
+/// the durable machine; otherwise whether the transfer may proceed, checked
+/// before any byte is received.
+pub fn files_check(name: &str, body: &Value) -> Option<Result<(), (u16, Value)>> {
+    let machine = machine()?;
+    if name != machine.name() {
+        return None;
+    }
+    if !machine.exposed() {
+        let refused = machine.not_exposed();
+        return Some(Err((refused.status, refused.body)));
+    }
+    Some(
+        machine
+            .check_lease(name, body)
+            .map_err(|refused| (refused.status, refused.body)),
+    )
+}
+
+/// Run a byte-carrying transfer's file-system half on the durable machine:
+/// the instance itself holds the staged path, so the path-based transfer
+/// applies (FD-4).
+pub fn files_transfer(name: &str, body: &Value, push: bool) -> (u16, Value) {
+    match machine() {
+        Some(machine) => {
+            let done = machine.transfer(name, body, push, true);
+            (done.status, done.body)
+        }
+        None => (404, json!({"error": "not found"})),
+    }
+}

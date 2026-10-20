@@ -360,8 +360,27 @@ fn cl3_lease_commands_go_to_the_owner() {
     );
     assert!(intranet.local.asked("/machines/ghost"));
 
-    // Push and pull by host path cannot reach another Mac (FD-4).
-    let output = intranet.run(&["push", "pilot-remote-3c4d", "/tmp/a", "/tmp/b"]);
+    // Push to another Mac sends the bytes to the owner's file endpoint
+    // (FD-4); this fake has none, and the failure says so.
+    let file = intranet.home.path().join("a.txt");
+    std::fs::write(&file, "bytes").unwrap();
+    let output = intranet.run(&[
+        "push",
+        "pilot-remote-3c4d",
+        file.to_str().unwrap(),
+        "/tmp/b",
+    ]);
     assert_eq!(output.status.code(), Some(1));
-    assert!(stderr(&output).contains("FD-4"), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("push to pilot-remote-3c4d failed: HTTP 404"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(intranet
+        .remote
+        .seen
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|seen| seen.starts_with("/machines/pilot-remote-3c4d/files?path=/tmp/b")));
 }
