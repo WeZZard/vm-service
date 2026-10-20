@@ -488,6 +488,11 @@ impl Daemon {
         self.port
     }
 
+    /// The daemon's process ID while it runs.
+    pub fn pid(&self) -> Option<u32> {
+        self.child.as_ref().map(Child::id)
+    }
+
     /// The captured stderr, for diagnostics.
     pub fn stderr(&self) -> String {
         std::fs::read_to_string(&self.stderr_path).unwrap_or_default()
