@@ -1,7 +1,7 @@
 # Glossary
 
 - **Guest link:** the connection between vm-service and a leased VM on the same Mac. Today every exec opens one `ssh` process and every push or pull one `scp` process.
-- **Client link:** the connection between a client (mcp-vm-relay, vmctl, a test client) and vm-service. Today it is one HTTP request per operation.
+- **Client link:** the connection between a client (mcp-vm-relay, machctl, a test client) and vm-service. Today it is one HTTP request per operation.
 - **Guest session:** one long-lived byte stream to a small helper program in the guest. vm-service sends many operations over it instead of starting one SSH connection per operation.
 - **Guest session agent:** the helper program at the guest end of a guest session. It runs commands, writes files and reads files. It is a native binary, uploaded per lease like the guest console agent.
 - **Channel:** the way vm-service obtains the byte stream of a guest session. The SSH stdio channel runs the agent under `ssh -T`. The Tart exec channel runs it under `tart exec -i`, which reaches the guest over vsock through Tart's guest agent.

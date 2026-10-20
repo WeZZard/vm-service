@@ -8,8 +8,8 @@
 
 ## RS-1: Transport
 
-- vm-service accepts remote sessions on its own listener, `VM_SERVICE_SESSION_PORT` (default 6241), at path `/session`. A separate listener lets vm-service set read timeouts and shut down a dead socket, which the HTTP server's upgraded stream does not allow.
-- Off loopback, the listener requires TLS and a client credential: a bearer token, or a client certificate (mutual TLS). On loopback, plain WebSocket is allowed for local clients and tests. The listener binds all interfaces when `VM_SERVICE_SESSION_PORT` is set and a credential is configured, so clients on other machines can connect (DC-10).
+- vm-service accepts remote sessions on its own listener, `MACHINE_SERVICE_SESSION_PORT` (default 6241), at path `/session`. A separate listener lets vm-service set read timeouts and shut down a dead socket, which the HTTP server's upgraded stream does not allow.
+- Off loopback, the listener requires TLS and a client credential: a bearer token, or a client certificate (mutual TLS). On loopback, plain WebSocket is allowed for local clients and tests. The listener binds all interfaces when `MACHINE_SERVICE_SESSION_PORT` is set and a credential is configured, so clients on other machines can connect (DC-10).
 - vm-service terminates TLS itself with rustls, with no proxy in front. A proxy would hold its own connection timeouts, so a dead client connection could stay open in the proxy after vm-service has given up on it, or the other way round.
 
 ## RS-2: Session, sequence and acknowledgement

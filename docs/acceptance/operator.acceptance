@@ -17,12 +17,12 @@ Feature: Choosing and testing the guest link
 
   @AC-16 @TL-2
   Scenario: The guest link is selected by configuration
-    Given vm-service started with VM_SERVICE_GUEST_LINK set to "ssh"
+    Given machine-service started with MACHINE_SERVICE_GUEST_LINK set to "ssh"
     Then every exec starts its own ssh process
-    Given vm-service started with VM_SERVICE_GUEST_LINK set to "ssh-session"
+    Given machine-service started with MACHINE_SERVICE_GUEST_LINK set to "ssh-session"
     Then execs share one guest session
-    Given vm-service started with VM_SERVICE_GUEST_LINK set to an unknown value
-    Then vm-service refuses to start and names the accepted values
+    Given machine-service started with MACHINE_SERVICE_GUEST_LINK set to an unknown value
+    Then machine-service refuses to start and names the accepted values
 
   @AC-17 @TL-1 @TL-2
   Scenario: Offline suites need no Tart, SSH or network

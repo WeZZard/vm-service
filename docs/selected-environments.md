@@ -13,9 +13,9 @@ The daemon accepts the same option. An invalid selected profile is an error;
 it never falls back to legacy configuration.
 
 ```sh
-vmctl --environment /absolute/path/environment.json environment --json
-vmctl --environment /absolute/path/environment.json images --json
-vm-service --environment /absolute/path/environment.json
+machctl --environment /absolute/path/environment.json environment --json
+machctl --environment /absolute/path/environment.json images --json
+machine-service --environment /absolute/path/environment.json
 ```
 
 The first command resolves configuration offline. It does not contact the
@@ -28,7 +28,7 @@ an existing checkout or executable, or with a dedicated mutable directory.
 
 ```json
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "id": "isolated-test",
   "vmServiceUrl": "http://127.0.0.1:6249",
   "imageRepository": "/absolute/checkouts/pilot-images",
@@ -36,16 +36,17 @@ an existing checkout or executable, or with a dedicated mutable directory.
   "serviceStateDir": "/absolute/environments/test/service",
   "imageStateDir": "/absolute/environments/test/images",
   "relayStateDir": "/absolute/environments/test/relay",
-  "vmctlPath": "/absolute/libexec/vm-service/vmctl",
+  "machctlPath": "/absolute/libexec/machine-service/machctl",
   "tartPath": "/absolute/bin/tart"
 }
 ```
 
+- `schemaVersion` must be 2. A profile at `schemaVersion` 1, or one that carries the retired `vmctlPath` field, is refused with an error that names `machctlPath` and `schemaVersion` 2. No reader falls back to the old field, and no tool rewrites a profile (DC-41, DC-42).
 - The profile must be at most 65536 bytes, and `id` must match `[a-z0-9][a-z0-9-]{0,47}`.
 - Every path must be absolute. Existing symlinks are resolved, including ancestors of directories that do not exist yet. Dangling symlink ancestors are rejected.
 - The image repository must exist and contain an `images/` directory. Both executables must be executable regular files.
 - Existing mutable roots must be directories. The four roots must be mutually disjoint, and they must not contain or be contained by the image repository.
-- Mutable roots must not overlap `~/.tart`, `$XDG_STATE_HOME/vm-service`, `$XDG_STATE_HOME/pilot-images`, `$XDG_STATE_HOME/mcp-vm-relay`, or the retired `$XDG_STATE_HOME/pi-vm-relay`. The corresponding `~/.local/state/` defaults remain protected even when XDG state is redirected.
+- Mutable roots must not overlap `~/.tart`, `$XDG_STATE_HOME/machine-service`, the former `$XDG_STATE_HOME/vm-service`, `$XDG_STATE_HOME/pilot-images`, `$XDG_STATE_HOME/mcp-vm-relay`, or the retired `$XDG_STATE_HOME/pi-vm-relay`. The corresponding `~/.local/state/` defaults remain protected even when XDG state is redirected.
 - The URL must use lowercase `http`, a literal `localhost`, a valid `127.x.x.x` address, or `[::1]`, and an explicit port between 1 and 65535. Credentials, paths, queries, and fragments are rejected. A single trailing slash is removed, and the port is normalized to decimal.
 - The profile is trusted local configuration. Its executable paths and image line configuration may execute host code. It is not an authorization credential or a sandbox boundary against another process running as the same user.
 
@@ -57,7 +58,7 @@ The `environment` crate exposes these entry points:
 - `canonical_profile(raw, environ)` validates a parsed profile and returns its canonical object without writing files.
 - `profile_identity(profile)` computes identity from an already canonical profile.
 
-`vmctl environment --json` prints a JSON object with three fields:
+`machctl environment --json` prints a JSON object with three fields:
 
 - `profile` contains the canonical profile object.
 - `identity` contains `id`, `fingerprint`, `vmServiceUrl`, `imageRepository`, `tartHome`, `serviceStateDir`, `imageStateDir`, and `relayStateDir`.
@@ -68,7 +69,7 @@ Without a selected profile, the output is
 
 The fingerprint is SHA-256 over UTF-8 JSON of the canonical profile, with
 lexically sorted keys, no whitespace, and unescaped Unicode. Numeric schema
-version `1.0` is normalized to integer `1` before hashing.
+version `2.0` is normalized to integer `2` before hashing.
 
 | Export | Source |
 | --- | --- |
@@ -76,16 +77,16 @@ version `1.0` is normalized to integer `1` before hashing.
 | `VM_ENVIRONMENT_FINGERPRINT` | The resolved fingerprint binds subprocess command sequences to their selected configuration. |
 | `PILOT_REPO` | `imageRepository`. |
 | `TART_HOME` | `tartHome`. |
-| `VM_SERVICE_STATE` | `serviceStateDir`. |
+| `MACHINE_SERVICE_STATE` | `serviceStateDir`. |
 | `PILOT_IMAGES_STATE_DIR` | `imageStateDir`. |
 | `VM_RELAY_STATE_DIR` | `relayStateDir`. |
 | `VM_RELAY_URL` | `vmServiceUrl`. |
-| `VM_SERVICE_HOST` | Parsed loopback hostname or address. |
-| `VM_SERVICE_PORT` | Parsed port as a decimal string. |
-| `VMCTL` | `vmctlPath`. |
+| `MACHINE_SERVICE_HOST` | Parsed loopback hostname or address. |
+| `MACHINE_SERVICE_PORT` | Parsed port as a decimal string. |
+| `MACHCTL` | `machctlPath`. |
 | `TART` | `tartPath`. |
 
-Image tooling can read the trusted absolute `vmctlPath` from the JSON, invoke
+Image tooling can read the trusted absolute `machctlPath` from the JSON, invoke
 that CLI's `environment --json` with `VM_ENVIRONMENT_FILE` set, verify that
 `identity.imageRepository` is its own canonical checkout, and apply only the
 listed exports. This avoids maintaining another full profile parser.
@@ -108,6 +109,11 @@ contains the identity object. Existing mismatched or malformed markers are
 never overwritten. Existing leases must already carry the selected
 `environment_fingerprint`; missing or mismatched binding is rejected.
 
+The lock and marker names kept their `vm-service` spelling through the rename,
+so a vm-service and a machine-service daemon can never both own one Tart store,
+and a root bound by a schema 1 profile stays refused instead of being bound
+again under a new marker name.
+
 New lease records persist `environment_fingerprint`. State access, execution,
 transfers, heartbeat, release, and GC refuse mismatched records. Legacy startup
 also refuses roots bearing selected environment markers, and legacy operations
@@ -120,7 +126,7 @@ There is no automatic migration or marker reset command.
 ## HTTP identity checks
 
 Selected `/health` responses add `environment: identity`. Requests without a
-fingerprint can read health for discovery. `vmctl` verifies health before every
+fingerprint can read health for discovery. `machctl` verifies health before every
 mutating request, and sends `X-VM-Environment-Fingerprint` on every selected
 API request.
 

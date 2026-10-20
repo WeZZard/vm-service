@@ -1,6 +1,7 @@
 # Rust translation conventions
 
-This document fixes the rules for the Python-to-Rust translation of `machine-service`.
+This document fixes the rules for the Python-to-Rust translation of `vm-service`,
+the service's name before it was renamed machine-service.
 Every crate in this workspace follows it. Where this document and a Python source
 file disagree, the Python source file is the behavioral specification and this
 document is wrong; raise the conflict instead of guessing.
@@ -27,7 +28,7 @@ document is wrong; raise the conflict instead of guessing.
 | `bin/application_catalog.py` | `crates/application-catalog` (lib `application_catalog`) |
 | `bin/console_config.py`, `bin/guest_console.py`, `bin/console_sessions.py` | `crates/console` (lib `console`) |
 | `bin/vm-service` (state, tart, ssh, packs, operations) | `crates/machine-service-core` (lib `machine_service_core`) |
-| `bin/vm-service` (HTTP server, main) | `crates/vm-service` (binary `vm-service`) |
+| `bin/vm-service` (HTTP server, main) | `crates/machine-service` (binary `machine-service`) |
 | `bin/vmctl` | `crates/machctl` (binary `machctl`) |
 | `bin/console_worker.py` | `crates/console-worker` (binary `console-worker`) |
 | `bin/guest-console-agent.py` | `crates/guest-console-agent` (binary `guest-console-agent`) |
@@ -42,10 +43,10 @@ guest-console-agent  console-worker  machctl
         ^             ^
         |             |
         +--- machine-service-core ---+
-                  |             |
+                  |                  |
    acquisition-options  control-only  application-catalog
                   |
-              machine-service
+           machine-service
 ```
 
 `crates/console` must not depend on `machine-service-core`. `crates/lease-keys` must
