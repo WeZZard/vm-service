@@ -1,5 +1,6 @@
 usage: machctl images [-h]
                       [--json]
+                      [--reload]
 
 options:
   -h, --help
@@ -8,3 +9,8 @@ options:
   --json
         machine-readable
         output
+  --reload
+        rebuild the image
+        catalog first; exit
+        1 unless it is
+        current
