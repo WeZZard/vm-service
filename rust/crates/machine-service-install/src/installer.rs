@@ -22,10 +22,11 @@ use std::time::{Duration, Instant};
 use clap::{Parser, ValueEnum};
 use serde_json::{json, Map, Value};
 
+use crate::migration;
 use crate::plist;
 
 /// The launchd label that identifies the installed agent.
-pub const LABEL: &str = "com.wezzard.vm-service";
+pub const LABEL: &str = "com.wezzard.machine-service";
 
 /// The login environment written into the plist unless the caller overrides it.
 const DEFAULT_PATH: &str =
@@ -158,41 +159,69 @@ fn home_directory() -> PathBuf {
 pub fn run(cli: &Cli, source: &Path, home: &Path) -> Result<(), InstallError> {
     let action = cli.action;
     let readonly = cli.check || cli.dry_run;
-    let plist = home
-        .join("Library/LaunchAgents")
-        .join(format!("{LABEL}.plist"));
+    let plist = migration::agent_plist(home, LABEL);
+
+    // A caller still exporting an old name would have it silently dropped;
+    // it fails here with the fix instead (DC-37).
+    environment::renamed::refuse_legacy_variables(
+        std::env::vars_os().filter_map(|(name, _)| name.into_string().ok()),
+    )
+    .map_err(InstallError::Refused)?;
 
     let old = match load_old_plist(&plist)? {
         Some(value) => value,
         None => Map::new(),
     };
     let old_has_entries = !old.is_empty();
-    let previous = installed_environment(&old)?;
+    // An installed vm-service agent is carried across the rename by an
+    // install; `remove` only ever touches machine-service (MG-3).
+    let legacy_plist = migration::agent_plist(home, migration::LEGACY_LABEL);
+    let legacy_map = if action == Action::Install {
+        load_old_plist(&legacy_plist)?
+    } else {
+        None
+    };
+    let legacy = match &legacy_map {
+        Some(map) => Some(migration::Legacy::find(
+            home,
+            map.clone(),
+            installed_environment(map)?,
+        )),
+        None => None,
+    };
+    let previous = if old_has_entries {
+        migration::rename_variables(&installed_environment(&old)?)
+    } else if let Some(legacy) = &legacy {
+        legacy.migrated.clone()
+    } else {
+        BTreeMap::new()
+    };
 
     let mut env: BTreeMap<String, String> = BTreeMap::new();
     env.insert("PATH".to_string(), DEFAULT_PATH.to_string());
     env.insert("HOME".to_string(), home.to_string_lossy().into_owned());
-    env.insert("VM_SERVICE_HOST".to_string(), "127.0.0.1".to_string());
+    env.insert("MACHINE_SERVICE_HOST".to_string(), "127.0.0.1".to_string());
     for (key, value) in &previous {
         env.insert(key.clone(), value.clone());
     }
     // Never copy the caller's complete environment into launchd; only the
     // documented service selectors.
     for (key, value) in std::env::vars() {
-        if key.starts_with("VM_SERVICE_")
+        if key.starts_with(environment::renamed::PREFIX)
             || key.starts_with("VM_ENVIRONMENT_")
             || CALLER_KEYS.contains(&key.as_str())
         {
             env.insert(key, value);
         }
     }
-    env.remove("VM_SERVICE_PYTHON");
+    env.remove("MACHINE_SERVICE_PYTHON");
     if let Some(config) = &cli.console_config {
-        env.insert("VM_SERVICE_CONSOLE_CONFIG".to_string(), config.clone());
+        env.insert("MACHINE_SERVICE_CONSOLE_CONFIG".to_string(), config.clone());
     }
 
+    let new_root = state_root(&env, home)?;
     let mut roots: BTreeSet<PathBuf> = BTreeSet::new();
-    roots.insert(state_root(&env, home)?);
+    roots.insert(new_root.clone());
     let mut owners = ownership_paths(&env, home)?;
     if old_has_entries {
         let mut old_env: BTreeMap<String, String> = BTreeMap::new();
@@ -203,14 +232,55 @@ pub fn run(cli: &Cli, source: &Path, home: &Path) -> Result<(), InstallError> {
         roots.insert(state_root(&old_env, home)?);
         owners.extend(ownership_paths(&old_env, home)?);
     }
+    // The old agent's state root and daemon locks are checked exactly like
+    // the current one's: no lease may span the switch (MG-3).
+    let mut legacy_owners: BTreeSet<PathBuf> = BTreeSet::new();
+    let mut legacy = legacy;
+    if let Some(legacy) = legacy.as_mut() {
+        let legacy_env = legacy.ownership_environment(home);
+        roots.insert(state_root(&legacy_env, home)?);
+        legacy_owners = ownership_paths(&legacy_env, home)?;
+        owners.extend(legacy_owners.iter().cloned());
+        // Move and copy only into the places the new agent will read.
+        if legacy
+            .state_move
+            .as_ref()
+            .is_some_and(|(_, to)| *to != new_root)
+        {
+            legacy.state_move = None;
+        }
+        let console = home.join(migration::CONSOLE_CONFIG);
+        if legacy.console_copy.is_some()
+            && env
+                .get("MACHINE_SERVICE_CONSOLE_CONFIG")
+                .is_some_and(|value| Path::new(value) != console)
+        {
+            legacy.console_copy = None;
+        }
+    }
     refuse_leases(&roots)?;
 
     let payload = if action == Action::Install {
-        Some(validate_install(cli, &old, &previous, &env, home, source)?)
+        let mut checked = env.clone();
+        if let Some(source) = legacy.as_ref().and_then(|legacy| legacy.validation_console()) {
+            checked.insert("MACHINE_SERVICE_CONSOLE_CONFIG".to_string(), source);
+        }
+        let mut base = old.clone();
+        if !old_has_entries {
+            if let Some(legacy) = &legacy {
+                base = legacy.extra.clone();
+            }
+        }
+        Some(validate_install(
+            cli, &base, &previous, &checked, &env, home, source,
+        )?)
     } else {
         None
     };
 
+    if let Some(legacy) = &legacy {
+        legacy.describe();
+    }
     if readonly {
         println!(
             "Check passed; no files written and no launchctl calls ({}).",
@@ -221,9 +291,17 @@ pub fn run(cli: &Cli, source: &Path, home: &Path) -> Result<(), InstallError> {
 
     // Hold the service state lock through the restart so a new pending
     // acquisition cannot be persisted between the final lease check and unload.
+    let moved_to = legacy
+        .as_ref()
+        .and_then(|legacy| legacy.state_move.as_ref())
+        .map(|(_, to)| to.clone());
     let mut _locks: Vec<File> = Vec::new();
     for root in &roots {
         if action == Action::Remove && !root.exists() {
+            continue;
+        }
+        // The old root's lock moves with its folder and covers the new root.
+        if moved_to.as_ref() == Some(root) {
             continue;
         }
         std::fs::create_dir_all(root)?;
@@ -246,7 +324,12 @@ pub fn run(cli: &Cli, source: &Path, home: &Path) -> Result<(), InstallError> {
         _locks.push(lock);
     }
     refuse_leases(&roots)?;
-    stop_existing(&plist, &owners)?;
+    // The old daemon goes first: while it runs it holds its daemon lock, which
+    // the current agent's check would read as an orphaned owner.
+    if let Some(legacy) = &legacy {
+        stop_existing(&legacy.plist, migration::LEGACY_LABEL, &legacy_owners)?;
+    }
+    stop_existing(&plist, LABEL, &owners)?;
 
     if action == Action::Remove {
         match std::fs::remove_file(&plist) {
@@ -255,8 +338,21 @@ pub fn run(cli: &Cli, source: &Path, home: &Path) -> Result<(), InstallError> {
             Err(error) => return Err(error.into()),
         }
         println!("removed {}", plist.display());
+        migration::remove_link(home, source)?;
         return Ok(());
     }
+
+    if let Some(legacy) = &legacy {
+        legacy.apply()?;
+        legacy.remove_plist()?;
+        println!("removed {}", legacy.plist.display());
+    }
+    // No `vmctl` link survives the switch (MG-3, AC-35).
+    let mut old_dirs = vec![home.join(migration::LEGACY_INSTALL_DIR)];
+    if let Some(legacy) = &legacy {
+        old_dirs.extend(legacy.install_dir(legacy_map.as_ref().and_then(|map| map.get("ProgramArguments"))));
+    }
+    migration::remove_legacy_link(home, &old_dirs)?;
 
     let payload = payload.expect("install payload is computed for the install action");
     let parent = plist
@@ -273,6 +369,7 @@ pub fn run(cli: &Cli, source: &Path, home: &Path) -> Result<(), InstallError> {
     temporary
         .persist(&plist)
         .map_err(|error| InstallError::Io(error.error))?;
+    migration::install_link(home, source)?;
     // The old job and daemon were both confirmed stopped before the replace.
     launchctl(&["load"], &plist)?;
 
@@ -338,9 +435,9 @@ fn state_root(env: &BTreeMap<String, String>, home: &Path) -> Result<PathBuf, In
         return Ok(PathBuf::from(directory));
     }
     Ok(env
-        .get("VM_SERVICE_STATE")
+        .get("MACHINE_SERVICE_STATE")
         .map(PathBuf::from)
-        .unwrap_or_else(|| home.join(".local/state/vm-service")))
+        .unwrap_or_else(|| home.join(".local/state/machine-service")))
 }
 
 fn ownership_paths(
@@ -398,6 +495,7 @@ fn validate_install(
     old: &Map<String, Value>,
     previous: &BTreeMap<String, String>,
     env: &BTreeMap<String, String>,
+    written: &BTreeMap<String, String>,
     _home: &Path,
     source: &Path,
 ) -> Result<Vec<u8>, InstallError> {
@@ -429,7 +527,7 @@ fn validate_install(
         .unwrap_or_else(console::config::ConsoleConfig::disabled);
     if config.enabled {
         let previous_console = previous
-            .get("VM_SERVICE_CONSOLE_CONFIG")
+            .get("MACHINE_SERVICE_CONSOLE_CONFIG")
             .map(|value| !value.is_empty())
             .unwrap_or(false);
         if !previous_console && cli.console_config.is_none() {
@@ -499,7 +597,7 @@ fn validate_install(
         "ProgramArguments".to_string(),
         json!([service.to_string_lossy().into_owned()]),
     );
-    data.insert("EnvironmentVariables".to_string(), environment_value(env));
+    data.insert("EnvironmentVariables".to_string(), environment_value(written));
     data.insert("RunAtLoad".to_string(), Value::Bool(true));
     data.insert("KeepAlive".to_string(), Value::Bool(true));
     data.entry("StandardOutPath".to_string())
@@ -520,8 +618,12 @@ fn validate_install(
     Ok(plist::dumps(&Value::Object(data)))
 }
 
-fn stop_existing(plist: &Path, owners: &BTreeSet<PathBuf>) -> Result<(), InstallError> {
-    let pid = launch_job(plist)?;
+fn stop_existing(
+    plist: &Path,
+    label: &str,
+    owners: &BTreeSet<PathBuf>,
+) -> Result<(), InstallError> {
+    let pid = launch_job(plist, label)?;
     let Some(pid) = pid else {
         if daemon_owned(owners)? {
             return Err(InstallError::refused(
@@ -546,7 +648,7 @@ fn stop_existing(plist: &Path, owners: &BTreeSet<PathBuf>) -> Result<(), Install
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         // Job deregistration alone is not proof that its daemon exited.
-        if launch_job(plist)?.is_none() && !daemon_owned(owners)? && !pid_alive(pid) {
+        if launch_job(plist, label)?.is_none() && !daemon_owned(owners)? && !pid_alive(pid) {
             return Ok(());
         }
         if Instant::now() >= deadline {
@@ -558,12 +660,12 @@ fn stop_existing(plist: &Path, owners: &BTreeSet<PathBuf>) -> Result<(), Install
     }
 }
 
-fn launch_job(plist: &Path) -> Result<Option<i32>, InstallError> {
+fn launch_job(plist: &Path, label: &str) -> Result<Option<i32>, InstallError> {
     // SAFETY: `getuid` takes no arguments and only reads process state.
     let uid = unsafe { libc::getuid() };
     let mut jobs: Vec<i32> = Vec::new();
     for domain in ["gui", "user"] {
-        let target = format!("{domain}/{uid}/{LABEL}");
+        let target = format!("{domain}/{uid}/{label}");
         let mut command = Command::new("launchctl");
         command.arg("print").arg(&target);
         let output = run_command(&mut command, Duration::from_secs(10))?;
@@ -865,7 +967,7 @@ mod tests {
 
     #[test]
     fn finds_indented_launchctl_fields() {
-        let text = "com.wezzard.vm-service = {\n\tpath = /tmp/a.plist\n\tpid = 1234\n}\n";
+        let text = "com.wezzard.machine-service = {\n\tpath = /tmp/a.plist\n\tpid = 1234\n}\n";
         assert_eq!(
             find_line_value(text, "path").as_deref(),
             Some("/tmp/a.plist")

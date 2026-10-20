@@ -185,7 +185,7 @@ fn read_only_canonical_bundle() {
         profile["imageRepository"]
     );
     assert_eq!(bundle["environment"]["TART"], string(&fixture.fake));
-    assert_eq!(bundle["environment"]["VM_SERVICE_PORT"], json!("6249"));
+    assert_eq!(bundle["environment"]["MACHINE_SERVICE_PORT"], json!("6249"));
     assert_eq!(
         bundle["environment"]["VM_ENVIRONMENT_FILE"],
         string(fixture.file.canonicalize().unwrap())

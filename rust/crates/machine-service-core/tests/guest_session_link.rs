@@ -563,7 +563,7 @@ fn the_guest_link_names_are_parsed_strictly() {
         assert_eq!(
             GuestLink::parse(value),
             Err(format!(
-                "VM_SERVICE_GUEST_LINK must be one of ssh, ssh-session; got {value:?}"
+                "MACHINE_SERVICE_GUEST_LINK must be one of ssh, ssh-session; got {value:?}"
             ))
         );
     }

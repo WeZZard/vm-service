@@ -18,16 +18,16 @@ use std::path::{Path, PathBuf};
 
 use crate::ssh::shell_quote;
 
-/// The resolvers an `internet` guest gets when `VM_SERVICE_GUEST_DNS` is unset.
+/// The resolvers an `internet` guest gets when `MACHINE_SERVICE_GUEST_DNS` is unset.
 pub const DEFAULT_GUEST_DNS: &str = "1.1.1.1#cloudflare-dns.com,8.8.8.8#dns.google";
 /// The environment variable that overrides [`DEFAULT_GUEST_DNS`].
-pub const GUEST_DNS_VARIABLE: &str = "VM_SERVICE_GUEST_DNS";
+pub const GUEST_DNS_VARIABLE: &str = "MACHINE_SERVICE_GUEST_DNS";
 /// The environment variable that overrides the anchor file the service reads.
-pub const ANCHOR_FILE_VARIABLE: &str = "VM_SERVICE_GUEST_FIREWALL_ANCHOR";
+pub const ANCHOR_FILE_VARIABLE: &str = "MACHINE_SERVICE_GUEST_FIREWALL_ANCHOR";
 /// The environment variable that overrides the table file the service writes.
-pub const TABLE_FILE_VARIABLE: &str = "VM_SERVICE_GUEST_FIREWALL_TABLE";
+pub const TABLE_FILE_VARIABLE: &str = "MACHINE_SERVICE_GUEST_FIREWALL_TABLE";
 /// The environment variable that overrides the macOS DNS-over-TLS forwarder.
-pub const FORWARDER_VARIABLE: &str = "VM_SERVICE_DOT_FORWARDER";
+pub const FORWARDER_VARIABLE: &str = "MACHINE_SERVICE_DOT_FORWARDER";
 /// The forwarder's executable name beside `machine-service`.
 pub const FORWARDER: &str = "vm-service-dot-forwarder";
 /// A marker in the probe command, so a fake guest can recognise it.
@@ -71,7 +71,7 @@ impl fmt::Display for GuestResolver {
     }
 }
 
-/// Parse the guest resolvers: `value` is `VM_SERVICE_GUEST_DNS`, a
+/// Parse the guest resolvers: `value` is `MACHINE_SERVICE_GUEST_DNS`, a
 /// comma-separated list of `a.b.c.d#name` or `a.b.c.d`.
 ///
 /// Softnet drops a guest's IPv6 and every non-global IPv4 destination, so a
@@ -252,7 +252,7 @@ networksetup -getdnsservers \"$svc\"\n"
     )
 }
 
-/// The forwarder executable to upload: `VM_SERVICE_DOT_FORWARDER`, or
+/// The forwarder executable to upload: `MACHINE_SERVICE_DOT_FORWARDER`, or
 /// `vm-service-dot-forwarder-macos`, then `vm-service-dot-forwarder`, beside
 /// the running daemon.
 pub fn forwarder_path(value: Option<&str>) -> PathBuf {
@@ -294,7 +294,7 @@ pub struct GuestFirewall {
     pub table: PathBuf,
 }
 
-/// The anchor file the service reads: `VM_SERVICE_GUEST_FIREWALL_ANCHOR`, or
+/// The anchor file the service reads: `MACHINE_SERVICE_GUEST_FIREWALL_ANCHOR`, or
 /// the installed default.
 pub fn anchor_file(value: Option<&str>) -> PathBuf {
     match value {
@@ -303,7 +303,7 @@ pub fn anchor_file(value: Option<&str>) -> PathBuf {
     }
 }
 
-/// The table file the service writes: `VM_SERVICE_GUEST_FIREWALL_TABLE`, or
+/// The table file the service writes: `MACHINE_SERVICE_GUEST_FIREWALL_TABLE`, or
 /// the installer's default, which every instance on the host shares.
 pub fn table_file(value: Option<&str>) -> PathBuf {
     match value {

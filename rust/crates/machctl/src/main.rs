@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use clap::{Args, Parser, Subcommand};
 use serde_json::{Map, Value};
 
-/// Default loopback port used when `VM_SERVICE_PORT` is unset.
+/// Default loopback port used when `MACHINE_SERVICE_PORT` is unset.
 const DEFAULT_PORT: &str = "6240";
 
 /// Default per-request timeout in seconds, matching Python `call(timeout=3600)`.
@@ -320,7 +320,7 @@ fn main() {
 
     let mut base = format!(
         "http://127.0.0.1:{}",
-        std::env::var("VM_SERVICE_PORT").unwrap_or_else(|_| DEFAULT_PORT.to_string())
+        std::env::var("MACHINE_SERVICE_PORT").unwrap_or_else(|_| DEFAULT_PORT.to_string())
     );
     if let Some(url) = environment
         .as_ref()
@@ -486,7 +486,7 @@ fn main() {
                         format!("HTTP {status}")
                     };
                     eprintln!(
-                        "machctl: {} not running after {}s (state: {state}); check ~/.local/state/vm-service/service.log and /tmp/tart-run-{}.log",
+                        "machctl: {} not running after {}s (state: {state}); check ~/.local/state/machine-service/service.log and /tmp/tart-run-{}.log",
                         args.vm, args.timeout_s, args.vm
                     );
                     std::process::exit(1);

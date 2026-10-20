@@ -20,7 +20,7 @@ use std::path::{Component, Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
-const PASSWORD_ENV: &str = "VM_SERVICE_SSH_PASSWORD";
+const PASSWORD_ENV: &str = "MACHINE_SERVICE_SSH_PASSWORD";
 
 /// Error raised by every public `lease_keys` operation.
 ///
@@ -889,7 +889,7 @@ fn bootstrap_body(
 /// `sys.executable` Python script. The name keeps the `.askpass-` prefix; the
 /// `.sh` suffix is accepted by `cleanup` alongside the legacy `.py` pattern.
 fn create_helper(dir: &Path) -> io::Result<PathBuf> {
-    const HELPER: &str = "#!/bin/sh\nprintf '%s\\n' \"$VM_SERVICE_SSH_PASSWORD\"\n";
+    const HELPER: &str = "#!/bin/sh\nprintf '%s\\n' \"$MACHINE_SERVICE_SSH_PASSWORD\"\n";
     let mut named = tempfile::Builder::new()
         .prefix(".askpass-")
         .suffix(".sh")

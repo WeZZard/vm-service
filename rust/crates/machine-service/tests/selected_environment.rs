@@ -102,7 +102,7 @@ impl Selected {
                 ("PATH".to_string(), common::path_with(&bin)),
                 // Stale ambient values that the selected profile must override.
                 ("TART_HOME".to_string(), "/must-not-use".to_string()),
-                ("VM_SERVICE_STATE".to_string(), "/must-not-use".to_string()),
+                ("MACHINE_SERVICE_STATE".to_string(), "/must-not-use".to_string()),
                 (
                     "FAKE_ROOT".to_string(),
                     store.to_string_lossy().into_owned(),
@@ -134,7 +134,7 @@ impl Selected {
 
     fn cli_env(&self) -> Vec<(String, String)> {
         vec![
-            ("VM_SERVICE_PORT".to_string(), "1".to_string()),
+            ("MACHINE_SERVICE_PORT".to_string(), "1".to_string()),
             ("TART_HOME".to_string(), "/wrong".to_string()),
         ]
     }
@@ -340,8 +340,8 @@ fn test_import_is_inert_even_with_invalid_selector_and_unittest_args() {
     let port = common::free_port();
     let env = vec![
         ("VM_ENVIRONMENT_FILE".to_string(), "/absent".to_string()),
-        ("VM_SERVICE_STATE".to_string(), state.display().to_string()),
-        ("VM_SERVICE_PORT".to_string(), port.to_string()),
+        ("MACHINE_SERVICE_STATE".to_string(), state.display().to_string()),
+        ("MACHINE_SERVICE_PORT".to_string(), port.to_string()),
         ("HOME".to_string(), home.display().to_string()),
     ];
     let error = match Daemon::try_start(&root, port, &["unittest", "-v"], &env) {

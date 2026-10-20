@@ -1,4 +1,4 @@
-//! Install and remove the `com.wezzard.vm-service` launchd agent.
+//! Install and remove the `com.wezzard.machine-service` launchd agent.
 //!
 //! This crate is the Rust port of `bin/install-vm-service.sh`. The shell script
 //! embedded a Python program that validated the selected environment and the
@@ -10,6 +10,7 @@
 //! and exits `1`, matching the Python wrapper.
 
 pub mod installer;
+pub mod migration;
 pub mod plist;
 
 pub use installer::{main_entry, Action, Cli, InstallError};

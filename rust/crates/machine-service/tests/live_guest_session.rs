@@ -120,7 +120,7 @@ impl Installed {
         let state = std::env::var_os("HOME")
             .map(PathBuf::from)
             .expect("HOME")
-            .join(".local/state/vm-service/state.json");
+            .join(".local/state/machine-service/state.json");
         if let Ok(text) = std::fs::read_to_string(state) {
             let state: Value = serde_json::from_str(&text).expect("installed state");
             for record in state["vms"]

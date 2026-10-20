@@ -1,6 +1,6 @@
 //! Guest sessions for exec, push and pull (`docs/arch/guest-session.md`).
 //!
-//! With `VM_SERVICE_GUEST_LINK=ssh-session`, machine-service keeps one guest
+//! With `MACHINE_SERVICE_GUEST_LINK=ssh-session`, machine-service keeps one guest
 //! session per lease (GS-1) on a channel the [`crate::host::Host`] opens (GS-2), to the
 //! `guest-session-agent` it uploads into the guest (GS-3). Requests follow the
 //! GS-5 resend rules: a request that never reached its commit point is sent

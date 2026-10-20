@@ -55,5 +55,5 @@ with `--environment <absolute-path>`.
   any other guest OS the service leases. `scripts/build-guest-agents.sh` builds
   both (the Linux artifact is cross-compiled for
   `aarch64-unknown-linux-musl`).
-- `machine-service-install` — installs or removes the `com.wezzard.vm-service`
+- `machine-service-install` — installs or removes the `com.wezzard.machine-service`
   launchd agent.

@@ -653,7 +653,7 @@ pub struct LegacyFixture {
     pub root: PathBuf,
     /// The fake `HOME`, which holds the credential pack and the Tart store.
     pub home: PathBuf,
-    /// `VM_SERVICE_STATE`.
+    /// `MACHINE_SERVICE_STATE`.
     pub state_dir: PathBuf,
     /// `PILOT_REPO`.
     pub pilot: PathBuf,
@@ -686,7 +686,7 @@ impl LegacyFixture {
 
         let pack = home.join(".config/vm-credentials/default");
         std::fs::create_dir_all(&pack).expect("pack");
-        std::fs::write(pack.join("env.extra"), "export VM_SERVICE_TEST_ONLY=1\n")
+        std::fs::write(pack.join("env.extra"), "export MACHINE_SERVICE_TEST_ONLY=1\n")
             .expect("env.extra");
 
         for (image, conf) in [
@@ -797,10 +797,10 @@ impl LegacyFixture {
     pub fn env(&self) -> Vec<(String, String)> {
         vec![
             (
-                "VM_SERVICE_STATE".to_string(),
+                "MACHINE_SERVICE_STATE".to_string(),
                 self.state_dir.display().to_string(),
             ),
-            ("VM_SERVICE_PORT".to_string(), self.port().to_string()),
+            ("MACHINE_SERVICE_PORT".to_string(), self.port().to_string()),
             ("PILOT_REPO".to_string(), self.pilot.display().to_string()),
             (
                 "PILOT_IMAGES_STATE_DIR".to_string(),
@@ -855,7 +855,7 @@ impl LegacyFixture {
     /// one, so credential lookup cannot see operator state).
     pub fn machctl_env(&self) -> Vec<(String, String)> {
         vec![
-            ("VM_SERVICE_PORT".to_string(), self.port().to_string()),
+            ("MACHINE_SERVICE_PORT".to_string(), self.port().to_string()),
             ("HOME".to_string(), self.home.display().to_string()),
         ]
     }
