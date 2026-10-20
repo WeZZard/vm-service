@@ -612,12 +612,18 @@ fn sibling_bin(package: &str, binary: &str) -> PathBuf {
 }
 
 /// Run `machctl` with the given arguments and extra environment overrides.
+///
+/// `CONSUL_HTTP_ADDR` points at a closed loopback port unless the caller
+/// overrides it, so the CLI's discovery (FD-2) never reads the real Consul
+/// agent or reaches an instance it lists; the CLI then lists only the
+/// fixture's daemon.
 pub fn run_machctl(arguments: &[&str], env: &[(String, String)]) -> Output {
     let mut command = Command::new(machctl_bin());
     command
         .args(arguments)
         .env_remove("VM_ENVIRONMENT_FILE")
         .env_remove("VM_ENVIRONMENT_FINGERPRINT")
+        .env("CONSUL_HTTP_ADDR", format!("127.0.0.1:{}", free_port()))
         .envs(env.iter().cloned())
         .stdin(Stdio::null());
     command.output().expect("run machctl")

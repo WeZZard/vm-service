@@ -225,12 +225,22 @@ fn ac41_a_broken_line_keeps_the_last_good_list_and_is_loud() {
 
     let listing = common::run_machctl(&["list"], &fixture.machctl_env());
     let text = String::from_utf8_lossy(&listing.stdout);
-    let first = text.lines().next().expect("a warning line");
+    // CL-1: the warning stands above its instance's rows, under the header,
+    // and names the instance.
+    let lines: Vec<&str> = text.lines().collect();
+    assert!(lines[0].starts_with("INSTANCE"), "{text}");
+    let warning = lines.get(1).expect("a warning line");
+    let instance = lines
+        .get(2)
+        .and_then(|row| row.split_whitespace().next())
+        .expect("the instance's row");
     assert!(
-        first.starts_with("machctl: warning: image catalog stale since "),
+        warning.starts_with(&format!(
+            "machctl: warning: {instance}: image catalog stale since "
+        )),
         "{text}"
     );
-    assert!(first.contains(&broken.display().to_string()), "{text}");
+    assert!(warning.contains(&broken.display().to_string()), "{text}");
     let reload = common::run_machctl(&["images", "--reload"], &fixture.machctl_env());
     assert_eq!(reload.status.code(), Some(1), "{reload:?}");
 
