@@ -119,7 +119,23 @@ pub struct Cli {
     /// Equivalent to `--check`.
     #[arg(long)]
     pub dry_run: bool,
+    /// Expose this Mac as a durable machine (DC-39, MM-1). Off unless turned
+    /// on; a later installation without the flag keeps the installed value.
+    #[arg(long, value_enum, value_name = "on|off")]
+    pub expose_durable: Option<Toggle>,
 }
+
+/// An `on` or `off` setting.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub enum Toggle {
+    /// Turned on.
+    On,
+    /// Turned off.
+    Off,
+}
+
+/// The daemon's exposure setting (`docs/arch/machines.md`, MM-1).
+const EXPOSE_KEY: &str = "MACHINE_SERVICE_EXPOSE_DURABLE";
 
 /// Entry point used by the `machine-service-install` binary.
 pub fn main_entry() -> Result<(), InstallError> {
@@ -217,6 +233,18 @@ pub fn run(cli: &Cli, source: &Path, home: &Path) -> Result<(), InstallError> {
     env.remove("MACHINE_SERVICE_PYTHON");
     if let Some(config) = &cli.console_config {
         env.insert("MACHINE_SERVICE_CONSOLE_CONFIG".to_string(), config.clone());
+    }
+    if let Some(toggle) = cli.expose_durable {
+        let value = if toggle == Toggle::On { "on" } else { "off" };
+        env.insert(EXPOSE_KEY.to_string(), value.to_string());
+    }
+    // The daemon refuses any other value at startup; refuse it here first.
+    if let Some(value) = env.get(EXPOSE_KEY) {
+        if value != "on" && value != "off" && !value.is_empty() {
+            return Err(InstallError::refused(format!(
+                "{EXPOSE_KEY} must be on or off; got {value:?}"
+            )));
+        }
     }
 
     let new_root = state_root(&env, home)?;
