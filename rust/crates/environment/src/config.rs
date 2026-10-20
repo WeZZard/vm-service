@@ -21,7 +21,7 @@ const PATH_KEYS: [&str; 7] = [
     "serviceStateDir",
     "imageStateDir",
     "relayStateDir",
-    "vmctlPath",
+    "machctlPath",
     "tartPath",
 ];
 
@@ -35,6 +35,13 @@ const LEGACY_STATE_NAMES: [&str; 5] = [
     "pi-vm-relay",
     "mcp-vm-relay",
 ];
+
+/// The profile schema this resolver reads (DC-42).
+const SCHEMA_VERSION: u64 = 2;
+
+/// The refusal of a schema 1 profile, or of any profile carrying `vmctlPath`.
+const RETIRED_PROFILE: &str = "profile schemaVersion 1 and its vmctlPath field are retired; \
+     set schemaVersion 2 and rename vmctlPath to machctlPath";
 
 /// Path keys that must be mutually disjoint and disjoint from image/legacy state.
 const ROOT_KEYS: [&str; 4] = [
@@ -54,7 +61,7 @@ const FIELDS: [&str; 10] = [
     "serviceStateDir",
     "imageStateDir",
     "relayStateDir",
-    "vmctlPath",
+    "machctlPath",
     "tartPath",
 ];
 
@@ -69,6 +76,15 @@ pub fn canonical_profile(
     let object = raw.as_object().ok_or_else(|| {
         EnvironmentError::msg("profile must contain exactly the supported schema fields")
     })?;
+    // A schema 1 profile names the CLI in `vmctlPath`. Its renamed field
+    // moved the schema to 2, and no reader falls back to the old one: the
+    // profile is refused with its fix in the error (AC-45, DC-42).
+    let legacy_version = object
+        .get("schemaVersion")
+        .is_some_and(|version| is_schema(version, 1));
+    if legacy_version || object.contains_key("vmctlPath") {
+        return Err(EnvironmentError::msg(RETIRED_PROFILE));
+    }
     if object.len() != FIELDS.len() || !FIELDS.iter().all(|field| object.contains_key(*field)) {
         return Err(EnvironmentError::msg(
             "profile must contain exactly the supported schema fields",
@@ -78,8 +94,8 @@ pub fn canonical_profile(
     let version = object
         .get("schemaVersion")
         .expect("field present by construction");
-    if !is_schema_one(version) {
-        return Err(EnvironmentError::msg("schemaVersion must be integer 1"));
+    if !is_schema(version, SCHEMA_VERSION) {
+        return Err(EnvironmentError::msg("schemaVersion must be integer 2"));
     }
 
     match object.get("id").and_then(Value::as_str) {
@@ -92,7 +108,7 @@ pub fn canonical_profile(
     }
 
     let mut profile = object.clone();
-    profile.insert("schemaVersion".to_string(), Value::from(1));
+    profile.insert("schemaVersion".to_string(), Value::from(SCHEMA_VERSION));
     for key in PATH_KEYS {
         let value = profile.get(key).expect("field present by construction");
         let canonical = absolute(value, key)?;
@@ -110,7 +126,7 @@ pub fn canonical_profile(
         ));
     }
 
-    for key in ["vmctlPath", "tartPath"] {
+    for key in ["machctlPath", "tartPath"] {
         let raw_path = profile[key]
             .as_str()
             .expect("canonicalized path is a string");
@@ -340,7 +356,7 @@ pub fn load_environment_with(
         "MACHINE_SERVICE_PORT".to_string(),
         Value::String(port.to_string()),
     );
-    exports.insert("VMCTL".to_string(), profile["vmctlPath"].clone());
+    exports.insert("MACHCTL".to_string(), profile["machctlPath"].clone());
     exports.insert("TART".to_string(), profile["tartPath"].clone());
 
     let mut bundle = Map::new();
@@ -465,15 +481,17 @@ fn is_control_char(character: char) -> bool {
     code <= 0x1f || code == 0x7f
 }
 
-fn is_schema_one(value: &Value) -> bool {
+/// Whether `value` is the schema version `expected`: an integer, or an
+/// integral float, never a bool or a string.
+fn is_schema(value: &Value, expected: u64) -> bool {
     match value {
         Value::Number(number) => {
-            if let Some(integer) = number.as_i64() {
-                integer == 1
-            } else if let Some(integer) = number.as_u64() {
-                integer == 1
+            if let Some(integer) = number.as_u64() {
+                integer == expected
+            } else if let Some(integer) = number.as_i64() {
+                integer >= 0 && integer as u64 == expected
             } else if let Some(float) = number.as_f64() {
-                float == 1.0
+                float == expected as f64
             } else {
                 false
             }
@@ -775,7 +793,7 @@ mod url_parity {
         fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).expect("chmod executable");
 
         let mut profile = Map::new();
-        profile.insert("schemaVersion".to_string(), json!(1));
+        profile.insert("schemaVersion".to_string(), json!(2));
         profile.insert("id".to_string(), json!("fixture"));
         profile.insert("vmServiceUrl".to_string(), json!("http://127.0.0.1:6249/"));
         profile.insert("imageRepository".to_string(), string(&repo));
@@ -786,7 +804,7 @@ mod url_parity {
             string(root.join("images-state")),
         );
         profile.insert("relayStateDir".to_string(), string(root.join("relay")));
-        profile.insert("vmctlPath".to_string(), string(&fake));
+        profile.insert("machctlPath".to_string(), string(&fake));
         profile.insert("tartPath".to_string(), string(&fake));
 
         let mut env = HashMap::new();

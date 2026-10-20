@@ -219,7 +219,7 @@ fn selected_environment_survives_upgrade_check() {
     let repo = harness.home.join("image-repo");
     fs::create_dir_all(repo.join("images")).unwrap();
     let profile = json!({
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "id": "fixture",
         "vmServiceUrl": "http://127.0.0.1:6549",
         "imageRepository": repo.to_str().unwrap(),
@@ -227,7 +227,7 @@ fn selected_environment_survives_upgrade_check() {
         "serviceStateDir": harness.home.join("selected-service").to_str().unwrap(),
         "imageStateDir": harness.home.join("selected-images").to_str().unwrap(),
         "relayStateDir": harness.home.join("selected-relay").to_str().unwrap(),
-        "vmctlPath": harness.bin.join("machctl").to_str().unwrap(),
+        "machctlPath": harness.bin.join("machctl").to_str().unwrap(),
         "tartPath": harness.tart.to_str().unwrap(),
     });
     let selector = harness.home.join("environment.json");

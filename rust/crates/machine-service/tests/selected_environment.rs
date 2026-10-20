@@ -73,7 +73,7 @@ impl Selected {
             let attempt = root.join(format!("attempt-{port}"));
             let store = attempt.join("store");
             let profile = json!({
-                "schemaVersion": 1,
+                "schemaVersion": 2,
                 "id": "fixture",
                 "vmServiceUrl": format!("http://127.0.0.1:{port}/"),
                 "imageRepository": repo.to_string_lossy(),
@@ -81,7 +81,7 @@ impl Selected {
                 "serviceStateDir": attempt.join("service").to_string_lossy(),
                 "imageStateDir": attempt.join("images-state").to_string_lossy(),
                 "relayStateDir": attempt.join("relay").to_string_lossy(),
-                "vmctlPath": machctl.to_string_lossy(),
+                "machctlPath": machctl.to_string_lossy(),
                 "tartPath": tart.to_string_lossy(),
             });
             let profile_path = root.join(format!("environment-{port}.json"));

@@ -59,7 +59,7 @@ const CALLER_KEYS: [&str; 7] = [
     "PILOT_IMAGES_STATE_DIR",
     "VM_RELAY_STATE_DIR",
     "VM_RELAY_URL",
-    "VMCTL",
+    "MACHCTL",
 ];
 
 /// A refusal that reaches the operator as `machine-service installation refused: ...`.
