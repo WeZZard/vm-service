@@ -22,6 +22,12 @@ fn main() {
 }
 
 fn run(arguments: &[String]) -> Result<(), String> {
+    // A `VM_SERVICE_*` variable is a setting this daemon would silently
+    // ignore after the rename, so it stops here and names the fix (AC-36,
+    // DC-37). `vars_os` keeps a non-UTF-8 value from panicking the check.
+    environment::renamed::refuse_legacy_variables(
+        std::env::vars_os().filter_map(|(name, _)| name.into_string().ok()),
+    )?;
     let mut environment_path: Option<String> = None;
     let mut index = 0;
     while index < arguments.len() {

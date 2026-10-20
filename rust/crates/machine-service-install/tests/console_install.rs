@@ -40,7 +40,7 @@ fn default_install_and_remove() {
 
     let data = harness.saved();
     assert_eq!(
-        data["EnvironmentVariables"]["VM_SERVICE_HOST"],
+        data["EnvironmentVariables"]["MACHINE_SERVICE_HOST"],
         json!("127.0.0.1")
     );
     // A native service needs no interpreter slot; the shell script's
@@ -53,7 +53,7 @@ fn default_install_and_remove() {
     assert!(data["EnvironmentVariables"]
         .as_object()
         .unwrap()
-        .get("VM_SERVICE_CONSOLE_CONFIG")
+        .get("MACHINE_SERVICE_CONSOLE_CONFIG")
         .is_none());
     assert_eq!(fs::read_to_string(&harness.tartlog).unwrap(), "--version\n");
 
@@ -94,10 +94,10 @@ fn xml_safe_and_upgrade_preserves_environment() {
     let selected = harness.home.join("selected").to_string_lossy().into_owned();
     let previous = [
         ("HOME", harness.home_str()),
-        ("VM_SERVICE_HOST", "0.0.0.0"),
-        ("VM_SERVICE_PORT", "6543"),
-        ("VM_SERVICE_STATE", selected.as_str()),
-        ("VM_SERVICE_GRACE_HOURS", "7"),
+        ("MACHINE_SERVICE_HOST", "0.0.0.0"),
+        ("MACHINE_SERVICE_PORT", "6543"),
+        ("MACHINE_SERVICE_STATE", selected.as_str()),
+        ("MACHINE_SERVICE_GRACE_HOURS", "7"),
         ("CUSTOM", "A&B <C>"),
     ];
     harness.save_old(&previous);
@@ -111,7 +111,7 @@ fn xml_safe_and_upgrade_preserves_environment() {
     );
     let data = harness.saved();
     assert_eq!(
-        data["EnvironmentVariables"]["VM_SERVICE_CONSOLE_CONFIG"],
+        data["EnvironmentVariables"]["MACHINE_SERVICE_CONSOLE_CONFIG"],
         json!(config)
     );
     for (key, value) in previous {
@@ -125,7 +125,7 @@ fn xml_safe_and_upgrade_preserves_environment() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(
-        harness.saved()["EnvironmentVariables"]["VM_SERVICE_CONSOLE_CONFIG"],
+        harness.saved()["EnvironmentVariables"]["MACHINE_SERVICE_CONSOLE_CONFIG"],
         json!(config)
     );
 }
@@ -133,7 +133,7 @@ fn xml_safe_and_upgrade_preserves_environment() {
 #[test]
 fn initial_enable_requires_explicit_path() {
     let harness = Harness::new();
-    let default = harness.home.join(".config/vm-service/console.json");
+    let default = harness.home.join(".config/machine-service/console.json");
     fs::create_dir_all(default.parent().unwrap()).unwrap();
     fs::write(&default, fs::read(&harness.config).unwrap()).unwrap();
     fs::set_permissions(&default, fs::Permissions::from_mode(0o600)).unwrap();
@@ -154,7 +154,7 @@ fn initial_enable_requires_explicit_path() {
 #[test]
 fn invalid_config_and_tart_leave_old_install_untouched() {
     let harness = Harness::new();
-    harness.save_old(&[("HOME", harness.home_str()), ("VM_SERVICE_HOST", "0.0.0.0")]);
+    harness.save_old(&[("HOME", harness.home_str()), ("MACHINE_SERVICE_HOST", "0.0.0.0")]);
     let original = fs::read(&harness.plist).unwrap();
 
     fs::set_permissions(&harness.config, fs::Permissions::from_mode(0o666)).unwrap();
@@ -174,7 +174,7 @@ fn invalid_config_and_tart_leave_old_install_untouched() {
 fn active_and_retained_leases_refuse_restart_and_removal() {
     let harness = Harness::new();
     harness.save_old(&[("HOME", harness.home_str())]);
-    let root = harness.home.join(".local/state/vm-service");
+    let root = harness.home.join(".local/state/machine-service");
     fs::create_dir_all(&root).unwrap();
     for state in ["pending", "provisioning", "running", "deleting", "failed"] {
         fs::write(
@@ -199,7 +199,7 @@ fn selected_old_state_is_checked_even_when_overridden() {
     let root_text = root.to_string_lossy().into_owned();
     harness.save_old(&[
         ("HOME", harness.home_str()),
-        ("VM_SERVICE_STATE", &root_text),
+        ("MACHINE_SERVICE_STATE", &root_text),
     ]);
 
     let new_state = harness
@@ -208,7 +208,7 @@ fn selected_old_state_is_checked_even_when_overridden() {
         .to_string_lossy()
         .into_owned();
     let mut harness = harness;
-    harness.set_env("VM_SERVICE_STATE", new_state);
+    harness.set_env("MACHINE_SERVICE_STATE", new_state);
     let _ = harness.assert_refused(&[]);
     assert!(!harness.log.exists());
 }
@@ -237,8 +237,8 @@ fn selected_environment_survives_upgrade_check() {
     harness.save_old(&[
         ("HOME", harness.home_str()),
         ("VM_ENVIRONMENT_FILE", &selector_text),
-        ("VM_SERVICE_HOST", "127.0.0.1"),
-        ("VM_SERVICE_PORT", "6549"),
+        ("MACHINE_SERVICE_HOST", "127.0.0.1"),
+        ("MACHINE_SERVICE_PORT", "6549"),
     ]);
     let original = fs::read(&harness.plist).unwrap();
 
@@ -286,7 +286,7 @@ fn selected_environment_survives_upgrade_check() {
 #[test]
 fn held_state_lock_refuses_restart() {
     let harness = Harness::new();
-    let root = harness.home.join(".local/state/vm-service");
+    let root = harness.home.join(".local/state/machine-service");
     fs::create_dir_all(&root).unwrap();
     fs::write(root.join("state.json"), "{\"vms\":{}}").unwrap();
     let _lock = hold_lock(&root.join("state.lock"));
@@ -390,7 +390,7 @@ fn daemon_owner_without_job_refuses_removal() {
     harness.save_old(&[("HOME", harness.home_str())]);
     let original = fs::read(&harness.plist).unwrap();
     fs::remove_file(harness.home.join("loaded-job")).unwrap();
-    let root = harness.home.join(".local/state/vm-service");
+    let root = harness.home.join(".local/state/machine-service");
     fs::create_dir_all(&root).unwrap();
     let _lock = hold_lock(&root.join("daemon.lock"));
 
@@ -406,7 +406,7 @@ fn owner_remains_after_successful_unload() {
     let harness = Harness::new();
     harness.save_old(&[("HOME", harness.home_str())]);
     let original = fs::read(&harness.plist).unwrap();
-    let root = harness.home.join(".local/state/vm-service");
+    let root = harness.home.join(".local/state/machine-service");
     fs::create_dir_all(&root).unwrap();
     let _lock = hold_lock(&root.join("daemon.lock"));
 
@@ -462,7 +462,7 @@ fn missing_service_executable_fails_before_unload() {
 #[test]
 fn corrupt_state_is_not_treated_as_empty() {
     let harness = Harness::new();
-    let root = harness.home.join(".local/state/vm-service");
+    let root = harness.home.join(".local/state/machine-service");
     fs::create_dir_all(&root).unwrap();
     fs::write(root.join("state.json"), "broken").unwrap();
 

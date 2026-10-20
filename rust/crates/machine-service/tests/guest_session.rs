@@ -83,10 +83,10 @@ impl LocalGuest {
         }
     }
 
-    /// Start the daemon with `VM_SERVICE_GUEST_LINK=link`.
+    /// Start the daemon with `MACHINE_SERVICE_GUEST_LINK=link`.
     fn start(&self, link: &str) -> Daemon {
         self.fixture.start_daemon_with(&[
-            ("VM_SERVICE_GUEST_LINK".into(), link.into()),
+            ("MACHINE_SERVICE_GUEST_LINK".into(), link.into()),
             ("GUEST_HOME".into(), self.guest_home.display().to_string()),
             (
                 "VM_GUEST_SESSION_AGENT".into(),
@@ -535,8 +535,8 @@ fn an_unknown_guest_link_refuses_to_start() {
     let guest = LocalGuest::new();
     let port = common::free_port();
     let mut env = guest.fixture.env();
-    env.push(("VM_SERVICE_PORT".into(), port.to_string()));
-    env.push(("VM_SERVICE_GUEST_LINK".into(), "tart-session".into()));
+    env.push(("MACHINE_SERVICE_PORT".into(), port.to_string()));
+    env.push(("MACHINE_SERVICE_GUEST_LINK".into(), "tart-session".into()));
     let error = match Daemon::try_start(&guest.fixture.root, port, &[], &env) {
         Ok(_) => panic!("the daemon started with an unknown guest link"),
         Err(error) => error,
@@ -544,7 +544,7 @@ fn an_unknown_guest_link_refuses_to_start() {
     assert!(error.contains("daemon exited early"), "{error}");
     assert!(
         error.contains(
-            r#"VM_SERVICE_GUEST_LINK must be one of ssh, ssh-session; got "tart-session""#
+            r#"MACHINE_SERVICE_GUEST_LINK must be one of ssh, ssh-session; got "tart-session""#
         ),
         "{error}"
     );

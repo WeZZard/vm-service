@@ -348,7 +348,7 @@ fn load_config_with(
     };
     let selected = match path {
         Some(value) => Some(value.to_string()),
-        None => env_map.get("VM_SERVICE_CONSOLE_CONFIG").cloned(),
+        None => env_map.get("MACHINE_SERVICE_CONSOLE_CONFIG").cloned(),
     };
     let explicit = selected.is_some();
     let selected = match selected {
@@ -360,7 +360,7 @@ fn load_config_with(
                 .or_else(|| std::env::var("HOME").ok())
                 .unwrap_or_default();
             PathBuf::from(home)
-                .join(".config/vm-service/console.json")
+                .join(".config/machine-service/console.json")
                 .to_string_lossy()
                 .into_owned()
         }
@@ -437,7 +437,7 @@ fn load_config_with(
 
 /// Return a detached validated startup snapshot, or raise `ConsoleConfigError`.
 ///
-/// Selection is explicit path, `VM_SERVICE_CONSOLE_CONFIG`, then the standard
+/// Selection is explicit path, `MACHINE_SERVICE_CONSOLE_CONFIG`, then the standard
 /// user configuration. Only an absent unselected default is disabled silently.
 /// Availability means host configuration, not guest readiness or rendered
 /// pixels.
@@ -564,7 +564,7 @@ mod tests {
         )
         .is_err());
         let mut empty = HashMap::new();
-        empty.insert("VM_SERVICE_CONSOLE_CONFIG".to_string(), String::new());
+        empty.insert("MACHINE_SERVICE_CONSOLE_CONFIG".to_string(), String::new());
         drop(fixture);
         assert!(load_config_with(None, Some(&empty), &["absent"]).is_err());
     }
@@ -732,7 +732,7 @@ mod tests {
         let fixture = Fixture::new();
         let mut env = HashMap::new();
         env.insert(
-            "VM_SERVICE_CONSOLE_CONFIG".to_string(),
+            "MACHINE_SERVICE_CONSOLE_CONFIG".to_string(),
             fixture.file.to_string_lossy().into_owned(),
         );
         let defaults: Vec<&str> = fixture.defaults.iter().map(String::as_str).collect();
@@ -743,7 +743,7 @@ mod tests {
         );
         let mut override_env = HashMap::new();
         override_env.insert(
-            "VM_SERVICE_CONSOLE_CONFIG".to_string(),
+            "MACHINE_SERVICE_CONSOLE_CONFIG".to_string(),
             "/missing".to_string(),
         );
         assert!(

@@ -405,7 +405,7 @@ mod tests {
     #[test]
     fn round_trips_dictionaries_arrays_and_scalars() {
         let value = json!({
-            "Label": "com.wezzard.vm-service",
+            "Label": "com.wezzard.machine-service",
             "RunAtLoad": true,
             "KeepAlive": false,
             "Count": 3,
@@ -424,7 +424,7 @@ mod tests {
 <plist version="1.0">
 <dict>
 	<key>Label</key>
-	<string>com.wezzard.vm-service</string>
+	<string>com.wezzard.machine-service</string>
 	<key>ProgramArguments</key>
 	<array>
 		<string>/bin/true</string>
@@ -435,7 +435,7 @@ mod tests {
 </plist>
 "#;
         let value = parse(document).unwrap();
-        assert_eq!(value["Label"], json!("com.wezzard.vm-service"));
+        assert_eq!(value["Label"], json!("com.wezzard.machine-service"));
         assert_eq!(value["ProgramArguments"][0], json!("/bin/true"));
         assert_eq!(value["RunAtLoad"], json!(true));
     }

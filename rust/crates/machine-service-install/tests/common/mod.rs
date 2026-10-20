@@ -14,12 +14,18 @@ use std::process::{Command, Output};
 use tempfile::TempDir;
 
 /// A `launchctl` stand-in that records calls and keeps the documented sentinel
-/// files. It mirrors the Python stub in `test_console_install.py`.
+/// files. It mirrors the Python stub in `test_console_install.py`, and keeps
+/// one job sentinel per label: `loaded-job` for machine-service and
+/// `loaded-job-<label>` for any other agent, such as the old vm-service.
 pub const LAUNCHCTL_STUB: &str = r#"#!/bin/sh
 home="$HOME"
 printf '%s\n' "$*" >> "$home/launchctl.log"
-job="$home/loaded-job"
 op="$1"
+case "$op" in
+  print) label="${2##*/}" ;;
+  *) label="$(basename "${2:-}" .plist)" ;;
+esac
+if [ "$label" = com.wezzard.machine-service ]; then job="$home/loaded-job"; else job="$home/loaded-job-$label"; fi
 case "$op" in
   print)
     if [ -e "$home/print-fails" ]; then
@@ -30,13 +36,13 @@ case "$op" in
     target="${2:-}"
     case "$target" in
       "$expected"*) ;;
-      *) echo 'Could not find service "com.wezzard.vm-service" in domain' >&2; exit 113 ;;
+      *) echo "Could not find service \"$label\" in domain" >&2; exit 113 ;;
     esac
     if [ ! -e "$job" ]; then
-      echo 'Could not find service "com.wezzard.vm-service" in domain' >&2
+      echo "Could not find service \"$label\" in domain" >&2
       exit 113
     fi
-    echo "path = $home/Library/LaunchAgents/com.wezzard.vm-service.plist"
+    echo "path = $home/Library/LaunchAgents/$label.plist"
     content="$(cat "$job")"
     if [ -n "$content" ]; then echo "pid = $content"; fi
     ;;
@@ -117,7 +123,7 @@ impl Harness {
         fs::write(&config, body).unwrap();
         fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
 
-        let plist = home.join("Library/LaunchAgents/com.wezzard.vm-service.plist");
+        let plist = home.join("Library/LaunchAgents/com.wezzard.machine-service.plist");
 
         Self {
             tmp,
@@ -184,6 +190,35 @@ impl Harness {
         fs::create_dir_all(self.plist.parent().unwrap()).unwrap();
         fs::write(&self.plist, machine_service_install::plist::dumps(&value)).unwrap();
         fs::write(self.home.join("loaded-job"), "").unwrap();
+    }
+
+    /// Install an old vm-service agent with `environment`, running from the
+    /// old default install folder, and mark its job loaded.
+    pub fn save_legacy(&self, environment: &[(&str, &str)]) -> PathBuf {
+        let mut env = serde_json::Map::new();
+        for (key, value) in environment {
+            env.insert(
+                (*key).to_string(),
+                serde_json::Value::String((*value).to_string()),
+            );
+        }
+        let program = self.home.join(".local/libexec/vm-service/vm-service");
+        let value = serde_json::json!({
+            "Label": "com.wezzard.vm-service",
+            "EnvironmentVariables": serde_json::Value::Object(env),
+            "ProgramArguments": [program.to_str().unwrap()],
+            "RunAtLoad": true,
+            "KeepAlive": true,
+            "StandardOutPath": "/tmp/com.wezzard.vm-service.out",
+            "StandardErrorPath": "/tmp/com.wezzard.vm-service.err",
+        });
+        let plist = self
+            .home
+            .join("Library/LaunchAgents/com.wezzard.vm-service.plist");
+        fs::create_dir_all(plist.parent().unwrap()).unwrap();
+        fs::write(&plist, machine_service_install::plist::dumps(&value)).unwrap();
+        fs::write(self.home.join("loaded-job-com.wezzard.vm-service"), "").unwrap();
+        plist
     }
 
     pub fn config_path(&self) -> String {

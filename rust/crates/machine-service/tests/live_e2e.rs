@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
-/// Default live daemon port, matching the Python `VM_SERVICE_PORT` default.
+/// Default live daemon port, matching the Python `MACHINE_SERVICE_PORT` default.
 const DEFAULT_PORT: u16 = 6240;
 /// Default e2e image, matching the Python `E2E_IMAGE` default.
 const E2E_IMAGE: &str = "ubuntu2404";
@@ -32,7 +32,7 @@ const GH_EXEC_TIMEOUT: Duration = Duration::from_secs(120);
 const RELEASE_TIMEOUT: Duration = Duration::from_secs(600);
 
 fn live_port() -> u16 {
-    std::env::var("VM_SERVICE_PORT")
+    std::env::var("MACHINE_SERVICE_PORT")
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(DEFAULT_PORT)

@@ -110,7 +110,7 @@ impl Fixture {
             .env_remove("VM_ENVIRONMENT_FILE")
             .env_remove("VM_ENVIRONMENT_FINGERPRINT")
             .env("HOME", &self.home)
-            .env("VM_SERVICE_PORT", "1")
+            .env("MACHINE_SERVICE_PORT", "1")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());

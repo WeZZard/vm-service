@@ -7,7 +7,7 @@
 //! for one that Tart cannot run unattended.
 //!
 //! The guest firewall's anchor file is read from the fixture through
-//! `VM_SERVICE_GUEST_FIREWALL_ANCHOR`, and the fake `ssh` answers the
+//! `MACHINE_SERVICE_GUEST_FIREWALL_ANCHOR`, and the fake `ssh` answers the
 //! isolation probe with `FAKE_PROBE_RESULT` (DC-14).
 
 mod common;
@@ -69,11 +69,11 @@ impl Live {
         }
         let mut env = vec![
             (
-                "VM_SERVICE_GUEST_FIREWALL_ANCHOR".to_string(),
+                "MACHINE_SERVICE_GUEST_FIREWALL_ANCHOR".to_string(),
                 anchor.display().to_string(),
             ),
             (
-                "VM_SERVICE_GUEST_FIREWALL_TABLE".to_string(),
+                "MACHINE_SERVICE_GUEST_FIREWALL_TABLE".to_string(),
                 table.display().to_string(),
             ),
             ("FAKE_PROBE_RESULT".to_string(), probe.to_string()),

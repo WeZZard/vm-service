@@ -39,7 +39,7 @@ pub struct Config {
 }
 
 /// How exec, push and pull reach the guest (`docs/arch/guest-session.md`,
-/// GS-2), chosen by `VM_SERVICE_GUEST_LINK`.
+/// GS-2), chosen by `MACHINE_SERVICE_GUEST_LINK`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum GuestLink {
     /// One `ssh` or `scp` process per operation.
@@ -60,19 +60,19 @@ impl GuestLink {
             "ssh" => Ok(GuestLink::Ssh),
             "ssh-session" => Ok(GuestLink::SshSession),
             other => Err(format!(
-                "VM_SERVICE_GUEST_LINK must be one of {}; got {other:?}",
+                "MACHINE_SERVICE_GUEST_LINK must be one of {}; got {other:?}",
                 Self::NAMES.join(", ")
             )),
         }
     }
 
-    /// Read `VM_SERVICE_GUEST_LINK`; unset or empty selects [`GuestLink::Ssh`].
+    /// Read `MACHINE_SERVICE_GUEST_LINK`; unset or empty selects [`GuestLink::Ssh`].
     pub fn from_environment() -> Result<Self, String> {
-        match std::env::var("VM_SERVICE_GUEST_LINK") {
+        match std::env::var("MACHINE_SERVICE_GUEST_LINK") {
             Ok(value) if !value.is_empty() => Self::parse(&value),
             Ok(_) | Err(std::env::VarError::NotPresent) => Ok(GuestLink::Ssh),
             Err(std::env::VarError::NotUnicode(_)) => {
-                Err("VM_SERVICE_GUEST_LINK is not valid UTF-8".to_string())
+                Err("MACHINE_SERVICE_GUEST_LINK is not valid UTF-8".to_string())
             }
         }
     }
@@ -96,17 +96,17 @@ impl Config {
         let pilot = std::env::var_os("PILOT_REPO")
             .map(PathBuf::from)
             .unwrap_or_else(|| home.join("Artifacts/Repositories/com.github/WeZZard/pilot-images"));
-        let state_dir = std::env::var_os("VM_SERVICE_STATE")
+        let state_dir = std::env::var_os("MACHINE_SERVICE_STATE")
             .map(PathBuf::from)
-            .unwrap_or_else(|| home.join(".local/state/vm-service"));
+            .unwrap_or_else(|| home.join(".local/state/machine-service"));
         let state_dir = state_dir
             .canonicalize()
             .unwrap_or_else(|_| absolute_lexical(&state_dir));
-        let port = std::env::var("VM_SERVICE_PORT")
+        let port = std::env::var("MACHINE_SERVICE_PORT")
             .ok()
             .and_then(|value| value.parse::<u16>().ok())
             .unwrap_or(6240);
-        let host = std::env::var("VM_SERVICE_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+        let host = std::env::var("MACHINE_SERVICE_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
         Self {
             environment: None,
             tart_executable: "tart".to_string(),
@@ -145,7 +145,7 @@ impl Config {
                 }
             }
         }
-        let port = get(exports, "VM_SERVICE_PORT")
+        let port = get(exports, "MACHINE_SERVICE_PORT")
             .parse::<u16>()
             .unwrap_or(6240);
         Self {
@@ -157,7 +157,7 @@ impl Config {
             lock_file: state_dir.join("state.lock"),
             log_file: state_dir.join("service.log"),
             state_dir,
-            host: get(exports, "VM_SERVICE_HOST"),
+            host: get(exports, "MACHINE_SERVICE_HOST"),
             port,
             guest_link: GuestLink::Ssh,
         }

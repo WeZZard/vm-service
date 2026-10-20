@@ -25,6 +25,17 @@ const PATH_KEYS: [&str; 7] = [
     "tartPath",
 ];
 
+/// State folders under the XDG state home that a selected root must not
+/// overlap: the service's own under its current and its former name, and the
+/// image and relay tools' folders.
+const LEGACY_STATE_NAMES: [&str; 5] = [
+    "machine-service",
+    "vm-service",
+    "pilot-images",
+    "pi-vm-relay",
+    "mcp-vm-relay",
+];
+
 /// Path keys that must be mutually disjoint and disjoint from image/legacy state.
 const ROOT_KEYS: [&str; 4] = [
     "tartHome",
@@ -127,11 +138,11 @@ pub fn canonical_profile(
 
     let mut legacy: Vec<PathBuf> = Vec::new();
     legacy.push(Path::new(&home).join(".tart"));
-    for name in ["vm-service", "pilot-images", "pi-vm-relay", "mcp-vm-relay"] {
+    for name in LEGACY_STATE_NAMES {
         legacy.push(Path::new(&xdg).join(name));
     }
     // Also protect the defaults when XDG_STATE_HOME redirects legacy state.
-    for name in ["vm-service", "pilot-images", "pi-vm-relay", "mcp-vm-relay"] {
+    for name in LEGACY_STATE_NAMES {
         legacy.push(Path::new(&home).join(".local/state").join(name));
     }
 
@@ -312,7 +323,7 @@ pub fn load_environment_with(
     exports.insert("PILOT_REPO".to_string(), profile["imageRepository"].clone());
     exports.insert("TART_HOME".to_string(), profile["tartHome"].clone());
     exports.insert(
-        "VM_SERVICE_STATE".to_string(),
+        "MACHINE_SERVICE_STATE".to_string(),
         profile["serviceStateDir"].clone(),
     );
     exports.insert(
@@ -324,9 +335,9 @@ pub fn load_environment_with(
         profile["relayStateDir"].clone(),
     );
     exports.insert("VM_RELAY_URL".to_string(), profile["vmServiceUrl"].clone());
-    exports.insert("VM_SERVICE_HOST".to_string(), Value::String(host));
+    exports.insert("MACHINE_SERVICE_HOST".to_string(), Value::String(host));
     exports.insert(
-        "VM_SERVICE_PORT".to_string(),
+        "MACHINE_SERVICE_PORT".to_string(),
         Value::String(port.to_string()),
     );
     exports.insert("VMCTL".to_string(), profile["vmctlPath"].clone());

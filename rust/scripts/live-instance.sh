@@ -33,8 +33,8 @@ start)
         exit 1
     fi
     mkdir -p "$dir/state"
-    VM_SERVICE_PORT="$port" VM_SERVICE_HOST=127.0.0.1 \
-        VM_SERVICE_STATE="$dir/state" VM_SERVICE_GUEST_LINK="$link" \
+    MACHINE_SERVICE_PORT="$port" MACHINE_SERVICE_HOST=127.0.0.1 \
+        MACHINE_SERVICE_STATE="$dir/state" MACHINE_SERVICE_GUEST_LINK="$link" \
         nohup perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV or die "exec: $!"' \
         "$bin/machine-service" >>"$dir/daemon.out" 2>>"$dir/daemon.err" </dev/null &
     echo $! >"$pidfile"
