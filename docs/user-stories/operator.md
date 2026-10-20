@@ -78,3 +78,38 @@ The human operator (WeZZard) who installs the service, keeps it healthy, trouble
 - `tests/e2e/` is deliberately NOT stubbed: real Tart clone/boot, real sshpass SSH, real credential injection, run opt-in against the live daemon (`/opt/homebrew/bin/python3 -m unittest discover -s tests/e2e -v`). Every e2e acquire is released in teardown; the macOS-capacity test skips itself when slots are busy.
 
 **Tests:** the unit and integration suites; suite-level properties (speed, isolation, stubbing) are part of the contract.
+
+## US23 — See every machine on the intranet in one list
+
+- As the operator, I want `machctl list` on any Mac to show every machine from every instance that Consul knows, so that I know what is leased, what is free and what each machine can do.
+- An instance that does not answer stays in the list as unreachable, never silently missing. See [FD](../arch/federation.md) and [CL-1](../ux/cli/list.md#cl-1-the-machine-list).
+
+**Tests:** AC-34 and AC-37 in [operator.acceptance](../acceptance/operator.acceptance).
+
+## US30 — Rename in one coordinated switch
+
+- As the operator, I want the rename to machine-service and `machctl`, and every caller's switch to the new names, to land together, so that no old name lingers and no caller is left behind (DC-33).
+- A caller that still uses an old path or variable fails at once with the new name in its error, instead of working unnoticed (DC-37). See [MG-3](../arch/rename.md#mg-3-one-coordinated-switch).
+
+**Tests:** AC-35 and AC-36 in [operator.acceptance](../acceptance/operator.acceptance).
+
+## US31 — Install on a Mac without Tart
+
+- As the operator, I want to install machine-service on a Mac that has no Tart and no images and turn durable exposure on, so that the Mac offers its durable machine alone.
+- See [MG-4](../arch/rename.md#mg-4-order-of-migration).
+
+**Tests:** AC-38 in [operator.acceptance](../acceptance/operator.acceptance).
+
+## US32 — The image list follows the images without a restart
+
+- As the operator, I want adding, updating or removing an image line, promoting a base, or changing a base association to change the available virtual machines without restarting the daemon, so that image work and leasing do not wait on each other (DC-34).
+- A broken image file never takes the list away: the last good list stays, and the failure is reported loudly until the file is fixed. See [IC](../arch/image-catalog.md).
+
+**Tests:** AC-39 to AC-42 in [operator.acceptance](../acceptance/operator.acceptance).
+
+## US33 — Choose which Macs are durable machines
+
+- As the operator, I want each instance to expose its Mac as a durable machine only when I turn it on, so that a Mac that serves virtual machines, such as 192.168.50.3, is never leased as a whole by accident (DC-39).
+- See [MM-1](../arch/machines.md#mm-1-two-kinds-of-machine).
+
+**Tests:** AC-43 in [operator.acceptance](../acceptance/operator.acceptance).

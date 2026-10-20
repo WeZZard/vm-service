@@ -18,3 +18,23 @@
 - **Conformance suite:** one set of tests that every channel must pass.
 - **Fault proxy:** a test program between two ends of a link that injects resets, silent hangs, latency and corruption.
 - **Second instance:** a vm-service built from a worktree and run on another port with its own state directory, so live tests leave the installed service alone.
+- **machine-service:** the new name of vm-service (DC-19). It is also the name of its daemon executable (DC-36).
+- **machctl:** the machine-service CLI, which replaces `vmctl` (DC-35).
+- **Instance:** one running machine-service on one Mac. Its instance ID is the Mac's local host name, which is also its Consul node name.
+- **Machine:** anything an instance leases. A machine is a durable machine or a virtual machine.
+- **Durable machine:** the Mac that an instance runs on, leased as an exclusive session. It is called durable because it outlives every lease. It is never called "bare metal" or a "physical machine" (DC-22).
+- **Durable exposure:** an instance's local setting that decides whether it offers its Mac as a durable machine. It is off unless the operator turns it on (DC-39).
+- **Virtual machine:** a Tart clone that an instance creates for one lease and destroys at release.
+- **Offer:** an entry in the machine list for a virtual machine that an instance can create from one image, with that image's capabilities and capacity.
+- **Capability report:** the facts a machine record carries so that a consumer can choose by capability: OS, hardware, disk, GPU and Metal families, display, software, permissions, agent keys and the CI runner's state.
+- **Metal family:** a GPU feature set that Metal reports through `supportsFamily`, such as `apple9`, `mac2`, `common3` or `metal3`.
+- **Workspace:** the scratch folder of one durable lease, its default working directory and `TMPDIR`. Release removes it.
+- **Session environment:** the environment every command of one durable lease runs with: the login shell's variables without the owner's credentials, plus the lease's own variables and agent keys.
+- **Agent key:** a stable LiteLLM key for one agent on one Mac, held in a mode 600 file under `~/.config/machine-service/agents/`.
+- **Endpoints file:** `endpoints.json` beside the agent keys, the local configuration that names each agent's gateway base URL (DC-32).
+- **Hygiene record:** what a durable lease records about the machine: the inventories before and after, their differences, the swept processes and the CI busy intervals.
+- **Sweep:** the step of release that ends the processes a durable lease left running.
+- **Federated list:** the CLI's merged list of every machine from the local instance and every instance that Consul lists.
+- **Coordinated switch:** the one deployment in which the service is renamed and every known caller moves to the new names, with no alias left behind (DC-33, DC-37).
+- **Image catalog snapshot:** the daemon's one published view of the image lines, rebuilt when its inputs change and replaced atomically (DC-34).
+- **Input identity:** the image names and each `line.conf`'s inode, size, modification time and SHA-256, which tell the daemon whether its catalog snapshot still matches the files.

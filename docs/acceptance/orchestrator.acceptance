@@ -22,3 +22,46 @@ Feature: Lease teardown with guest sessions and remote sessions
     Then the client's resume is answered "expired"
     And a query of the exec's execution ID answers "unknown"
     And the client reports the exec as uncertain without sending it again
+
+Feature: Hygiene and coexistence on durable machines
+
+  @AC-30 @TL-2 @TL-6
+  Scenario: Release sweeps what the lease left running, and nothing else
+    Given a durable lease
+    And a stand-in CI runner process tree that started during the lease
+    When the agent starts a background process with "nohup sleep 3600 &"
+    And the agent opens an application with "open -a TextEdit"
+    And the orchestrator releases the lease
+    Then the sleep process and TextEdit have ended
+    And the stand-in CI processes, Consul and the registrar are still running
+    And the hygiene record lists each swept process with the rule that matched it
+    And the workspace has been removed and the machine is "available"
+
+  @AC-31 @TL-2 @TL-6
+  Scenario: The inventory before and after is recorded and never refuses
+    Given a durable lease
+    When the agent installs a Homebrew formula and writes a file into "~/Library/Application Support"
+    And the orchestrator releases the lease
+    Then changes.json lists the formula as added and the Application Support entry as added or changed
+    And the release response carries changes.json and the paths of both inventories
+    When one inventory part times out at release
+    Then the part is recorded as missing with its reason, the release still succeeds and the machine is "available"
+
+  @AC-32 @TL-6
+  Scenario: A lease coexists with the CI runner
+    Given a Mac whose CI runner is running a job
+    When the orchestrator acquires its durable machine
+    Then the acquisition succeeds and the CI runner is neither paused nor stopped
+    And the machine record reports ci_runner busy
+    When the orchestrator releases the lease
+    Then the hygiene record lists the intervals during which a CI job ran
+    And nothing under "~/actions-runner" was changed by the release
+
+  @AC-33 @TL-2
+  Scenario: A service restart keeps the durable lease
+    Given a durable lease with a background process the lease started
+    When machine-service restarts
+    Then the lease is still "leased" with the same lease_id
+    And the background process is still running
+    When the orchestrator releases the lease
+    Then the background process ends and the hygiene record is complete

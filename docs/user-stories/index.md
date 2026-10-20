@@ -36,6 +36,17 @@ Consolidated, test-linked user stories for the lease-based VM service. Each stor
 | US20 | Agent | A client on a distant network survives link breaks; no operation runs twice | AC-6 to AC-11; [remote session](../arch/remote-session.md) |
 | US21 | Operator | Choose the guest link from one conformance suite run on real VMs | AC-15 to AC-18; [test layers](../arch/test-layers.md) |
 | US22 | Orchestrator | Release and destroy close guest sessions; a restart is reported uncertain | AC-12 to AC-14 |
+| US23 | Operator | See every machine on the intranet in one list | AC-34, AC-37; [federation](../arch/federation.md) |
+| US24 | Agent | Acquire a durable machine by capability | AC-20 to AC-22, AC-29; [machine model](../arch/machines.md) |
+| US25 | Agent | Work in a durable-machine session as `wezzard` | AC-23; [durable machine leases](../arch/durable-machine.md) |
+| US26 | Agent | Claude Code and Codex reach the gateway with the machine's keys | AC-24 to AC-27, AC-44; [agent keys](../arch/agent-keys.md) |
+| US27 | Agent | Work on a machine on another Mac | AC-28; [federation](../arch/federation.md#fd-4-working-on-a-remote-instance) |
+| US28 | Orchestrator | Every durable lease leaves a hygiene record | AC-30, AC-31, AC-33; [hygiene](../arch/hygiene.md) |
+| US29 | Orchestrator | Leases coexist with the CI runner | AC-32; [hygiene](../arch/hygiene.md#hy-5-coexistence-with-the-ci-runner) |
+| US30 | Operator | Rename in one coordinated switch | AC-35, AC-36; [rename](../arch/rename.md) |
+| US31 | Operator | Install on a Mac without Tart | AC-38; [rename](../arch/rename.md#mg-4-order-of-migration) |
+| US32 | Operator | The image list follows the images without a restart | AC-39 to AC-42; [image catalog](../arch/image-catalog.md) |
+| US33 | Operator | Choose which Macs are durable machines | AC-43; [machine model](../arch/machines.md#mm-1-two-kinds-of-machine) |
 | US-N1 | Agent | Bounded resource consumption and predictable defaults | `TestAcquireValidation.test_ttl_bounds` (unit), `TestImagesSnapshot` (unit) |
 | US-N2 | Orchestrator | Failure at any provisioning step rolls back cleanly | `TestAcquireLifecycle.test_failure_rolls_back_clone_and_state`, `test_ssh_never_ready_rolls_back` (unit) |
 | US-N3 | Orchestrator | Concurrency correctness: races never oversubscribe or double-lease | `TestConcurrency` (unit) |
@@ -46,4 +57,4 @@ Consolidated, test-linked user stories for the lease-based VM service. Each stor
 - No bridged networking, no `-base`/`-seed`/`-work` boots, no credentials written into golden images — refused by design (US8).
 - No raising of Apple's host-wide 2-macOS-guest limit (no SIP modification, no framework configuration changes). vm-service enforces its own share and *reports* external consumption (US14–US16); it cannot and will not prevent other Virtualization.framework users from booting guests.
 - No task registry management: the AGENTS.md human-readable registry table is maintained by the acquiring agent, not by the service (see README).
-- No multi-host scheduling: this service manages *this* Mac's Tart only.
+- No multi-host scheduling: each instance leases only its own Mac, as a durable machine, and the virtual machines it creates. The CLI lists every instance and the client chooses; no instance schedules work onto another (DC-30).
