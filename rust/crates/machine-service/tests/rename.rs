@@ -129,8 +129,8 @@ fn health_names_machine_service() {
     let fixture = LegacyFixture::new();
     let _daemon = fixture.start_daemon();
     let health = fixture.request("GET", "/health", None);
-    assert_eq!(health.body["ok"], true);
-    assert_eq!(health.body["service"], "machine-service");
+    assert_eq!(health.body["ok"], json!(true));
+    assert_eq!(health.body["service"], json!("machine-service"));
     let root = fixture.request("GET", "/", None);
     assert_eq!(root.body["service"], "machine-service");
     assert_eq!(root.body["endpoints"][3], "/machines");
