@@ -9,8 +9,9 @@
 //! Every refusal prints `machine-service installation refused: <reason>` on stderr
 //! and exits `1`, matching the Python wrapper.
 
+pub mod catalog_description;
 pub mod installer;
 pub mod migration;
 pub mod plist;
 
-pub use installer::{main_entry, Action, Cli, InstallError};
+pub use installer::{main_entry, Action, Cli, Exposure, InstallError};

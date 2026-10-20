@@ -92,6 +92,8 @@ pub enum Action {
     Install,
     /// Remove the LaunchAgent.
     Remove,
+    /// Print this Mac's service-catalog description (FD-1). Reads only.
+    CatalogDescription,
 }
 
 impl Action {
@@ -99,6 +101,7 @@ impl Action {
         match self {
             Action::Install => "install",
             Action::Remove => "remove",
+            Action::CatalogDescription => "catalog-description",
         }
     }
 }
@@ -119,19 +122,30 @@ pub struct Cli {
     /// Equivalent to `--check`.
     #[arg(long)]
     pub dry_run: bool,
-    /// Expose this Mac as a durable machine (DC-39, MM-1). Off unless turned
-    /// on; a later installation without the flag keeps the installed value.
+    /// Expose this Mac as a durable machine (DC-39). `install` writes
+    /// `MACHINE_SERVICE_EXPOSE_DURABLE`, and later installs preserve it;
+    /// `catalog-description` describes the Mac with this setting instead of
+    /// the installed one.
     #[arg(long, value_enum, value_name = "on|off")]
-    pub expose_durable: Option<Toggle>,
+    pub expose_durable: Option<Exposure>,
 }
 
-/// An `on` or `off` setting.
+/// The durable-exposure setting (DC-39).
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
-pub enum Toggle {
-    /// Turned on.
+pub enum Exposure {
+    /// Expose the Mac as a durable machine.
     On,
-    /// Turned off.
+    /// Do not expose it; the default.
     Off,
+}
+
+impl Exposure {
+    fn as_str(self) -> &'static str {
+        match self {
+            Exposure::On => "on",
+            Exposure::Off => "off",
+        }
+    }
 }
 
 /// The daemon's exposure setting (`docs/arch/machines.md`, MM-1).
@@ -174,6 +188,10 @@ fn home_directory() -> PathBuf {
 /// service binaries (the shell script's `SCRIPT_DIR`).
 pub fn run(cli: &Cli, source: &Path, home: &Path) -> Result<(), InstallError> {
     let action = cli.action;
+    // Reads only: no lease check, lock, plist write or launchctl call (FD-1).
+    if action == Action::CatalogDescription {
+        return crate::catalog_description::run(cli.expose_durable, home);
+    }
     let readonly = cli.check || cli.dry_run;
     let plist = migration::agent_plist(home, LABEL);
 
@@ -213,10 +231,7 @@ pub fn run(cli: &Cli, source: &Path, home: &Path) -> Result<(), InstallError> {
         BTreeMap::new()
     };
 
-    let mut env: BTreeMap<String, String> = BTreeMap::new();
-    env.insert("PATH".to_string(), DEFAULT_PATH.to_string());
-    env.insert("HOME".to_string(), home.to_string_lossy().into_owned());
-    env.insert("MACHINE_SERVICE_HOST".to_string(), "127.0.0.1".to_string());
+    let mut env = default_environment(home);
     for (key, value) in &previous {
         env.insert(key.clone(), value.clone());
     }
@@ -234,9 +249,8 @@ pub fn run(cli: &Cli, source: &Path, home: &Path) -> Result<(), InstallError> {
     if let Some(config) = &cli.console_config {
         env.insert("MACHINE_SERVICE_CONSOLE_CONFIG".to_string(), config.clone());
     }
-    if let Some(toggle) = cli.expose_durable {
-        let value = if toggle == Toggle::On { "on" } else { "off" };
-        env.insert(EXPOSE_KEY.to_string(), value.to_string());
+    if let Some(exposure) = cli.expose_durable {
+        env.insert(EXPOSE_KEY.to_string(), exposure.as_str().to_string());
     }
     // The daemon refuses any other value at startup; refuse it here first.
     if let Some(value) = env.get(EXPOSE_KEY) {
@@ -416,7 +430,17 @@ pub fn run(cli: &Cli, source: &Path, home: &Path) -> Result<(), InstallError> {
     Ok(())
 }
 
-fn load_old_plist(plist: &Path) -> Result<Option<Map<String, Value>>, InstallError> {
+/// The variables every installed agent starts from, before the installed
+/// values and the caller's overrides.
+pub(crate) fn default_environment(home: &Path) -> BTreeMap<String, String> {
+    let mut env = BTreeMap::new();
+    env.insert("PATH".to_string(), DEFAULT_PATH.to_string());
+    env.insert("HOME".to_string(), home.to_string_lossy().into_owned());
+    env.insert("MACHINE_SERVICE_HOST".to_string(), "127.0.0.1".to_string());
+    env
+}
+
+pub(crate) fn load_old_plist(plist: &Path) -> Result<Option<Map<String, Value>>, InstallError> {
     if !plist.exists() {
         return Ok(None);
     }
@@ -430,7 +454,7 @@ fn load_old_plist(plist: &Path) -> Result<Option<Map<String, Value>>, InstallErr
     }
 }
 
-fn installed_environment(
+pub(crate) fn installed_environment(
     old: &Map<String, Value>,
 ) -> Result<BTreeMap<String, String>, InstallError> {
     let mut previous = BTreeMap::new();
@@ -826,15 +850,18 @@ fn launchctl(operands: &[&str], plist: &Path) -> Result<(), InstallError> {
     Ok(())
 }
 
-struct CommandOutput {
-    status: ExitStatus,
-    stdout: Vec<u8>,
+pub(crate) struct CommandOutput {
+    pub(crate) status: ExitStatus,
+    pub(crate) stdout: Vec<u8>,
     stderr: Vec<u8>,
 }
 
 /// Run a command with the Python `subprocess.run(..., timeout=...)` semantics:
 /// capture both streams, and kill the child when the deadline expires.
-fn run_command(command: &mut Command, timeout: Duration) -> Result<CommandOutput, InstallError> {
+pub(crate) fn run_command(
+    command: &mut Command,
+    timeout: Duration,
+) -> Result<CommandOutput, InstallError> {
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = command.spawn()?;
     let mut stdout = child
@@ -885,7 +912,7 @@ fn describe_status(status: &ExitStatus) -> String {
 }
 
 /// `shutil.which` for a single name over an explicit `PATH`.
-fn which(name: &str, path: Option<&str>) -> Option<String> {
+pub(crate) fn which(name: &str, path: Option<&str>) -> Option<String> {
     let path = path?;
     for directory in path.split(':') {
         if directory.is_empty() {
@@ -899,7 +926,7 @@ fn which(name: &str, path: Option<&str>) -> Option<String> {
     None
 }
 
-fn is_executable(path: &Path) -> bool {
+pub(crate) fn is_executable(path: &Path) -> bool {
     match CString::new(path.as_os_str().as_bytes()) {
         // SAFETY: `access` reads the NUL-terminated path and only tests it.
         Ok(cpath) => unsafe { libc::access(cpath.as_ptr(), libc::X_OK) == 0 },
