@@ -207,6 +207,9 @@ model does not hold.
 ```
 GET  /health
 GET  /acquisition-capabilities
+GET  /images
+POST /images/reload
+GET  /applications
 GET  /machines
 GET  /machines/<name>
 POST /acquire                {"purpose":"my-task","image":"macos26","env":"default","ttl_hours":4}
@@ -222,9 +225,62 @@ Errors are JSON `{"error": "..."}` with status 400/409/500.
 
 - `GET /machines` lists the leases under its top-level `machines` key. Each
   lease record keeps its fields, including `vm`.
+- `GET /images`, `GET /machines` and `GET /health` carry the image catalog's
+  status under `catalog`, and `POST /images/reload` rebuilds the catalog and
+  answers with it. See [Image catalog](#image-catalog).
 - Every `/vms` and `/vms/<name>/...` path was removed. It answers HTTP 410 Gone
   with an error naming the `/machines` path that replaces it, and a
   `replacement` field carrying that path. No operation runs (DC-37).
+
+## Image catalog
+
+The daemon keeps one immutable snapshot of its image lines, `images/*/line.conf`
+in `PILOT_REPO`, and every reader of the lines uses it: `/images`, `/machines`,
+`/applications`, `/acquisition-capabilities` and `POST /acquire`. Adding,
+editing or removing a line takes effect on the next request, without a restart
+([IC](docs/arch/image-catalog.md), DC-34).
+
+- **Trust.** Only the daemon that owns `daemon.lock` **executes** `line.conf`
+  files, with the strict zsh parser and its 15-second timeout. It builds the
+  first snapshot after taking the lock and before it serves; nothing is
+  executed for a request before then.
+- **Input identity.** Each request that reads the catalog first lists
+  `images/` and, for each folder with a `line.conf`, takes the file's inode,
+  size, modification time and SHA-256. This executes nothing. When the
+  identity differs from the snapshot's, the request asks for a rebuild and
+  waits for it, up to 30 seconds. One rebuild runs at a time, and requests
+  that arrive meanwhile wait for that same rebuild.
+- **Strict build.** A rebuild fails as a whole on an unreadable `images/`
+  folder, no lines, more than 64 lines, a non-regular `line.conf`, a parse or
+  source failure or timeout, an invalid image or base name, a kind other than
+  `macos` or `linux`, or a `CPU` or `MEMORY_MB` that is not an integer. There
+  is no permissive mode and no built-in fallback list. The builder checks the
+  identity again after executing the files and starts over if they moved.
+- **Atomic swap.** A complete snapshot replaces the old one in one pointer
+  swap. A request, and an acquisition from start to end, keeps the snapshot it
+  read. Guest passwords stay beside the snapshot in the daemon's memory for
+  the lease bootstrap, never in a response or the log.
+- **Failure.** A failed rebuild keeps the last good snapshot and writes one
+  `ERROR` line to the service log and to stderr per failed input identity.
+  Requests do not retry a failed identity; the next change to the files, or
+  `POST /images/reload`, does. Without any good snapshot, as after a startup
+  with broken files, `/images` and `/applications` answer HTTP 503 with the
+  diagnostic and `POST /acquire` answers 409; a selected environment refuses
+  to start instead.
+- **Status.** `catalog` is `{"generation", "built_at", "status"}`, where
+  `status` is `current`, `stale` (the files changed and the snapshot no longer
+  matches them) or `unavailable` (no good snapshot yet). After a failed
+  rebuild that is not superseded, it adds `error`, `failed_at` and `file`.
+  `/health` reports it without waiting for a rebuild.
+- **Live inputs.** Whether a base VM exists in the Tart store, and so whether
+  an image is acquirable, is read on every request, so promoting a base needs
+  no rebuild. Inventories, associations and fingerprints stay live too.
+- **Watcher.** A kqueue watcher on `images/`, each line folder and each
+  `line.conf` starts a rebuild as soon as a file changes, so the next request
+  usually finds the catalog current. It only accelerates: a missed event costs
+  one request's wait, never a stale answer.
+- **Removed lines.** A lease whose line is removed keeps running; its
+  heartbeat, exec and release read the lease record, not the catalog.
 
 ## Application catalog
 
@@ -253,24 +309,12 @@ members and fingerprint are rechecked against ordinary concurrent replacement.
 No legacy migration/rebind. Historical Git-visible initial observations alone
 are review-ready, not current-base validity or installation certification.
 
-Trusted startup **executes** actual `images/*/line.conf` with the existing zsh
-parser, after exclusive `daemon.lock` ownership and before HTTP construction/GC.
-Strict catalog initialization rejects parse failures (including source failure
-and timeout), enumeration failures, no lines and invalid image/OS/base
-associations. It never uses the permissive lifecycle `discover_lines()` fallback.
-Only a complete detached image-to-`{kind, base_vm}` snapshot is published; no
-credentials or mutable lifecycle-cache aliases are retained. Known configuration
-failure logs a bounded diagnostic and leaves the daemon serving, with catalog
-requests returning 503. Unexpected programming errors are not swallowed.
-
 Requests perform **metadata-only** inventory/fingerprint reads, not shell/config
-execution, lifecycle operations or inventory generation. An uninitialized/failed
-snapshot is not initialized or retried by a request, even with a cold lifecycle
-cache. Configuration edits, additions, and removals require a daemon restart.
-Portable inventory JSON, host-local association JSON, and base fingerprints
-remain live on every request. Lifecycle discovery's
-existing permissive behavior is unchanged. Source edits do not restart/deploy the
-shared daemon; restart remains an explicit operator action.
+execution, lifecycle operations or inventory generation. Portable inventory
+JSON, host-local association JSON, and base fingerprints remain live on every
+request. The image-to-`{kind, base_vm}` associations come from the image
+catalog above, and the response keeps its closed shape, which mcp-relay
+validates: it carries no catalog status. Without any good catalog it answers HTTP 503 with the diagnostic.
 
 ### Migration and rollback
 
@@ -286,8 +330,8 @@ shared daemon; restart remains an explicit operator action.
   associations. Do not generate or rebind records through catalog search, and do
   not move or modify golden VMs to make an old fingerprint pass.
 - Preserve the old checkout and its local association records before migration.
-  After an explicitly approved deployment, an operator must restart the daemon
-  to load the new configuration snapshot and verify `GET /applications`.
+  After an explicitly approved deployment, verify `GET /applications`; the
+  daemon reads changed image lines on the next request, without a restart.
 - To roll back, restore the matching old producer and consumer versions together
   with the old configuration and inventory layout. Restore only association
   records that still match the same local base fingerprints. A stale record must
@@ -327,6 +371,8 @@ machctl acquire --purpose acceptance-example --image ubuntu2404 --source work --
 ## CLI
 
 ```zsh
+machctl images                    # images, capacity and the catalog's status
+machctl images --reload           # rebuild the catalog now; exit 1 unless current
 machctl acquire --purpose build-test --image macos26 --ttl-hours 4
 machctl list
 machctl exec pilot-mac-build-test-<id> -- swift --version
@@ -335,6 +381,10 @@ machctl pull  <vm> /tmp/build.log ./build.log
 machctl heartbeat <vm>            # call periodically for long tasks
 machctl release <vm>
 ```
+
+`machctl list` and `machctl images` print one warning line above their rows
+while the catalog is `stale` or `unavailable`, naming the failing file, the
+error and the time of the failure.
 
 (The installer links `~/.local/bin/machctl` to
 `~/.local/libexec/machine-service/machctl`. launchd starts the daemon, so
