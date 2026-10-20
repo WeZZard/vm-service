@@ -214,24 +214,7 @@ impl Capabilities {
         };
         observed_at.insert("disk".to_string(), json!(now));
 
-        let console_user = std::fs::metadata("/dev/console")
-            .ok()
-            .map(|metadata| user_name(metadata.uid()));
-        if console_user.is_none() {
-            unknown.insert(
-                "display.console_user".to_string(),
-                json!("/dev/console could not be read"),
-            );
-        }
-        unknown.insert(
-            "display.screen_locked".to_string(),
-            json!("not observed by this version"),
-        );
-        let display = json!({
-            "console_user": console_user,
-            "gui_session": console_user.as_deref().map(|user| user == config.user),
-            "screen_locked": null,
-        });
+        let display = display(config, &mut unknown);
         observed_at.insert("display".to_string(), json!(now));
 
         let ci_runner = ci_runner(&config.ci_root, config.uid);
@@ -254,6 +237,62 @@ impl Capabilities {
             "unknown": unknown,
         })
     }
+}
+
+/// The `display` section, read now (MM-3, MM-4): the console user, whether
+/// the service's own user has the GUI session, and whether its screen is
+/// locked. A fact that cannot be read is `null` with its reason in
+/// `unknown`.
+pub fn display(config: &DurableConfig, unknown: &mut Map<String, Value>) -> Value {
+    let console_user = std::fs::metadata("/dev/console")
+        .ok()
+        .map(|metadata| user_name(metadata.uid()));
+    if console_user.is_none() {
+        unknown.insert(
+            "display.console_user".to_string(),
+            json!("/dev/console could not be read"),
+        );
+    }
+    unknown.insert(
+        "display.screen_locked".to_string(),
+        json!("not observed by this version"),
+    );
+    json!({
+        "console_user": console_user,
+        "gui_session": console_user.as_deref().map(|user| user == config.user),
+        "screen_locked": null,
+    })
+}
+
+/// A durable machine's state and, when it is `unavailable`, why (MM-5,
+/// DC-68): a current lease makes it `leased` or `releasing`; without one it
+/// is `unavailable` when the service's user has no logged-in GUI session,
+/// because a session could not reach the window server, and `available`
+/// otherwise. A display that could not be read is never a reason: the
+/// instance never guesses a fact.
+pub fn durable_state(
+    lease_state: Option<&str>,
+    display: &Value,
+    user: &str,
+) -> (&'static str, Option<String>) {
+    match lease_state {
+        Some("releasing") => return ("releasing", None),
+        Some(_) => return ("leased", None),
+        None => {}
+    }
+    if display.get("gui_session").and_then(Value::as_bool) == Some(false) {
+        let console = display
+            .get("console_user")
+            .and_then(Value::as_str)
+            .unwrap_or("nobody");
+        return (
+            "unavailable",
+            Some(format!(
+                "no logged-in GUI session for {user} (the console belongs to {console})"
+            )),
+        );
+    }
+    ("available", None)
 }
 
 /// The total and free bytes of the volume holding `path`.
@@ -627,6 +666,32 @@ mod tests {
             "-c".to_string(),
             "exit 3".to_string(),
         ]))
+    }
+
+    /// MM-5 (TL-1): without the service user's GUI session a durable
+    /// machine is unavailable, with the reason; a lease keeps its state; an
+    /// unreadable display never makes it unavailable.
+    #[test]
+    fn mm5_unavailable_without_the_gui_session() {
+        let other = json!({"console_user": "root", "gui_session": false, "screen_locked": null});
+        let mine = json!({"console_user": "wezzard", "gui_session": true, "screen_locked": false});
+        let unread = json!({"console_user": null, "gui_session": null, "screen_locked": null});
+        let (state, reason) = durable_state(None, &other, "wezzard");
+        assert_eq!(state, "unavailable");
+        assert_eq!(
+            reason.unwrap(),
+            "no logged-in GUI session for wezzard (the console belongs to root)"
+        );
+        assert_eq!(durable_state(None, &mine, "wezzard"), ("available", None));
+        assert_eq!(durable_state(None, &unread, "wezzard"), ("available", None));
+        assert_eq!(
+            durable_state(Some("leased"), &other, "wezzard"),
+            ("leased", None)
+        );
+        assert_eq!(
+            durable_state(Some("releasing"), &mine, "wezzard"),
+            ("releasing", None)
+        );
     }
 
     /// HY-5 (TL-1): the CI runner's name comes from `.runner`, which may

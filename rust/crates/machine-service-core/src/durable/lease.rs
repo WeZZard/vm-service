@@ -267,11 +267,11 @@ impl DurableMachine {
                 .and_then(|record| record.get(name).cloned())
                 .unwrap_or(Value::Null)
         };
-        let state = match lease.and_then(|record| record["state"].as_str()) {
-            None => "available",
-            Some("releasing") => "releasing",
-            Some(_) => "leased",
-        };
+        let (state, unavailable) = super::capabilities::durable_state(
+            lease.and_then(|record| record["state"].as_str()),
+            &capabilities["display"],
+            &self.config.user,
+        );
         let mut out = json!({
             "name": self.config.instance,
             "kind": "durable",
@@ -296,6 +296,9 @@ impl DurableMachine {
             "agents": field("agents"),
             "capabilities": capabilities,
         });
+        if let Some(reason) = unavailable {
+            out["unavailable_reason"] = json!(reason);
+        }
         if let Some(ttl) = lease.and_then(|record| record["ttl_expires_at"].as_f64()) {
             out["ttl_hours_remaining"] =
                 json!(((ttl - unix_now()) / 3600.0 * 100.0).round() / 100.0);
@@ -394,6 +397,22 @@ impl DurableMachine {
         };
         if !(0.1..=720.0).contains(&ttl) {
             return Reply::error(400, "ttl_hours must be within [0.1, 720]");
+        }
+
+        // Without the service user's GUI session a lease could not reach the
+        // window server; the refusal is a capacity refusal a client may wait
+        // on (MM-5, DC-68).
+        let display = super::capabilities::display(&self.config, &mut serde_json::Map::new());
+        if let ("unavailable", Some(reason)) =
+            super::capabilities::durable_state(None, &display, &self.config.user)
+        {
+            return Reply::error(
+                409,
+                format!(
+                    "durable machine unavailable: {} ({reason})",
+                    self.config.instance
+                ),
+            );
         }
 
         // Reserve: the lease state, then the host-wide lock (DM-2).

@@ -313,6 +313,67 @@ fn ac41_a_broken_start_is_unavailable_until_the_files_are_fixed() {
     assert_eq!(error_lines(&fixture).len(), 1);
 }
 
+/// MM-3 (DC-67): `/machines` offers one virtual machine per image, each with
+/// the image's capabilities and its `acquirable` figure; an image with a
+/// validated inventory reports its software, one without reports the
+/// reason; a running virtual machine carries its image's report.
+#[test]
+fn mm3_offers_carry_image_capabilities() {
+    let fixture = LegacyFixture::new();
+    let _daemon = fixture.start_daemon();
+    let machines = fixture.request("GET", "/machines", None);
+    assert_eq!(machines.status, 200, "{}", machines.body);
+    let offers = machines.body["offers"].as_array().expect("offers").clone();
+    let names: Vec<&str> = offers
+        .iter()
+        .map(|offer| offer["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["macos26", "ubuntu2404"]);
+    for offer in &offers {
+        assert_eq!(offer["kind"], "virtual");
+        assert_eq!(offer["state"], "offer");
+        assert_eq!(offer["capabilities"]["schema_version"], 1);
+        assert_eq!(offer["capabilities"]["source"], "image");
+        assert_eq!(offer["capabilities"]["gpu"]["metal3"], false);
+    }
+    let (macos, ubuntu) = (&offers[0], &offers[1]);
+    // The offer's figures are `GET /images`'s. `acquirable` of a macOS
+    // image also reads the host-wide guest gauge, which other suites move,
+    // so only its type is pinned.
+    let listed = images(&fixture).body;
+    for offer in &offers {
+        let image = offer["image"].as_str().unwrap();
+        let entry = &listed["images"][image];
+        for figure in ["running", "limit"] {
+            assert_eq!(offer["concurrency"][figure], entry["concurrency"][figure]);
+        }
+        assert!(offer["concurrency"]["acquirable"].is_boolean(), "{offer}");
+        assert_eq!(offer["defaults"], entry["defaults"]);
+        assert_eq!(offer["base_available"], entry["base_available"]);
+    }
+    assert_eq!(macos["capabilities"]["os"]["name"], "macOS");
+    assert_eq!(
+        macos["capabilities"]["gpu"]["metal_families"],
+        json!(["mac2", "common3"])
+    );
+    assert_eq!(macos["capabilities"]["software"], Value::Null);
+    assert!(macos["capabilities"]["unknown"]["software"]
+        .as_str()
+        .is_some_and(|reason| reason.contains("macos26")));
+    assert_eq!(ubuntu["capabilities"]["os"]["name"], "Linux");
+    assert!(ubuntu["capabilities"]["software"].is_object(), "{ubuntu}");
+
+    let leased = acquire(&fixture, "offer-check", "ubuntu2404");
+    let vm = leased["vm"].as_str().expect("vm").to_string();
+    let machines = fixture.request("GET", "/machines", None).body;
+    assert_eq!(
+        machines["machines"][&vm]["capabilities"]["os"]["name"],
+        "Linux"
+    );
+    let released = fixture.request("POST", &format!("/machines/{vm}/release"), Some(&json!({})));
+    assert_eq!(released.status, 200, "{}", released.body);
+}
+
 /// IC-5: under a selected environment a startup whose catalog cannot be
 /// built still refuses to start.
 #[test]

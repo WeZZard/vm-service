@@ -655,12 +655,14 @@ fn test_vms_snapshot_includes_limits() {
 fn test_list_empty() {
     let live = Live::new();
     let output = live.machctl_ok(&["list"]);
-    // CL-1: a reachable instance with no machine keeps one `none` row.
+    // CL-1, MM-3: with no lease the instance lists its two offers.
     let text = String::from_utf8_lossy(&output.stdout);
     let lines: Vec<&str> = text.lines().collect();
     assert!(lines[0].starts_with("INSTANCE"), "{text}");
-    assert_eq!(lines.len(), 2, "{text}");
-    assert!(lines[1].ends_with(" none"), "{text}");
+    assert_eq!(lines.len(), 3, "{text}");
+    for (line, image) in lines[1..].iter().zip(["macos26", "ubuntu2404"]) {
+        assert!(line.contains(image) && line.contains(" offer "), "{text}");
+    }
 }
 
 #[test]
@@ -674,7 +676,16 @@ fn test_list_json() {
     assert_eq!(instances.len(), 1, "{parsed}");
     assert_eq!(instances[0]["local"], true);
     assert_eq!(instances[0]["reachable"], true);
-    assert_eq!(instances[0]["machines"], serde_json::json!([]));
+    let offers: Vec<&str> = instances[0]["machines"]
+        .as_array()
+        .expect("machines")
+        .iter()
+        .map(|record| {
+            assert_eq!(record["state"], "offer", "{record}");
+            record["name"].as_str().expect("name")
+        })
+        .collect();
+    assert_eq!(offers, ["macos26", "ubuntu2404"], "{parsed}");
     assert_eq!(instances[0]["catalog"]["status"], "current");
 }
 

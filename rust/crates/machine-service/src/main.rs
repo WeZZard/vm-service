@@ -361,6 +361,7 @@ fn handle_get(service: &Service, request: &mut Request, url: &str) -> OpResult<(
     if path == "/machines" {
         let mut body = snapshot::snapshot(service)?;
         body["catalog"] = service.image_catalog().status.to_json();
+        snapshot::add_offers(service, &mut body);
         durable_routes::extend_machines(&mut body);
         return Ok((200, body));
     }
