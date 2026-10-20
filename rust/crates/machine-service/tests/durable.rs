@@ -1196,7 +1196,8 @@ fn header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
 /// durable machine: a file as itself and a folder as a tar stream, each
 /// checked against `X-Content-SHA256`. A wrong digest places nothing, a
 /// missing lease is refused before any byte is kept, and `machctl push`
-/// and `pull --bytes` take the same endpoints.
+/// and `pull --bytes` take the same endpoints with a 64 MiB file and a
+/// folder of 100 files.
 #[test]
 fn ac28_byte_transfers_to_and_from_a_durable_machine() {
     let fixture = Fixture::new();
@@ -1351,6 +1352,78 @@ fn ac28_byte_transfers_to_and_from_a_durable_machine() {
         "bee"
     );
     assert_eq!(daemon.output(&name, &lease, "cat cli.txt"), "from the cli");
+
+    // AC-28's sizes: a 64 MiB file and a folder of 100 files, both ways.
+    let big = fixture.root.join("big.bin");
+    let mut state = 0x9e37_79b9_7f4a_7c15u64;
+    let bytes: Vec<u8> = (0..64 * 1024 * 1024 / 8)
+        .flat_map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state.to_le_bytes()
+        })
+        .collect();
+    std::fs::write(&big, &bytes).unwrap();
+    let many = fixture.root.join("many");
+    std::fs::create_dir_all(&many).unwrap();
+    for index in 0..100 {
+        std::fs::write(
+            many.join(format!("f{index:03}.txt")),
+            format!("file {index}\n"),
+        )
+        .unwrap();
+    }
+    for source in [&big, &many] {
+        let pushed = common::run_machctl(
+            &[
+                "push",
+                "--bytes",
+                "--lease-id",
+                &lease,
+                &name,
+                source.to_str().unwrap(),
+                ".",
+            ],
+            &env,
+        );
+        assert!(
+            pushed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&pushed.stderr)
+        );
+    }
+    let round = fixture.root.join("round");
+    std::fs::create_dir_all(&round).unwrap();
+    for item in ["big.bin", "many"] {
+        let pulled = common::run_machctl(
+            &[
+                "pull",
+                "--bytes",
+                "--lease-id",
+                &lease,
+                &name,
+                item,
+                round.to_str().unwrap(),
+            ],
+            &env,
+        );
+        assert!(
+            pulled.status.success(),
+            "{}",
+            String::from_utf8_lossy(&pulled.stderr)
+        );
+    }
+    assert_eq!(
+        sha256(&std::fs::read(round.join("big.bin")).unwrap()),
+        sha256(&bytes)
+    );
+    assert_eq!(std::fs::read_dir(round.join("many")).unwrap().count(), 100);
+    assert_eq!(
+        std::fs::read_to_string(round.join("many/f042.txt")).unwrap(),
+        "file 42\n"
+    );
+
     // Nothing of a transfer is left in the state folder.
     let staged = daemon.state.join("transfers");
     let left: Vec<_> = std::fs::read_dir(&staged)

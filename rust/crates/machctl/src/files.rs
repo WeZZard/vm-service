@@ -242,7 +242,7 @@ mod tests {
         ] {
             assert!(is_loopback(base), "{base}");
         }
-        for base in ["http://192.168.1.4:6240", "http://mac-b.local:6240"] {
+        for base in ["http://10.0.0.4:6240", "http://mac-b.local:6240"] {
             assert!(!is_loopback(base), "{base}");
         }
         assert_eq!(
