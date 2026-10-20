@@ -128,13 +128,19 @@ pub fn images_snapshot(service: &Service, view: &CatalogView) -> OpResult<Value>
     let macos_taken = macos_slots_taken(active_records.iter().copied(), host_guests);
     capacity["macos_taken"] = json!(macos_taken);
 
+    // Whether a base exists is read live, so promoting a base needs no
+    // rebuild (IC-1); one `tart list` answers every line.
+    let local: std::collections::HashSet<String> = service
+        .host
+        .tart_list()?
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
     let mut out = Map::new();
     for (name, line) in &catalog.lines {
         let kind = line.kind.as_str();
         let base_vm = line.base_vm.as_str();
-        // Whether the base exists is read live, so promoting a base needs no
-        // rebuild (IC-1).
-        let exists = service.host.vm_exists(base_vm)?;
+        let exists = local.contains(base_vm);
         let running_line = records
             .iter()
             .filter(|record| {
@@ -206,4 +212,126 @@ fn macos_slots_taken<'a>(
         }
     }
     host_guests.map_or(macos, |guests| macos.max(guests.saturating_sub(other)))
+}
+
+/// Add the virtual machine offers and the image capabilities to a
+/// `GET /machines` body (MM-3, DC-67).
+///
+/// `offers` lists one entry per image of the current catalog, with
+/// `kind: "virtual"`, `state: "offer"`, the image's capabilities and the
+/// `acquirable` figure of `GET /images`, so a client compares an offer with a
+/// durable machine in one list. An instance without Tart, or without a
+/// catalog, offers nothing (MM-1, AC-38). Each running virtual machine's
+/// record carries its image's capabilities too. Reads only: no `line.conf`
+/// is executed and nothing is started.
+pub fn add_offers(service: &Service, body: &mut Value) {
+    let tart = service.host.tart_executable();
+    let view = service.image_catalog();
+    let Some(catalog) = view.snapshot() else {
+        body["offers"] = json!([]);
+        return;
+    };
+    let inventories = inventories(service, catalog);
+    let report_for = |image: &str| -> Option<Value> {
+        let line = catalog.lines.get(image)?;
+        let inventory = match inventories.get(image) {
+            Some(Ok(inventory)) => Ok(inventory),
+            Some(Err(reason)) => Err(reason.as_str()),
+            None => Err("no validated application inventory"),
+        };
+        Some(crate::image_capabilities::report(
+            &line.kind,
+            &line.defaults.to_json(),
+            inventory,
+        ))
+    };
+    if let Some(records) = body.get_mut("machines").and_then(Value::as_object_mut) {
+        for record in records.values_mut() {
+            let image = record
+                .get("image")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            if let Some(report) = image.as_deref().and_then(report_for) {
+                record["capabilities"] = report;
+            }
+        }
+    }
+    if let Err(reason) = tart {
+        body["offers"] = json!([]);
+        body["offers_unavailable"] = json!(reason);
+        return;
+    }
+    let images = match images_snapshot(service, &view) {
+        Ok(images) => images,
+        Err(error) => {
+            body["offers"] = json!([]);
+            body["offers_unavailable"] = json!(error.to_string());
+            return;
+        }
+    };
+    let mut offers = Vec::new();
+    if let Some(entries) = images.get("images").and_then(Value::as_object) {
+        for (image, entry) in entries {
+            offers.push(json!({
+                "name": image,
+                "kind": "virtual",
+                "state": "offer",
+                "image": image,
+                "image_kind": entry["kind"],
+                "base_vm": entry["base_vm"],
+                "base_available": entry["base_available"],
+                "defaults": entry["defaults"],
+                "concurrency": entry["concurrency"],
+                "capabilities": report_for(image).unwrap_or(Value::Null),
+            }));
+        }
+    }
+    body["offers"] = Value::Array(offers);
+}
+
+/// Each image's validated application inventory, or why it has none, from
+/// one read of the application catalog (metadata reads only).
+fn inventories(
+    service: &Service,
+    catalog: &crate::catalog::CatalogSnapshot,
+) -> std::collections::HashMap<String, Result<Value, String>> {
+    let associations: Map<String, Value> = catalog
+        .lines
+        .iter()
+        .map(|(image, line)| {
+            (
+                image.clone(),
+                json!({"kind": line.kind, "base_vm": line.base_vm}),
+            )
+        })
+        .collect();
+    let mut out = std::collections::HashMap::new();
+    match application_catalog::load_catalog(
+        &service.config.pilot,
+        &Value::Object(associations),
+        None,
+        None,
+    ) {
+        Ok(loaded) => {
+            for entry in loaded["images"].as_array().into_iter().flatten() {
+                if let Some(image) = entry.get("image").and_then(Value::as_str) {
+                    out.insert(image.to_string(), Ok(entry.clone()));
+                }
+            }
+            for image in catalog.lines.keys() {
+                out.entry(image.clone()).or_insert_with(|| {
+                    Err(format!("no validated application inventory for {image}"))
+                });
+            }
+        }
+        Err(error) => {
+            for image in catalog.lines.keys() {
+                out.insert(
+                    image.clone(),
+                    Err(format!("application catalog unavailable: {error}")),
+                );
+            }
+        }
+    }
+    out
 }

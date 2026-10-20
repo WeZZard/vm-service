@@ -81,6 +81,13 @@ pub fn health(body: &mut Value, virtual_kind: bool) {
 /// `/machines` answer (MM-1, MM-3).
 pub fn extend_machines(body: &mut Value) {
     let Some(machine) = machine() else { return };
+    if let Some(offers) = body.get_mut("offers").and_then(Value::as_array_mut) {
+        for offer in offers.iter_mut() {
+            if let Some(object) = offer.as_object_mut() {
+                object.insert("instance".to_string(), json!(machine.name()));
+            }
+        }
+    }
     let Some(machines) = body.get_mut("machines").and_then(Value::as_object_mut) else {
         return;
     };
