@@ -553,6 +553,8 @@ dependencies = [
  "console",
  "environment",
  "libc",
+ "machine-service-core",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror",
