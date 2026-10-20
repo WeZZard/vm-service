@@ -1,5 +1,11 @@
-usage: machctl list [-h] [--json]
+usage: machctl list [-h] [--json] [--local] [--instance INSTANCE]
+                    [--kind {durable,virtual}] [--require REQUIRE]
 
 options:
-  -h, --help  show this help message and exit
-  --json      machine-readable output
+  -h, --help            show this help message and exit
+  --json                machine-readable output
+  --local               list only the local instance; do not ask Consul
+  --instance INSTANCE   list only this instance (ID or address)
+  --kind {durable,virtual}
+                        list only machines of this kind
+  --require REQUIRE     list only machines with this capability (repeatable)

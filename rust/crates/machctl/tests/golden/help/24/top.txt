@@ -23,7 +23,9 @@ positional arguments:
     (useful after
     --no-wait)
     list
-    list leases
+    list every machine
+    from every
+    instance
     images
     query available
     images and

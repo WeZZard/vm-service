@@ -53,3 +53,7 @@ are present.
   so the narrow widths rewrap. The renderer that produced them is the one the
   Python captures above verified byte for byte, and only the program name and
   the description changed.
+- `top.txt` and `list.txt` at every width were regenerated from the Rust
+  `machctl` when `list` became the federated machine list (CL-1): its
+  description changed from "list leases" and it gained `--local`,
+  `--instance`, `--kind` and `--require`. No other file changed.

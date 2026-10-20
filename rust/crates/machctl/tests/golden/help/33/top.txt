@@ -17,7 +17,8 @@ positional arguments:
     wait   block until a lease
            is running (useful
            after --no-wait)
-    list   list leases
+    list   list every machine
+           from every instance
     images
            query available
            images and capacity

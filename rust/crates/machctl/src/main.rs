@@ -8,6 +8,11 @@
 
 mod argparse_error;
 mod argparse_help;
+mod capability;
+mod consul;
+mod federation;
+mod http;
+mod listing;
 mod textwrap;
 
 use std::fs;
@@ -52,11 +57,23 @@ enum Cmd {
     Acquire(AcquireArgs),
     /// block until a lease is running (useful after --no-wait)
     Wait(WaitArgs),
-    /// list leases
+    /// list every machine from every instance
     List {
         /// machine-readable output
         #[arg(long)]
         json: bool,
+        /// list only the local instance; do not ask Consul
+        #[arg(long)]
+        local: bool,
+        /// list only this instance (ID or address)
+        #[arg(long)]
+        instance: Option<String>,
+        /// list only machines of this kind
+        #[arg(long, value_parser = ["durable", "virtual"])]
+        kind: Option<String>,
+        /// list only machines with this capability (repeatable)
+        #[arg(long)]
+        require: Vec<String>,
     },
     /// query available images and capacity
     Images {
@@ -335,7 +352,57 @@ fn main() {
         base = url.to_string();
     }
 
-    let client = Client::new(base, environment.as_ref());
+    // Federation (FD-2, FD-3, CL-3). A selected environment pins its own
+    // instance, so it never discovers others (DC-64).
+    let consul_address = consul::base_address(std::env::var("CONSUL_HTTP_ADDR").ok().as_deref());
+    let local_base = base.trim_end_matches('/').to_string();
+    let federation_settings = |use_consul: bool| federation::Settings {
+        local_base: local_base.clone(),
+        consul: (use_consul && environment.is_none()).then(|| consul_address.clone()),
+        local_headers: environment
+            .as_ref()
+            .and_then(|env| env.get("identity"))
+            .and_then(|identity| identity.get("fingerprint"))
+            .and_then(Value::as_str)
+            .map(|fingerprint| {
+                vec![(
+                    "X-VM-Environment-Fingerprint".to_string(),
+                    fingerprint.to_string(),
+                )]
+            })
+            .unwrap_or_default(),
+        timeout: federation::INSTANCE_TIMEOUT,
+        consul_timeout: federation::CONSUL_TIMEOUT,
+    };
+    if let Some((name, transfers)) = machine_argument(&mut cli.cmd) {
+        if environment.is_some() {
+            if federation::split_name(name).1.is_some() {
+                usage_error(
+                    "a selected environment pins its own instance; name the machine without @<instance>",
+                );
+            }
+        } else {
+            match federation::route(&federation_settings(true), name) {
+                Ok(route) => {
+                    if transfers && !route.local {
+                        eprintln!(
+                            "machctl: {} is on another instance; push and pull there need the byte-carrying file endpoints (FD-4), which machctl does not use yet",
+                            route.machine
+                        );
+                        std::process::exit(1);
+                    }
+                    *name = route.machine;
+                    base = route.base;
+                }
+                Err(error) => {
+                    eprintln!("machctl: {error}");
+                    std::process::exit(1);
+                }
+            }
+        }
+    }
+
+    let client = Client::new(base.clone(), environment.as_ref());
 
     match cli.cmd {
         Cmd::Environment { .. } => match &environment {
@@ -553,16 +620,48 @@ fn main() {
             }
         }
 
-        Cmd::List { json } => {
-            let (_status, resp) = client.call("GET", "/machines", None, DEFAULT_TIMEOUT_S);
-            if json {
-                println!("{}", pretty(&resp));
-            } else {
-                // CL-1: a catalog that is not current is named above the rows.
-                if let Some(warning) = catalog_warning(&resp) {
-                    println!("{warning}");
+        Cmd::List {
+            json,
+            local,
+            instance,
+            kind,
+            require,
+        } => {
+            if let Err(error) = capability::validate(&require) {
+                usage_error(&error);
+            }
+            if local && instance.is_some() {
+                usage_error("--local and --instance cannot be combined");
+            }
+            let settings = federation_settings(!local);
+            let merged = match federation::gather(&settings, instance.as_deref()) {
+                Ok(merged) => merged,
+                Err(error) => {
+                    eprintln!("machctl: {error}");
+                    std::process::exit(1);
                 }
-                print!("{}", format_leases(&resp));
+            };
+            // A registry that did not answer is said, never shown as an
+            // empty intranet (FD-3).
+            if let Some(error) = &merged.consul_error {
+                eprintln!(
+                    "machctl: warning: Consul at {consul_address} did not answer ({error}); listing only the local instance"
+                );
+            }
+            let filters = listing::Filters { kind, require };
+            if json {
+                println!("{}", pretty(&listing::to_json(&merged, &filters)));
+            } else {
+                print!("{}", listing::format_table(&merged, &filters));
+            }
+            if merged.none_reachable() {
+                eprintln!("machctl: no machine-service instance answered");
+                if merged.instances.iter().any(|instance| instance.local) {
+                    eprintln!(
+                        "start it with: machine-service-install install (launchd) or: machine-service"
+                    );
+                }
+                std::process::exit(2);
             }
         }
 
@@ -715,6 +814,19 @@ fn run_console(client: &Client<'_>, vm: &str, action: &str, body: Map<String, Va
     }
     println!("{}", pretty(&resp));
     std::process::exit(0);
+}
+
+/// The machine a lease command names, and whether the command moves files
+/// by host path (CL-3). Console commands stay with the local instance: their
+/// viewer runs on the service host.
+fn machine_argument(cmd: &mut Cmd) -> Option<(&mut String, bool)> {
+    match cmd {
+        Cmd::Status { vm } | Cmd::Heartbeat { vm, .. } | Cmd::Release { vm } => Some((vm, false)),
+        Cmd::Wait(args) => Some((&mut args.vm, false)),
+        Cmd::Exec(args) => Some((&mut args.vm, false)),
+        Cmd::Push { vm, .. } | Cmd::Pull { vm, .. } => Some((vm, true)),
+        _ => None,
+    }
 }
 
 /// Reproduce Python's pre-argparse `exec` handling: split at the first `--`
@@ -885,16 +997,6 @@ fn is_falsy(value: &Value) -> bool {
     }
 }
 
-/// Python `a or b or c`, returning `null` when all are absent or falsy.
-fn or_chain(values: &[Option<&Value>]) -> Value {
-    for value in values.iter().flatten() {
-        if !is_falsy(value) {
-            return (*value).clone();
-        }
-    }
-    Value::Null
-}
-
 /// JSON integer, matching a Python `int` field.
 fn json_int(value: i64) -> Value {
     Value::Number(serde_json::Number::from(value))
@@ -954,43 +1056,6 @@ fn format_images(resp: &Value) -> String {
             .unwrap_or_else(|| "none".to_string());
         out.push_str(&format!(
             "{name:<14} {kind:<6} {base_vm:<22} {ok:<13} running={cap:<5} acquirable={acquirable}\n"
-        ));
-    }
-    out
-}
-
-/// Human-readable `machctl list` table, or `no active leases` when empty.
-fn format_leases(resp: &Value) -> String {
-    let Some(vms) = resp.get("machines").and_then(Value::as_object) else {
-        return "no active leases\n".to_string();
-    };
-    if vms.is_empty() {
-        return "no active leases\n".to_string();
-    }
-    let mut entries: Vec<(&String, &Value)> = vms.iter().collect();
-    entries.sort_by(|a, b| a.0.cmp(b.0));
-    let null = Value::Null;
-    let mut out = String::new();
-    for (vm, record) in entries {
-        let state = record.get("state").map(python_str).unwrap_or_default();
-        let image = record
-            .get("image")
-            .filter(|value| !is_falsy(value))
-            .or_else(|| record.get("line").filter(|value| !is_falsy(value)))
-            .map(python_str)
-            .unwrap_or_default();
-        let env = python_str(&or_chain(&[
-            record.get("env"),
-            record.get("pack"),
-            record.get("lane"),
-        ]));
-        let ip = python_str(record.get("ip").unwrap_or(&null));
-        let ttl = record
-            .get("ttl_hours_remaining")
-            .map(python_str)
-            .unwrap_or_default();
-        out.push_str(&format!(
-            "{vm:<44} {state:<13} image={image:<11} env={env:<10} ip={ip:<15} ttl={ttl}h\n"
         ));
     }
     out
@@ -1292,51 +1357,6 @@ mod tests {
         assert!(line.contains("acquirable=false"));
     }
 
-    #[test]
-    fn leases_table_empty_and_rows() {
-        assert_eq!(
-            format_leases(&json!({"machines": {}})),
-            "no active leases\n"
-        );
-        let resp = json!({
-            "machines": {
-                "vm-a": {
-                    "state": "running",
-                    "image": "ubuntu2404",
-                    "env": null,
-                    "ip": "192.0.2.1",
-                    "ttl_hours_remaining": 24
-                }
-            }
-        });
-        let text = format_leases(&resp);
-        assert!(text.starts_with("vm-a"));
-        assert!(text.contains("image=ubuntu2404"));
-        assert!(text.contains("env=None"));
-        assert!(text.contains("ip=192.0.2.1"));
-        assert!(text.contains("ttl=24h"));
-    }
-
-    #[test]
-    fn leases_fall_back_to_legacy_fields() {
-        let resp = json!({
-            "machines": {
-                "vm-b": {
-                    "state": "stopped",
-                    "line": "macos26",
-                    "pack": "default",
-                    "lane": "ignored",
-                    "ip": null,
-                    "ttl_hours_remaining": 1.5
-                }
-            }
-        });
-        let text = format_leases(&resp);
-        assert!(text.contains("image=macos26"));
-        assert!(text.contains("env=default"));
-        assert!(text.contains("ttl=1.5h"));
-    }
-
     /// CL-1, AC-41: a stale catalog's warning names the file, the error,
     /// the failure time and the generation still served.
     #[test]
@@ -1424,17 +1444,6 @@ mod tests {
         assert_eq!(python_str(&json!(24)), "24");
         assert_eq!(python_str(&json!(1.5)), "1.5");
         assert_eq!(python_str(&json!("text")), "text");
-    }
-
-    #[test]
-    fn or_chain_skips_python_falsy_values() {
-        let empty = Value::String(String::new());
-        let lane = Value::String("lane".to_string());
-        assert_eq!(
-            python_str(&or_chain(&[Some(&Value::Null), Some(&empty), Some(&lane)])),
-            "lane"
-        );
-        assert_eq!(or_chain(&[Some(&Value::Null), None]), Value::Null);
     }
 
     #[test]
