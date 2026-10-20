@@ -767,6 +767,15 @@ impl DurableMachine {
         Ok(())
     }
 
+    /// Check that `body.lease_id` names the current lease of `name`, before
+    /// a byte-carrying transfer receives its bytes (FD-4).
+    pub fn check_lease(&self, name: &str, body: &Value) -> Result<(), Reply> {
+        let Ok(_gate) = self.gate.read() else {
+            return Err(Reply::error(500, "durable gate poisoned"));
+        };
+        self.current_for(name, body).map(|_| ())
+    }
+
     /// `POST /machines/<name>/push` and `/pull`, path-based, for a loopback
     /// client (DM-5). `push` copies `local_path` to `remote_path`; a
     /// relative `remote_path` resolves against the workspace's `work/`.
@@ -781,7 +790,7 @@ impl DurableMachine {
         if !loopback {
             return Reply::error(
                 409,
-                "path-based push and pull need a loopback client; a host path means nothing on another Mac",
+                "path-based push and pull need a loopback client; a host path means nothing on another Mac (use PUT or GET /machines/<name>/files)",
             );
         }
         let local = body.get("local_path").and_then(Value::as_str);

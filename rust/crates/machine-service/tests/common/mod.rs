@@ -56,6 +56,52 @@ pub fn http(
         .unwrap_or_else(|error| panic!("request {method} {path} on port {port}: {error}"))
 }
 
+/// One raw HTTP exchange with any body and headers, for the byte-carrying
+/// endpoints (FD-4): the status, the headers (names lowercased) and the
+/// body bytes.
+#[allow(dead_code)] // Used by the suites that move bytes.
+pub fn raw_http(
+    port: u16,
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: &[u8],
+) -> (u16, Vec<(String, String)>, Vec<u8>) {
+    use std::io::{Read, Write};
+    let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(180)))
+        .expect("timeout");
+    let mut head = format!(
+        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nContent-Length: {}\r\n",
+        body.len()
+    );
+    for (name, value) in headers {
+        head.push_str(&format!("{name}: {value}\r\n"));
+    }
+    head.push_str("\r\n");
+    stream.write_all(head.as_bytes()).expect("write head");
+    stream.write_all(body).expect("write body");
+    let mut answer = Vec::new();
+    stream.read_to_end(&mut answer).expect("read answer");
+    let split = answer
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .expect("header end");
+    let head = String::from_utf8_lossy(&answer[..split]).into_owned();
+    let mut lines = head.split("\r\n");
+    let status = lines
+        .next()
+        .and_then(|line| line.split(' ').nth(1))
+        .and_then(|code| code.parse().ok())
+        .expect("status");
+    let headers = lines
+        .filter_map(|line| line.split_once(':'))
+        .map(|(name, value)| (name.trim().to_ascii_lowercase(), value.trim().to_string()))
+        .collect();
+    (status, headers, answer[split + 4..].to_vec())
+}
+
 /// Like [`http`], but returns transport failures instead of panicking. Used by
 /// the startup health poll, where connection-refused is expected.
 pub fn try_http(
@@ -387,7 +433,8 @@ exit 0
 ///
 /// The last two arguments are source and destination. A destination with a
 /// remote prefix (`user@host:path`) stores the source bytes; a source with a
-/// remote prefix restores them. This is what makes the daemon's real
+/// remote prefix restores them; a folder is copied whole, as `scp -r`
+/// does. This is what makes the daemon's real
 /// `verify_transfer` checksum check pass without a guest. A path containing
 /// `fixture-sleep` replaces the shim with `sleep 60`, standing in for a
 /// transfer that runs far longer than any test.
@@ -408,12 +455,13 @@ case "$dst" in
   *:*)
     remote="${dst#*:}"
     key=$(printf '%s' "$remote" | tr '/' '_')
-    cp -- "$src" "$store/$key" 2>/dev/null || cp "$src" "$store/$key"
+    rm -rf "$store/$key"
+    cp -R -- "$src" "$store/$key" 2>/dev/null || cp -R "$src" "$store/$key"
     ;;
   *)
     remote="${src#*:}"
     key=$(printf '%s' "$remote" | tr '/' '_')
-    cp -- "$store/$key" "$dst" 2>/dev/null || cp "$store/$key" "$dst"
+    cp -R -- "$store/$key" "$dst" 2>/dev/null || cp -R "$store/$key" "$dst"
     ;;
 esac
 exit 0
