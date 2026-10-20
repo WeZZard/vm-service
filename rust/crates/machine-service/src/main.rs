@@ -13,8 +13,15 @@ use machine_service_core::{
     acquisition_options, application_catalog, control_only, environment, snapshot,
 };
 
+mod durable_routes;
+mod probe;
+
 fn main() {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
+    if arguments.first().map(String::as_str) == Some("--probe-host") {
+        probe::run();
+        return;
+    }
     if let Err(message) = run(&arguments) {
         eprintln!("machine-service: {message}");
         std::process::exit(1);
@@ -130,6 +137,7 @@ fn serve(config: Config) -> Result<(), String> {
     if let Err(error) = service.reconcile_startup() {
         service.log(&format!("WARN: startup reconciliation failed: {error}"));
     }
+    durable_routes::install(&service)?;
 
     let address = if service.config.host.contains(':') {
         format!("[{}]:{}", service.config.host, service.config.port)
@@ -259,6 +267,9 @@ fn handle_get(service: &Service, request: &mut Request, url: &str) -> OpResult<(
     // carries any query string, so a path with a query matches no route and
     // falls through to the generic 404. Do not strip the query here.
     let path = url;
+    if let Some(answer) = durable_routes::get(path) {
+        return Ok(answer);
+    }
     if path == "/" {
         return Ok((
             200,
@@ -281,6 +292,11 @@ fn handle_get(service: &Service, request: &mut Request, url: &str) -> OpResult<(
         {
             body["environment"] = environment.clone();
         }
+        durable_routes::health(
+            &mut body,
+            service.catalog.peek().status.freshness
+                != machine_service_core::catalog::Freshness::Unavailable,
+        );
         return Ok((200, body));
     }
     if path == "/capabilities" {
@@ -342,6 +358,7 @@ fn handle_get(service: &Service, request: &mut Request, url: &str) -> OpResult<(
     if path == "/machines" {
         let mut body = snapshot::snapshot(service)?;
         body["catalog"] = service.image_catalog().status.to_json();
+        durable_routes::extend_machines(&mut body);
         return Ok((200, body));
     }
     if let Some(name) = path.strip_prefix("/machines/") {
@@ -375,6 +392,12 @@ fn handle_post(service: &Service, request: &mut Request, url: &str) -> OpResult<
     // carries any query string, so a path with a query matches no route and
     // falls through to the generic 404. Do not strip the query here.
     let path = url;
+    let loopback = request
+        .remote_addr()
+        .is_some_and(|address| address.ip().is_loopback());
+    if let Some(answer) = durable_routes::post(path, &body, loopback) {
+        return Ok(answer);
+    }
 
     if path == "/acquire" {
         machine_service_core::network::validate_request(&body)?;
@@ -446,6 +469,7 @@ fn handle_post(service: &Service, request: &mut Request, url: &str) -> OpResult<
 
     if path == "/gc" {
         service.gc_once()?;
+        durable_routes::gc_once();
         return Ok((200, json!({"gc": "done"})));
     }
     Ok((404, json!({"error": "not found"})))

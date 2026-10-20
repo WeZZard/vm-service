@@ -13,7 +13,9 @@ pub mod config;
 pub mod exec;
 pub mod hostlock;
 pub mod inventory;
+pub mod lease;
 pub mod process;
 pub mod session_env;
 
 pub use config::DurableConfig;
+pub use lease::{DurableMachine, Reply};

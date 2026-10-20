@@ -196,17 +196,21 @@ fn test_health() {
     let live = Live::new();
     let response = live.request("GET", "/health", None);
     assert_eq!(response.status, 200);
-    let mut body = response.body;
-    // The catalog status is the one moving part of the answer (IC-5).
-    let catalog = body
-        .as_object_mut()
-        .expect("health object")
-        .remove("catalog")
-        .expect("health carries the catalog status");
-    assert_eq!(body, json!({"ok": true, "service": "machine-service"}));
-    assert_eq!(catalog["status"], "current");
-    assert_eq!(catalog["generation"], 1);
-    assert!(catalog["built_at"].as_f64().is_some());
+    assert_eq!(response.body["ok"], json!(true));
+    assert_eq!(response.body["service"], json!("machine-service"));
+    // FD-1: the instance ID and the kinds it offers; exposure is off by
+    // default, so no durable kind (AC-43).
+    assert!(response.body["instance"]
+        .as_str()
+        .is_some_and(|id| !id.is_empty()));
+    assert!(!response.body["kinds"]
+        .as_array()
+        .expect("kinds")
+        .contains(&json!("durable")));
+    // The catalog status rides along (IC-5).
+    assert_eq!(response.body["catalog"]["status"], "current");
+    assert_eq!(response.body["catalog"]["generation"], 1);
+    assert!(response.body["catalog"]["built_at"].as_f64().is_some());
 }
 
 #[test]
