@@ -623,6 +623,9 @@ pub fn run_machctl(arguments: &[&str], env: &[(String, String)]) -> Output {
         .args(arguments)
         .env_remove("VM_ENVIRONMENT_FILE")
         .env_remove("VM_ENVIRONMENT_FINGERPRINT")
+        // The CLI remembers its leases under the state folder (CL-3); only a
+        // caller's own value may place them.
+        .env_remove("MACHINE_SERVICE_STATE")
         .env("CONSUL_HTTP_ADDR", format!("127.0.0.1:{}", free_port()))
         .envs(env.iter().cloned())
         .stdin(Stdio::null());

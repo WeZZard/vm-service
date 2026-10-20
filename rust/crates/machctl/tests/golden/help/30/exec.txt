@@ -1,6 +1,7 @@
 usage: machctl exec [-h]
                     [--script SCRIPT]
                     [--timeout TIMEOUT]
+                    [--lease-id LEASE_ID]
                     vm
                     [argv ...]
 
@@ -23,3 +24,8 @@ options:
         transport allows an
         additional 30
         seconds
+  --lease-id LEASE_ID
+        the lease to act
+        under (default: the
+        one machctl
+        remembered)

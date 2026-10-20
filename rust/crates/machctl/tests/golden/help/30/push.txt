@@ -1,4 +1,5 @@
 usage: machctl push [-h]
+                    [--lease-id LEASE_ID]
                     vm local
                     remote
 
@@ -11,3 +12,8 @@ options:
   -h, --help
         show this help
         message and exit
+  --lease-id LEASE_ID
+        the lease to act
+        under (default: the
+        one machctl
+        remembered)

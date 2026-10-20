@@ -1,5 +1,6 @@
 usage: machctl heartbeat [-h]
                          [--ttl-hours TTL_HOURS]
+                         [--lease-id LEASE_ID]
                          vm
 
 positional arguments:
@@ -9,3 +10,8 @@ options:
   -h, --help      show this help
                   message and exit
   --ttl-hours TTL_HOURS
+  --lease-id LEASE_ID
+                  the lease to act
+                  under (default: the
+                  one machctl
+                  remembered)

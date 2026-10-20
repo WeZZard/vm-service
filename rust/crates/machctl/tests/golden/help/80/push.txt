@@ -1,4 +1,4 @@
-usage: machctl push [-h] vm local remote
+usage: machctl push [-h] [--lease-id LEASE_ID] vm local remote
 
 positional arguments:
   vm
@@ -6,4 +6,6 @@ positional arguments:
   remote
 
 options:
-  -h, --help  show this help message and exit
+  -h, --help           show this help message and exit
+  --lease-id LEASE_ID  the lease to act under (default: the one machctl
+                       remembered)

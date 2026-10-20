@@ -145,6 +145,41 @@ fn ac35_install_moves_state_and_console_and_replaces_the_cli_link() {
     );
 }
 
+/// CL-3 (DC-72): a `machctl` run before the install may have created the
+/// new state folder for its remembered leases alone. The old state still
+/// moves there, and the remembered leases are kept beside it.
+#[test]
+fn cl3_remembered_leases_do_not_block_the_state_move() {
+    let harness = Harness::new();
+    let legacy_state = harness.home.join(".local/state/vm-service");
+    fs::create_dir_all(&legacy_state).unwrap();
+    fs::write(legacy_state.join("state.json"), "{\"vms\": {}}\n").unwrap();
+    fs::write(legacy_state.join("service.log"), "old log\n").unwrap();
+    let state = harness.home.join(".local/state/machine-service");
+    fs::create_dir_all(&state).unwrap();
+    let remembered = "{\"schema_version\": 1, \"leases\": []}\n";
+    fs::write(state.join("cli-leases.json"), remembered).unwrap();
+    fs::write(state.join(".cli-leases.json.lock"), "").unwrap();
+    harness.save_legacy(&[("HOME", harness.home_str())]);
+
+    succeed(&harness, &[]);
+
+    assert!(!legacy_state.exists());
+    assert_eq!(
+        fs::read_to_string(state.join("service.log")).unwrap(),
+        "old log\n"
+    );
+    assert_eq!(
+        fs::read_to_string(state.join("cli-leases.json")).unwrap(),
+        remembered
+    );
+    let leftovers: Vec<_> = fs::read_dir(state.parent().unwrap())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(leftovers, ["machine-service"], "{leftovers:?}");
+}
+
 /// A `vmctl` that is not a link into the old install folder is the
 /// operator's own and stays.
 #[test]

@@ -33,7 +33,7 @@ use tempfile::TempDir;
 struct Selected {
     _dir: TempDir,
     root: PathBuf,
-    _home: PathBuf,
+    home: PathBuf,
     _repo: PathBuf,
     profile_path: PathBuf,
     profile: Value,
@@ -116,7 +116,7 @@ impl Selected {
                 return Selected {
                     _dir: dir,
                     root,
-                    _home: home,
+                    home,
                     _repo: repo,
                     profile_path,
                     profile,
@@ -139,6 +139,9 @@ impl Selected {
         vec![
             ("MACHINE_SERVICE_PORT".to_string(), "1".to_string()),
             ("TART_HOME".to_string(), "/wrong".to_string()),
+            // The fixture HOME, so the CLI's remembered leases (CL-3) stay
+            // in the fixture.
+            ("HOME".to_string(), self.home.to_string_lossy().into_owned()),
         ]
     }
 

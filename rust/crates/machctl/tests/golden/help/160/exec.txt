@@ -1,10 +1,11 @@
-usage: machctl exec [-h] [--script SCRIPT] [--timeout TIMEOUT] vm [argv ...]
+usage: machctl exec [-h] [--script SCRIPT] [--timeout TIMEOUT] [--lease-id LEASE_ID] vm [argv ...]
 
 positional arguments:
   vm
-  argv               command to run (use -- to separate)
+  argv                 command to run (use -- to separate)
 
 options:
-  -h, --help         show this help message and exit
-  --script SCRIPT    run a local script file via guest shell stdin
-  --timeout TIMEOUT  guest command timeout in seconds; transport allows an additional 30 seconds
+  -h, --help           show this help message and exit
+  --script SCRIPT      run a local script file via guest shell stdin
+  --timeout TIMEOUT    guest command timeout in seconds; transport allows an additional 30 seconds
+  --lease-id LEASE_ID  the lease to act under (default: the one machctl remembered)
