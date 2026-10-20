@@ -8,9 +8,11 @@
 //! refuses every durable request before any lock or workspace is touched.
 
 pub mod agents;
+pub mod capabilities;
 pub mod config;
 pub mod exec;
 pub mod hostlock;
+pub mod inventory;
 pub mod process;
 pub mod session_env;
 
