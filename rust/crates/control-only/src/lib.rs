@@ -676,17 +676,17 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "test_reject_before_any_clone_or_boot: requires a live vm-service daemon, because \
+    #[ignore = "test_reject_before_any_clone_or_boot: requires a live machine-service daemon, because \
                 the Python test drives the real HTTP surface end to end"]
     fn reject_before_any_clone_or_boot() {}
 
     #[test]
-    #[ignore = "test_default_still_uses_legacy_path: requires a live vm-service daemon, because \
+    #[ignore = "test_default_still_uses_legacy_path: requires a live machine-service daemon, because \
                 the Python test observes the running service's legacy selection path"]
     fn default_still_uses_legacy_path() {}
 
     #[test]
-    #[ignore = "test_restored_control_record_cannot_use_legacy_ssh: requires a live vm-service \
+    #[ignore = "test_restored_control_record_cannot_use_legacy_ssh: requires a live machine-service \
                 daemon, because the Python test restores a control record through the running \
                 service"]
     fn restored_control_record_cannot_use_legacy_ssh() {}

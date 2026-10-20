@@ -1,5 +1,5 @@
 //! The guest session: one long-lived, checksummed byte stream between
-//! vm-service and a helper in the guest, carrying many execs, writes and reads.
+//! machine-service and a helper in the guest, carrying many execs, writes and reads.
 //!
 //! The design is `docs/arch/guest-session.md` (GS-1 to GS-6). This crate holds
 //! the frame codec ([`frame`]), the guest-side helper's request loop

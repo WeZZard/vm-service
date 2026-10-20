@@ -68,7 +68,7 @@ pub fn ownership(config: &Value) -> Result<Ownership, EnvironmentError> {
             let error = io::Error::last_os_error();
             if error.raw_os_error() == Some(libc::EWOULDBLOCK) {
                 return Err(EnvironmentError::msg(format!(
-                    "another vm-service daemon owns {}",
+                    "another machine-service daemon owns {}",
                     root.display()
                 )));
             }

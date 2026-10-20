@@ -16,7 +16,7 @@ use guest_firewall::{
 #[derive(Parser, Debug)]
 #[command(
     name = "vm-service-guest-firewall",
-    about = "Keep vm-service's internet guests off this host with a pf anchor (DC-14)."
+    about = "Keep machine-service's internet guests off this host with a pf anchor (DC-14)."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -27,10 +27,10 @@ struct Cli {
 enum Action {
     /// Write the anchor, its table file and its LaunchDaemon, enable pf, and load the anchor now (root).
     Install {
-        /// The table file every vm-service instance on this host writes.
+        /// The table file every machine-service instance on this host writes.
         #[arg(long, default_value = DEFAULT_TABLE_FILE)]
         table: PathBuf,
-        /// The numeric user that runs vm-service and owns the table file;
+        /// The numeric user that runs machine-service and owns the table file;
         /// defaults to the user that ran sudo.
         #[arg(long)]
         owner: Option<u32>,
@@ -39,7 +39,7 @@ enum Action {
     Remove,
     /// Print the anchor rules and the LaunchDaemon without installing them.
     Print {
-        /// The table file every vm-service instance on this host writes.
+        /// The table file every machine-service instance on this host writes.
         #[arg(long, default_value = DEFAULT_TABLE_FILE)]
         table: PathBuf,
     },
@@ -141,11 +141,11 @@ fn owner_ids(owner: Option<u32>) -> Result<(u32, u32), String> {
         None => std::env::var("SUDO_UID")
             .ok()
             .and_then(|value| value.parse().ok())
-            .ok_or("run it with sudo from the account that runs vm-service, or pass --owner UID")?,
+            .ok_or("run it with sudo from the account that runs machine-service, or pass --owner UID")?,
     };
     if uid == 0 {
         return Err(
-            "the table file must belong to the account that runs vm-service, not root".into(),
+            "the table file must belong to the account that runs machine-service, not root".into(),
         );
     }
     // SAFETY: `getpwuid` returns static storage, read at once.
@@ -160,7 +160,7 @@ fn owner_ids(owner: Option<u32>) -> Result<(u32, u32), String> {
 }
 
 /// Create the table file's directory and an empty table file, owned by the
-/// account that runs vm-service, so every instance on the host can write it
+/// account that runs machine-service, so every instance on the host can write it
 /// and pf can read it.
 fn prepare_table(table: &Path, uid: u32, gid: u32) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
@@ -204,7 +204,7 @@ fn remove() -> Result<(), String> {
     remove_if_present(Path::new(ANCHOR_FILE))?;
     println!("removed: anchor {ANCHOR} is flushed; pf stays enabled with the system's rules");
     println!(
-        "the table file's directory is kept for running vm-service instances; delete it by hand"
+        "the table file's directory is kept for running machine-service instances; delete it by hand"
     );
     Ok(())
 }

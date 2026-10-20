@@ -9,13 +9,13 @@ members = [
   "crates/guest-dot-forwarder",
   "crates/application-catalog",
   "crates/console",
-  "crates/vm-service-core",
-  "crates/vm-service",
-  "crates/vmctl",
+  "crates/machine-service-core",
+  "crates/machine-service",
+  "crates/machctl",
   "crates/console-worker",
   "crates/guest-console-agent",
   "crates/guest-session",
-  "crates/vm-service-install",
+  "crates/machine-service-install",
   "crates/runtime-launcher",
 ]
 

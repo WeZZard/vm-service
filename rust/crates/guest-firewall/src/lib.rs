@@ -12,7 +12,7 @@
 //!
 //! This crate generates the anchor rules and the LaunchDaemon that loads
 //! them, reads an installed anchor back, and edits the table file that every
-//! vm-service instance on the host shares. Installing needs root once; see
+//! machine-service instance on the host shares. Installing needs root once; see
 //! the `vm-service-guest-firewall` binary.
 
 use std::io::Write;
@@ -30,7 +30,7 @@ pub const LABEL: &str = "com.wezzard.vm-service.guest-firewall";
 pub const DAEMON_PLIST: &str = "/Library/LaunchDaemons/com.wezzard.vm-service.guest-firewall.plist";
 /// The LaunchDaemon's log.
 pub const DAEMON_LOG: &str = "/var/log/com.wezzard.vm-service.guest-firewall.log";
-/// The installer executable's name; it is staged beside `vm-service`.
+/// The installer executable's name; it is staged beside `machine-service`.
 pub const INSTALLER: &str = "vm-service-guest-firewall";
 /// How often, in seconds, the LaunchDaemon reloads the anchor without a
 /// change to the table, which also restores it after the system reloads
@@ -38,7 +38,7 @@ pub const INSTALLER: &str = "vm-service-guest-firewall";
 pub const RELOAD_INTERVAL_S: u32 = 300;
 /// The pf table of the running `internet` guests' addresses.
 pub const TABLE: &str = "vm_service_internet";
-/// The table file every vm-service instance on the host writes. Its
+/// The table file every machine-service instance on the host writes. Its
 /// directory belongs to the account that runs vm-service.
 pub const DEFAULT_TABLE_FILE: &str = "/var/db/com.wezzard.vm-service/internet-guests";
 
@@ -164,7 +164,7 @@ fn xml_escape(text: &str) -> String {
 /// One line of the table file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Line {
-    /// A guest added by a vm-service instance: `<address> # <instance> <vm>`.
+    /// A guest added by a machine-service instance: `<address> # <instance> <vm>`.
     Guest(Guest),
     /// Any other line, kept as it is.
     Other(String),
