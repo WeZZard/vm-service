@@ -161,6 +161,40 @@ pub fn tart_path(config: &Config) -> Option<std::ffi::OsString> {
     }
 }
 
+/// The Tart executable `tart_command` would run: the configured path when it
+/// names one, else `tart` found on the `PATH` Tart runs with. Answers why
+/// there is none, naming Tart, so the refusal says what is missing (AC-38).
+pub fn find_executable(config: &Config) -> Result<std::path::PathBuf, String> {
+    let executable = |path: &Path| {
+        std::fs::metadata(path).is_ok_and(|meta| {
+            meta.is_file()
+                && std::os::unix::fs::PermissionsExt::mode(&meta.permissions()) & 0o111 != 0
+        })
+    };
+    let configured = config.tart_executable.as_str();
+    if configured.contains('/') {
+        let path = Path::new(configured);
+        return if executable(path) {
+            Ok(path.to_path_buf())
+        } else {
+            Err(format!(
+                "Tart is not installed (no executable at {configured})"
+            ))
+        };
+    }
+    let name = if configured.is_empty() {
+        "tart"
+    } else {
+        configured
+    };
+    let search = tart_path(config).unwrap_or_default();
+    std::env::split_paths(&search)
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .map(|dir| dir.join(name))
+        .find(|candidate| executable(candidate))
+        .ok_or_else(|| format!("Tart is not installed (no {name} on PATH)"))
+}
+
 /// Log path for a running VM, matching the Python convention.
 pub fn run_log_path(vm: &str) -> String {
     format!("/tmp/tart-run-{vm}.log")

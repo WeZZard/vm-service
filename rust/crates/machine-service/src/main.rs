@@ -293,9 +293,12 @@ fn handle_get(service: &Service, request: &mut Request, url: &str) -> OpResult<(
         {
             body["environment"] = environment.clone();
         }
+        // `virtual` needs Tart as well as a catalog: a Mac without Tart offers
+        // only its durable machine (MM-1, AC-38, DC-66).
         durable_routes::health(
             &mut body,
-            catalog.status.freshness != machine_service_core::catalog::Freshness::Unavailable,
+            catalog.status.freshness != machine_service_core::catalog::Freshness::Unavailable
+                && service.host.tart_executable().is_ok(),
         );
         return Ok((200, body));
     }
@@ -400,6 +403,14 @@ fn handle_post(service: &Service, request: &mut Request, url: &str) -> OpResult<
     }
 
     if path == "/acquire" {
+        // A Mac without Tart cannot create the virtual machine an image asks
+        // for; the request is refused before anything is reserved (AC-38).
+        if let Err(reason) = service.host.tart_executable() {
+            return Ok((
+                400,
+                json!({"error": format!("this instance cannot create virtual machines: {reason}")}),
+            ));
+        }
         machine_service_core::network::validate_request(&body)?;
         let Some(purpose) = body.get("purpose").and_then(Value::as_str) else {
             return Ok((409, json!({"error": "'purpose' (string) is required"})));

@@ -1122,3 +1122,46 @@ fn dm6_heartbeat_ttl_and_gc() {
     let (_, next) = daemon.acquired("after-gc", "none");
     assert_eq!(daemon.release(&name, &next).status, 200);
 }
+
+// ------------------------------------------------------------------ AC-38
+
+/// AC-38: an instance on a Mac without Tart, with exposure on, offers only
+/// its durable machine: `/health` reports `kinds: ["durable"]`, `/machines`
+/// lists the durable machine and no offer even with a valid image line, and
+/// an acquisition with an image is refused with 400 naming Tart, before any
+/// state is written.
+#[test]
+fn ac38_instance_without_tart_offers_only_its_durable_machine() {
+    let fixture = Fixture::new();
+    // A valid image line, so only the missing Tart keeps virtual machines
+    // away.
+    let line = fixture.root.join("pilot/images/macos26");
+    std::fs::create_dir_all(&line).unwrap();
+    std::fs::write(
+        line.join("line.conf"),
+        "LINE_KIND=macos\nBASE_VM=pilot-macos26-base\nCLONE_PREFIX=pilot-mac-\nGUEST_USER=admin\nGUEST_PASS=admin\n",
+    )
+    .unwrap();
+    let daemon = fixture.start("state", true);
+    let name = daemon.instance();
+    let health = daemon.request("GET", "/health", None);
+    assert_eq!(health.body["kinds"], json!(["durable"]), "{}", health.body);
+    let machines = daemon.request("GET", "/machines", None).body;
+    assert_eq!(machines["machines"][&name]["kind"], "durable", "{machines}");
+    assert_eq!(machines["machines"].as_object().unwrap().len(), 1);
+    assert!(
+        machines
+            .get("offers")
+            .is_none_or(|offers| offers.as_array().is_some_and(Vec::is_empty)),
+        "{machines}"
+    );
+    let refused = daemon.acquire(json!({"purpose": "vm-check", "image": "macos26"}));
+    assert_eq!(refused.status, 400, "{}", refused.body);
+    let error = refused.body["error"].as_str().unwrap();
+    assert!(error.contains("Tart is not installed"), "{error}");
+    let state = std::fs::read_to_string(daemon.state.join("state.json")).unwrap_or_default();
+    assert!(!state.contains("vm-check"), "{state}");
+    // The durable machine still leases.
+    let (_, lease) = daemon.acquired("durable-check", "none");
+    assert_eq!(daemon.release(&name, &lease).status, 200);
+}

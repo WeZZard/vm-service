@@ -77,6 +77,8 @@ pub struct Harness {
     pub viewer: PathBuf,
     pub installer: PathBuf,
     pub extra_env: Vec<(String, String)>,
+    /// The fake Tart is neither on `PATH` nor named by `TART` (AC-38).
+    pub no_tart: bool,
 }
 
 impl Harness {
@@ -137,6 +139,34 @@ impl Harness {
             viewer,
             installer,
             extra_env: Vec::new(),
+            no_tart: false,
+        }
+    }
+
+    /// Make this a Mac without Tart: no `tart` on `PATH` and no `TART`.
+    ///
+    /// The installer reads `PATH` from the LaunchAgent it writes, whose
+    /// default includes `/opt/homebrew/bin`, where a developer Mac may have
+    /// Tart; an installed agent whose `PATH` names only system folders
+    /// stands in for a Mac without Tart there.
+    pub fn remove_tart(&mut self) {
+        let _ = fs::remove_file(&self.tart);
+        self.no_tart = true;
+        let value = serde_json::json!({
+            "EnvironmentVariables": {"PATH": format!("{}:/usr/bin:/bin", self.bin.display())},
+        });
+        fs::create_dir_all(self.plist.parent().unwrap()).unwrap();
+        fs::write(&self.plist, machine_service_install::plist::dumps(&value)).unwrap();
+    }
+
+    /// Remove the virtual-machine helpers from the staging folder.
+    pub fn remove_vm_helpers(&self) {
+        for name in [
+            "console-worker",
+            "guest-console-agent",
+            "guest-console-agent-linux",
+        ] {
+            fs::remove_file(self.bin.join(name)).unwrap();
         }
     }
 
@@ -152,7 +182,9 @@ impl Harness {
         command.env_clear();
         command.env("HOME", &self.home);
         command.env("PATH", format!("{}:/usr/bin:/bin", self.bin.display()));
-        command.env("TART", &self.tart);
+        if !self.no_tart {
+            command.env("TART", &self.tart);
+        }
         command.env("PYTHONDONTWRITEBYTECODE", "1");
         for (key, value) in &self.extra_env {
             command.env(key, value);

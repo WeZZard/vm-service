@@ -199,6 +199,15 @@ pub trait Host: Send + Sync {
         ))
     }
 
+    /// The Tart executable this instance would run, or why there is none.
+    ///
+    /// An instance without Tart creates no virtual machine: it reports no
+    /// `virtual` kind, lists no offer and refuses an image acquisition
+    /// (MM-1, MG-4 step 5, AC-38, DC-66). Hosts that fake Tart have it.
+    fn tart_executable(&self) -> Result<PathBuf, String> {
+        Ok(PathBuf::from("tart"))
+    }
+
     /// The boot-settle window, in seconds.
     fn boot_settle_s(&self) -> f64;
 
@@ -444,6 +453,10 @@ impl Host for RealHost {
         let listener = std::net::TcpListener::bind(("0.0.0.0", 0))?;
         listener.set_nonblocking(true)?;
         Ok(Box::new(TcpProbeListener { listener }))
+    }
+
+    fn tart_executable(&self) -> Result<PathBuf, String> {
+        crate::tart::find_executable(&self.config)
     }
 
     fn boot_settle_s(&self) -> f64 {
