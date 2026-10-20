@@ -22,13 +22,14 @@
 - At release, after the lease's own process groups are stopped, the service ends the processes that the lease left running.
 - A process is a leftover when it runs as `wezzard`, it started after the lease began, and one of these holds:
   - It belongs to a process session that the lease started, or it descends from one.
-  - Its environment carries `MACHINE_SERVICE_LEASE_ID` with this lease's ID. macOS lets a process read the environment of another process of the same user.
+  - Its environment carries `MACHINE_SERVICE_LEASE_ID` with this lease's ID. macOS 27 does not let a process read another process's environment, so there this rule finds nothing, and a process that left the lease's sessions after its parents exited is not swept (DC-48).
   - It is a regular application, one with a Dock presence, that was not running in the inventory before the lease. Applications started through Launch Services, for example with `open`, are children of launchd and inherit no session variable, so this rule catches them.
 - A leftover application is first asked to quit with an Apple event and is given 10 seconds. A leftover process then receives `SIGTERM`, and after 10 more seconds `SIGKILL`.
 - The sweep never ends these processes, whatever the rules above say:
   - The CI runner and every process that descends from it ([HY-5](#hy-5-coexistence-with-the-ci-runner)).
   - Any launchd job's own process that the lease did not start, such as Consul, the service-catalog registrar and machine-service itself.
   - Finder, the Dock, SystemUIServer and the other processes of the login session.
+- The rules are applied to one snapshot of the processes taken before any signal, so stopping a session never hides a descendant that left it.
 - The hygiene record lists every swept process with its PID, executable, start time, the rule that matched it, and whether it ended.
 
 ## HY-4: Inventory before and after

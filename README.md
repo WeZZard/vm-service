@@ -110,6 +110,9 @@ install -m 0755 target/aarch64-unknown-linux-musl/release/guest-console-agent \
 # other hosts). A repeated install preserves the bind address it finds.
 MACHINE_SERVICE_HOST=0.0.0.0 ~/.local/libexec/machine-service/machine-service-install install
 
+# Expose this Mac as a durable machine (off by default; kept by later installs).
+~/.local/libexec/machine-service/machine-service-install install --expose-durable on
+
 launchctl list | grep machine-service     # health check
 curl -s localhost:6240/health
 ```
@@ -219,12 +222,27 @@ POST /machines/<name>/pull        {"remote_path":"/tmp/f","local_path":"/host/f"
 POST /machines/<name>/heartbeat   {"ttl_hours":4}
 POST /machines/<name>/release     {"reason":"done"}
 POST /gc
+
+# Durable machine (exposure on only); every operation carries "lease_id".
+POST /acquire                     {"machine":"<instance>","purpose":"metal-check","env":"default","ttl_hours":4}
+POST /machines/<instance>/exec    {"lease_id":"...","argv":["uname","-a"],"cwd":"sub","timeout":600}
+POST /machines/<instance>/push    {"lease_id":"...","local_path":"/host/f","remote_path":"f"}
+POST /machines/<instance>/pull    {"lease_id":"...","remote_path":"f","local_path":"/host/f"}
+POST /machines/<instance>/heartbeat {"lease_id":"...","ttl_hours":4}
+POST /machines/<instance>/release {"lease_id":"...","reason":"done","keep_workspace":false}
+POST /machines/<instance>/refresh
+GET  /machines/<instance>/leases/<lease_id>/hygiene
 ```
 
-Errors are JSON `{"error": "..."}` with status 400/409/500.
+Errors are JSON `{"error": "..."}` with status 400/404/409/500.
 
 - `GET /machines` lists the leases under its top-level `machines` key. Each
-  lease record keeps its fields, including `vm`.
+  lease record keeps its fields, including `vm`, and carries `kind: "virtual"`
+  and `instance`. With durable exposure on, the instance's own Mac is listed
+  there too, under its instance ID ([Durable machine](#durable-machine)).
+- `GET /health` answers `ok`, `service`, `instance` (the Mac's
+  `LocalHostName`) and `kinds`: `durable` when exposure is on, and `virtual`
+  when the image associations loaded.
 - `GET /images`, `GET /machines` and `GET /health` carry the image catalog's
   status under `catalog`, and `POST /images/reload` rebuilds the catalog and
   answers with it. See [Image catalog](#image-catalog).
@@ -281,6 +299,128 @@ editing or removing a line takes effect on the next request, without a restart
   one request's wait, never a stale answer.
 - **Removed lines.** A lease whose line is removed keeps running; its
   heartbeat, exec and release read the lease record, not the catalog.
+
+## Durable machine
+
+The Mac an instance runs on can be leased as a whole: an exclusive session as
+the service's own account, with a scratch workspace. The design is in
+[durable machine leases](docs/arch/durable-machine.md),
+[agent keys](docs/arch/agent-keys.md) and [hygiene](docs/arch/hygiene.md).
+
+- **Exposure is off unless turned on.** `MACHINE_SERVICE_EXPOSE_DURABLE=on` in
+  the instance's environment exposes the Mac; `machine-service-install
+  --expose-durable on|off` writes it, and a later installation without the
+  flag keeps it. With exposure off, `/machines` lists no durable machine,
+  `/health` reports no `durable` kind, and every durable request answers 404
+  `durable machine not exposed on <instance>` before any lock or workspace is
+  touched. Any value but `on` or `off` stops the daemon at startup.
+- **Name.** The durable machine is named by the instance ID, the Mac's
+  `scutil --get LocalHostName`.
+- **Acquire.** `POST /acquire` with `machine` takes `purpose`, `ttl_hours`
+  (default 24, at most 720) and `env` (`default` loads the agent keys, `none`
+  loads none). `machine` with `image` is refused with 400, as are `cpu`,
+  `memory_mb`, `disk_gb`, `vnc`, `network`, `source` and
+  `expected_source_fingerprint`. The answer is the machine record with
+  `kind: "durable"`, the `lease_id`, the `workspace` and the `capabilities`.
+- **One lease per Mac.** The lock file
+  `/var/tmp/com.wezzard.machine-service/durable-machine.lock` names its
+  holder's state folder, lease, purpose and expiry, and every instance on the
+  Mac shares it. A second acquisition answers 409 `durable machine leased:
+  <name> (purpose <purpose>, until <time>)`. A holder past its TTL, grace and
+  one more hour may be taken over.
+- **`lease_id` on every operation.** A missing or stale `lease_id` answers 409
+  and nothing runs.
+- **Workspace.** `~/machine-service/leases/<lease_id>/` holds `work/` (the
+  default working directory), `tmp/` (`TMPDIR`) and `codex/` (`CODEX_HOME`),
+  all mode 700. `HOME` stays the account's home.
+- **Exec.** A command runs as a child of the service, in a new process
+  session, with the session environment: the login shell's (`zsh -l`)
+  variables without `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`,
+  `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`, `OPENAI_API_KEY`,
+  `OPENAI_BASE_URL`, `LITELLM_CODEX_KEY`, `CODEX_HOME` and the service's own
+  `MACHINE_SERVICE_*` settings, plus `MACHINE_SERVICE_LEASE_ID`,
+  `MACHINE_SERVICE_WORKSPACE`, `TMPDIR`, `CODEX_HOME` and the loaded agents'
+  variables. `argv` runs through `$SHELL -c` with the arguments quoted;
+  `script` is fed to `zsh -s`. A relative `cwd` resolves against `work/`. The
+  answer is `{name, vm, rc, output}` with every loaded key's value replaced by
+  `[redacted]`. A timeout or a release kills the command's whole session. The
+  answer returns when the shell exits, even when a background process keeps
+  its output open.
+- **Push and pull** copy between two paths on the Mac for a loopback client
+  only, through a temporary sibling and a rename, and report `bytes` and
+  `sha256`. A relative `remote_path` resolves against `work/`. Paths in the
+  agent key folder or the lease SSH material are refused.
+- **Heartbeat, TTL and GC.** A heartbeat renews the TTL (its `ttl_hours`, or
+  the lease's own) and the lock's expiry. Past its TTL a lease is warned; past
+  the 6-hour grace GC releases it.
+- **Release** stops every process in the lease's recorded sessions
+  (`SIGTERM`, 10 s, `SIGKILL`), sweeps the leftovers, takes the inventory
+  after, removes the workspace unless `keep_workspace` is set, and frees the
+  lock. It answers `{name, lease_id, released, reason, hygiene}`. The lease's
+  record stays for 30 days, and a kept workspace for 7.
+- **Restart.** A restart of the service keeps the lease, its lock and its
+  processes, which run in their own sessions. The session environment and the
+  keys are rebuilt on the first operation after it. An acquisition that a
+  restart interrupted is rolled back, and an interrupted release is finished.
+  A lease found on an instance whose exposure is now off is released.
+
+### Agent keys
+
+- `~/.config/machine-service/agents/` (`MACHINE_SERVICE_CONFIG_DIR` names
+  another configuration folder) holds `claude-code.env`
+  (`ANTHROPIC_API_KEY=<key>`), `codex.env` (`LITELLM_CODEX_KEY=<key>`) and
+  `endpoints.json`
+  (`{"claude-code": {"base_url": "http://<gateway-host>"}, "codex": {"base_url": "http://<gateway-host>/v1"}}`).
+  The owner writes them; the service never creates, rotates or copies a key,
+  and has no default endpoint.
+- The folder must be mode 700 and the key files mode 600, owned by the
+  service's user; `endpoints.json` must not be writable by group or other.
+  A key file holds exactly one assignment, plus blank and `#` lines.
+- An agent is loaded only when its key and its endpoint are both valid.
+  Claude Code then gets `ANTHROPIC_BASE_URL` and `ANTHROPIC_API_KEY`; Codex
+  gets `LITELLM_CODEX_KEY` and a `codex/config.toml` that selects the
+  `machine-service-litellm` provider at the configured base URL with
+  `env_key = "LITELLM_CODEX_KEY"` and no model.
+- The machine's `agents` capability reports each key as `present`, `absent`,
+  `unsafe-mode` or `invalid` and each endpoint as `present`, `absent` or
+  `invalid`; none of them refuses an acquisition. No key value reaches a
+  record, a log, a response or a file the service writes.
+
+### Capabilities
+
+`capabilities` (schema version 1) carries `os`, `hardware` (chip, cores,
+memory, hardware UUID), `disk`, `gpu` (name, Metal families, `metal3`,
+argument buffer tier), `display` (console user, GUI session), `software`
+(node, cua-driver, Claude Code, Codex, Tart, Xcode, Unity, Unreal),
+`permissions` (Screen Recording, Accessibility, event posting), `agents`,
+`ci_runner`, `network: "lan"`, `observed_at` and `unknown`. A fact the
+instance could not observe is `null` with its reason under `unknown`. Disk,
+display, CI runner and agents are read on every request; the rest at
+startup, daily, at the start and end of each lease and on `refresh`. The GPU
+and permission facts come from `machine-service --probe-host`, which the
+service runs as its own child so macOS attributes the checks to it.
+
+### Hygiene
+
+- A process is swept at release when it runs as the service's user, started
+  after the lease began, and belongs to a session the lease started, descends
+  from one, or started with this lease's `MACHINE_SERVICE_LEASE_ID`. One
+  process snapshot is classified before any signal, so a child that left the
+  session while its parent ran is still found.
+- The sweep never ends the service or its ancestors, the CI runner
+  (`Runner.Listener`, `Runner.Worker`, `Runner.PluginHost`, or anything under
+  `~/actions-runner`) or anything descending from it, or a process under
+  `/System/Library/CoreServices/`. A spared match is listed with its reason.
+- macOS 27 does not let one process read another's environment, so the
+  environment rule finds nothing there: a process that left the lease's
+  sessions after its parents exited survives the release.
+- Regular applications started through Launch Services are not swept yet.
+- The inventory before and after records the user's processes (CI-runner
+  processes marked `origin: ci`), the running regular applications, the
+  installed applications, the launchd jobs, the Homebrew formulae and casks
+  (two parts), the top-level entries of the home folder, Application Support
+  and Preferences, the free disk and the `software` facts. Each part has 60 s;
+  a part that fails is recorded under `missing` with its reason.
 
 ## Application catalog
 
@@ -442,6 +582,15 @@ agent fails, and requires evidence to be pulled to `/var/tmp/` before teardown.
 - `~/.local/state/machine-service/ssh/<vm>/` — private per-lease identity and known_hosts;
   never copy this directory into public reports or guest workspaces
 - `/tmp/tart-run-<vm>.log` — per-VM console log (same convention as pilot-images)
+- `~/.local/state/machine-service/durable.json` — the current durable lease
+- `~/.local/state/machine-service/leases/<lease_id>/` — a durable lease's
+  `lease.json`, `sessions.json`, `inventory-before.json`,
+  `inventory-after.json`, `changes.json` and `hygiene.json`, kept 30 days
+- `~/machine-service/leases/<lease_id>/` — a durable lease's workspace
+- `/var/tmp/com.wezzard.machine-service/durable-machine.lock` — the host-wide
+  durable lease lock, shared by every instance on the Mac
+- `~/.config/machine-service/agents/` — the owner's agent keys and
+  `endpoints.json`
 
 ## Not implemented here (deliberately)
 
