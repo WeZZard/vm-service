@@ -142,6 +142,76 @@ curl -s localhost:6240/health
   names each one with its `MACHINE_SERVICE_*` replacement. The installer
   refuses a caller that still exports one.
 
+### A Mac without Tart (a durable machine only)
+
+A Mac with no Tart and no images creates no virtual machine, so its instance
+offers only its durable machine (MG-4 step 5, AC-38, DC-65, DC-66). It needs
+three executables. The guest agents, the console worker, the guest firewall
+and the DNS-over-TLS forwarder serve virtual machines only, and the installer
+does not require them there.
+
+| Path on the Mac | What it is |
+| --- | --- |
+| `~/.local/libexec/machine-service/machine-service` | the daemon the LaunchAgent runs |
+| `~/.local/libexec/machine-service/machctl` | the CLI, linked from `~/.local/bin/machctl` |
+| `~/.local/libexec/machine-service/machine-service-install` | the installer |
+| `~/Library/LaunchAgents/com.wezzard.machine-service.plist` | the LaunchAgent the installer writes |
+| `~/.local/state/machine-service/` | state, `service.log`, `durable.json`, `leases/` |
+| `~/.config/machine-service/agents/` | the agent keys and `endpoints.json`, written by the owner |
+| `~/machine-service/leases/<lease_id>/` | each durable lease's workspace |
+| `/var/tmp/com.wezzard.machine-service/durable-machine.lock` | the host-wide durable lease lock |
+
+On the build Mac, build the three release executables and pack them:
+
+```zsh
+cd ~/Artifacts/Repositories/com.github/WeZZard/vm-service/rust
+cargo build --release -p machine-service -p machctl -p machine-service-install
+tar -C target/release -czf /tmp/machine-service-durable.tgz \
+  machine-service machctl machine-service-install
+```
+
+Copy `/tmp/machine-service-durable.tgz` to the Mac without Tart. Then, there,
+as the account that runs the service, logged in to its GUI session:
+
+```zsh
+# 1. Stage the executables where the installer expects its siblings.
+install -d ~/.local/libexec/machine-service
+tar -xzf ~/machine-service-durable.tgz -C ~/.local/libexec/machine-service
+chmod 0755 ~/.local/libexec/machine-service/{machine-service,machctl,machine-service-install}
+xattr -d com.apple.quarantine ~/.local/libexec/machine-service/* 2>/dev/null || true
+
+# 2. Validate, then install: bound to all interfaces, with the Mac exposed.
+MACHINE_SERVICE_HOST=0.0.0.0 ~/.local/libexec/machine-service/machine-service-install install --check --expose-durable on
+MACHINE_SERVICE_HOST=0.0.0.0 ~/.local/libexec/machine-service/machine-service-install install --expose-durable on
+
+# 3. Check: the instance offers its durable machine and nothing else.
+curl -s localhost:6240/health       # "kinds": ["durable"]
+~/.local/bin/machctl list --local   # one durable row, state available
+
+# 4. Describe it to the service-catalog registrar (tagged durable, not vm).
+~/.local/libexec/machine-service/machine-service-install catalog-description \
+  > ~/.config/service-catalog/services/machine-service.json
+```
+
+- The installer says `No Tart found: this instance offers only its durable
+  machine` and links `~/.local/bin/machctl`. It refuses a Mac without Tart
+  whose exposure is off, because that instance would offer nothing; the error
+  names Tart and `MACHINE_SERVICE_EXPOSE_DURABLE`.
+- `GET /health` answers `kinds: ["durable"]`, `GET /machines` lists the
+  durable machine and no offer, and `POST /acquire` with an image answers 400
+  `this instance cannot create virtual machines: Tart is not installed`.
+- The service log records the image catalog as unavailable at every start,
+  because the Mac has no pilot-images checkout. That is expected here.
+- The executables are built for macOS 11 and later (Cargo's default), so a
+  build on a newer macOS runs on macOS 26. Cargo signs them ad hoc, so macOS
+  forgets the privacy grants of `machine-service` whenever a new build is
+  copied in: grant Screen Recording, Accessibility and input to
+  `~/.local/libexec/machine-service/machine-service` again in System Settings
+  after each deployment, until it is signed with a stable identity (DM-4).
+- The owner writes the agent keys and `endpoints.json` ([Agent
+  keys](#agent-keys)). A reinstall restarts the daemon, which keeps a
+  current durable lease and its processes (DM-8).
+
 ### Migrating from vm-service
 
 The service was renamed from vm-service, and its CLI from `vmctl` (DC-19,

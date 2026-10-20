@@ -32,8 +32,13 @@ pub const LABEL: &str = "com.wezzard.machine-service";
 const DEFAULT_PATH: &str =
     "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
 
-/// Sibling executables the daemon needs at run time. The Python installer
-/// parsed the matching Python sources; the native service ships binaries.
+/// Sibling executables every installation needs: the daemon itself and the
+/// CLI the installer links into `~/.local/bin`.
+const CORE_HELPERS: [&str; 2] = ["machine-service", "machctl"];
+
+/// Sibling executables only an instance that creates virtual machines needs.
+/// The Python installer parsed the matching Python sources; the native
+/// service ships binaries.
 ///
 /// `guest-console-agent-linux` is required in addition to the host-native
 /// `guest-console-agent`, because the agent is delivered into the guest as
@@ -42,12 +47,13 @@ const DEFAULT_PATH: &str =
 /// rolls the lease back. `console::guest::agent_path_for` prefers the
 /// kind-qualified name and falls back to the host-native one, which still
 /// serves guests whose OS matches the host.
-const SERVICE_HELPERS: [&str; 5] = [
-    "machine-service",
+///
+/// A Mac without Tart creates no virtual machine, so its installation does
+/// not require them (MG-4 step 5, AC-38, DC-65).
+const VM_HELPERS: [&str; 3] = [
     "console-worker",
     "guest-console-agent",
     "guest-console-agent-linux",
-    "machctl",
 ];
 
 /// Caller variables that select a service location and must survive into the
@@ -567,7 +573,45 @@ fn validate_install(
             service.display()
         )));
     }
-    for name in SERVICE_HELPERS {
+    let env_map = as_hash_map(env);
+    let bundle = environment::load_environment_with(None, &env_map)?;
+    let mut effective = env.clone();
+    if let Some(bundle) = &bundle {
+        if let Some(environment) = bundle.get("environment").and_then(Value::as_object) {
+            for (key, value) in environment {
+                if let Some(text) = value.as_str() {
+                    effective.insert(key.clone(), text.to_string());
+                }
+            }
+        }
+    }
+    let tart = effective
+        .get("TART")
+        .filter(|value| !value.is_empty())
+        .cloned()
+        .or_else(|| which("tart", effective.get("PATH").map(String::as_str)))
+        .filter(|path| Path::new(path).is_file() && is_executable(Path::new(path)));
+    // Without Tart the instance creates no virtual machine, so only the
+    // durable machine is left to offer; an instance that offers nothing is
+    // refused, naming both settings (MG-4 step 5, AC-38, DC-65).
+    let exposed = written.get(EXPOSE_KEY).map(String::as_str) == Some("on");
+    if tart.is_none() && !exposed {
+        return Err(InstallError::refused(format!(
+            "this instance would offer nothing: no Tart executable was found (TART or PATH), \
+so it cannot create virtual machines, and durable exposure is off ({EXPOSE_KEY}); \
+install stock Tart, or install with --expose-durable on"
+        )));
+    }
+    let helpers: Vec<&str> = if tart.is_some() {
+        CORE_HELPERS
+            .iter()
+            .chain(VM_HELPERS.iter())
+            .copied()
+            .collect()
+    } else {
+        CORE_HELPERS.to_vec()
+    };
+    for name in helpers {
         let helper = source.join(name);
         if !helper.is_file() {
             return Err(InstallError::refused(format!(
@@ -583,7 +627,6 @@ fn validate_install(
         }
     }
 
-    let env_map = as_hash_map(env);
     let config = console::config::load_config(None, Some(&env_map))?
         .unwrap_or_else(console::config::ConsoleConfig::disabled);
     if config.enabled {
@@ -605,53 +648,38 @@ fn validate_install(
         }
     }
 
-    let bundle = environment::load_environment_with(None, &env_map)?;
-    let mut effective = env.clone();
-    if let Some(bundle) = &bundle {
-        if let Some(environment) = bundle.get("environment").and_then(Value::as_object) {
-            for (key, value) in environment {
-                if let Some(text) = value.as_str() {
-                    effective.insert(key.clone(), text.to_string());
-                }
-            }
+    if let Some(tart) = &tart {
+        let mut command = Command::new(tart);
+        command.arg("--version");
+        command.env_clear();
+        for (key, value) in &effective {
+            command.env(key, value);
         }
-    }
-    let tart = effective
-        .get("TART")
-        .filter(|value| !value.is_empty())
-        .cloned()
-        .or_else(|| which("tart", effective.get("PATH").map(String::as_str)));
-    let tart = match tart {
-        Some(path) if Path::new(&path).is_file() && is_executable(Path::new(&path)) => path,
-        _ => {
+        let output = run_command(&mut command, Duration::from_secs(10))?;
+        if !output.status.success() {
+            return Err(InstallError::refused(format!(
+                "Tart version check failed with {}",
+                describe_status(&output.status)
+            )));
+        }
+        let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        // A version command is an observation, not proof of vendor provenance,
+        // host boot compatibility, image readiness, or successful VNC viewing.
+        if !matches_tart_version(&version) {
             return Err(InstallError::refused(
-                "stock Tart executable is missing; install an unmodified upstream release",
-            ))
+                "Tart did not report a plain upstream release version",
+            ));
         }
-    };
-
-    let mut command = Command::new(&tart);
-    command.arg("--version");
-    command.env_clear();
-    for (key, value) in &effective {
-        command.env(key, value);
+        println!(
+            "Tart version observed: {version}. Upstream provenance and guest compatibility \
+             require acceptance checks."
+        );
+    } else {
+        println!(
+            "No Tart found: this instance offers only its durable machine, and the \
+             virtual-machine helpers are not required."
+        );
     }
-    let output = run_command(&mut command, Duration::from_secs(10))?;
-    if !output.status.success() {
-        return Err(InstallError::refused(format!(
-            "Tart version check failed with {}",
-            describe_status(&output.status)
-        )));
-    }
-    let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    // A version command is an observation, not proof of vendor provenance,
-    // host boot compatibility, image readiness, or successful VNC viewing.
-    if !matches_tart_version(&version) {
-        return Err(InstallError::refused(
-            "Tart did not report a plain upstream release version",
-        ));
-    }
-
     let mut data = old.clone();
     data.insert("Label".to_string(), Value::String(LABEL.to_string()));
     data.insert(
@@ -669,10 +697,6 @@ fn validate_install(
     data.entry("StandardErrorPath".to_string())
         .or_insert_with(|| Value::String(format!("/tmp/{LABEL}.err")));
 
-    println!(
-        "Tart version observed: {version}. Upstream provenance and guest compatibility \
-         require acceptance checks."
-    );
     if config.enabled {
         println!(
             "Console host configuration validated. Guest sharing, image compatibility, \
