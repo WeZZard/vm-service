@@ -63,6 +63,9 @@ enum Cmd {
         /// machine-readable output
         #[arg(long)]
         json: bool,
+        /// rebuild the image catalog first; exit 1 unless it is current
+        #[arg(long)]
+        reload: bool,
     },
     /// show one image's full record (JSON)
     #[command(name = "images-show")]
@@ -500,17 +503,42 @@ fn main() {
             }
         }
 
-        Cmd::Images { json } => {
+        Cmd::Images { json, reload } => {
+            // A reload rebuilds even unchanged files and reports the result
+            // in the listing that follows (IC-3).
+            let mut reload_failed = false;
+            if reload {
+                let (status, resp) = client.call("POST", "/images/reload", None, DEFAULT_TIMEOUT_S);
+                if status != 200 && status != 503 {
+                    die_from(status, &resp, None);
+                }
+                reload_failed = resp
+                    .get("catalog")
+                    .and_then(|catalog| catalog.get("status"))
+                    .and_then(Value::as_str)
+                    != Some("current");
+            }
             let (_status, resp) = client.call("GET", "/images", None, DEFAULT_TIMEOUT_S);
             if json {
                 println!("{}", pretty(&resp));
             } else {
+                if let Some(warning) = catalog_warning(&resp) {
+                    println!("{warning}");
+                }
                 print!("{}", format_images(&resp));
+            }
+            if reload_failed || resp.get("images").is_none() {
+                std::process::exit(1);
             }
         }
 
         Cmd::ImagesShow { image } => {
             let (_status, resp) = client.call("GET", "/images", None, DEFAULT_TIMEOUT_S);
+            if resp.get("images").is_none() {
+                // No catalog to look in: say why instead of "unknown image".
+                eprintln!("machctl: {}", error_message_text(&resp));
+                std::process::exit(1);
+            }
             let found = resp
                 .get("images")
                 .and_then(Value::as_object)
@@ -530,6 +558,10 @@ fn main() {
             if json {
                 println!("{}", pretty(&resp));
             } else {
+                // CL-1: a catalog that is not current is named above the rows.
+                if let Some(warning) = catalog_warning(&resp) {
+                    println!("{warning}");
+                }
                 print!("{}", format_leases(&resp));
             }
         }
@@ -964,6 +996,61 @@ fn format_leases(resp: &Value) -> String {
     out
 }
 
+/// The warning line printed above a listing while the instance's image
+/// catalog is `stale` or `unavailable` (CL-1, IC-5): the failing file, the
+/// error and the time of the failure, or that a rebuild is still running.
+fn catalog_warning(resp: &Value) -> Option<String> {
+    let catalog = resp.get("catalog")?;
+    let status = catalog.get("status").and_then(Value::as_str)?;
+    if status == "current" {
+        return None;
+    }
+    let mut line = format!("machctl: warning: image catalog {status}");
+    let error = catalog.get("error").and_then(Value::as_str);
+    match error {
+        Some(error) => {
+            if let Some(failed_at) = catalog.get("failed_at").and_then(Value::as_f64) {
+                line.push_str(&format!(" since {}", utc_timestamp(failed_at)));
+            }
+            match catalog.get("file").and_then(Value::as_str) {
+                Some(file) => line.push_str(&format!(": {file}: {error}")),
+                None => line.push_str(&format!(": {error}")),
+            }
+        }
+        None if status == "stale" => {
+            line.push_str(": the image files changed and the rebuild has not finished")
+        }
+        None => {}
+    }
+    if let Some(generation) = catalog.get("generation").and_then(Value::as_u64) {
+        line.push_str(&format!(" (serving generation {generation})"));
+    }
+    Some(line)
+}
+
+/// Unix seconds as `YYYY-MM-DDTHH:MM:SSZ`.
+fn utc_timestamp(seconds: f64) -> String {
+    let time = seconds.floor() as libc::time_t;
+    // SAFETY: `gmtime_r` writes into a caller-provided `tm` and reads only
+    // `time`; both live for the call.
+    let tm = unsafe {
+        let mut tm: libc::tm = std::mem::zeroed();
+        if libc::gmtime_r(&time, &mut tm).is_null() {
+            return format!("{seconds}");
+        }
+        tm
+    };
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        tm.tm_year + 1900,
+        tm.tm_mon + 1,
+        tm.tm_mday,
+        tm.tm_hour,
+        tm.tm_min,
+        tm.tm_sec
+    )
+}
+
 /// `machctl images-show` unknown-image diagnostic.
 fn format_unknown_image(image: &str, resp: &Value) -> String {
     let available = resp
@@ -1248,6 +1335,45 @@ mod tests {
         assert!(text.contains("image=macos26"));
         assert!(text.contains("env=default"));
         assert!(text.contains("ttl=1.5h"));
+    }
+
+    /// CL-1, AC-41: a stale catalog's warning names the file, the error,
+    /// the failure time and the generation still served.
+    #[test]
+    fn ac41_catalog_warning_names_file_error_and_time() {
+        let current = json!({"catalog": {"generation": 3, "built_at": 1.0, "status": "current"}});
+        assert_eq!(catalog_warning(&current), None);
+        assert_eq!(catalog_warning(&json!({"machines": {}})), None);
+
+        let stale = json!({"catalog": {
+            "generation": 7, "built_at": 1.0, "status": "stale",
+            "error": "line configuration parse failed (zsh exit status 1)",
+            "failed_at": 1_792_540_800.5,
+            "file": "/pilot/images/macos26/line.conf",
+        }});
+        assert_eq!(
+            catalog_warning(&stale).expect("warning"),
+            "machctl: warning: image catalog stale since 2026-10-21T00:00:00Z: \
+             /pilot/images/macos26/line.conf: line configuration parse failed \
+             (zsh exit status 1) (serving generation 7)"
+        );
+
+        let rebuilding = json!({"catalog": {"generation": 2, "built_at": 1.0, "status": "stale"}});
+        assert_eq!(
+            catalog_warning(&rebuilding).expect("warning"),
+            "machctl: warning: image catalog stale: the image files changed and the \
+             rebuild has not finished (serving generation 2)"
+        );
+
+        let unavailable = json!({"catalog": {
+            "generation": null, "built_at": null, "status": "unavailable",
+            "error": "no configured image lines", "failed_at": 0.0, "file": "/pilot/images",
+        }});
+        assert_eq!(
+            catalog_warning(&unavailable).expect("warning"),
+            "machctl: warning: image catalog unavailable since 1970-01-01T00:00:00Z: \
+             /pilot/images: no configured image lines"
+        );
     }
 
     #[test]
