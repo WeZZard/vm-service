@@ -79,6 +79,19 @@ impl ProcessInfo {
     pub fn executable(&self) -> String {
         self.path.clone().unwrap_or_else(|| self.comm.clone())
     }
+
+    /// Whether the process runs an executable called `name`, by its short
+    /// command name or its path's file name. The kernel's command name of a
+    /// copied platform binary keeps the original's name, so the path decides
+    /// too.
+    pub fn runs(&self, name: &str) -> bool {
+        self.comm == name
+            || self
+                .path
+                .as_deref()
+                .and_then(|path| path.rsplit('/').next())
+                .is_some_and(|file| file == name)
+    }
 }
 
 /// A process's start-up arguments and environment (`KERN_PROCARGS2`).
@@ -534,7 +547,7 @@ fn ci_process(
     ci_root: &str,
     arguments: &dyn Fn(i32) -> Option<Arguments>,
 ) -> bool {
-    if CI_EXECUTABLES.contains(&candidate.comm.as_str()) {
+    if CI_EXECUTABLES.iter().any(|name| candidate.runs(name)) {
         return true;
     }
     let ci_root = ci_root.trim_end_matches('/');

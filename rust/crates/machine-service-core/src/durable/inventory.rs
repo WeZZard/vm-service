@@ -8,7 +8,7 @@
 //!
 //! This first cut records the user's processes, the running regular
 //! applications, the installed applications, the launchd jobs, the Homebrew
-//! formulae and casks, the top-level entries of the home folder,
+//! formulae and the casks (two parts), the top-level entries of the home folder,
 //! `~/Library/Application Support` and `~/Library/Preferences`, and the free
 //! disk space. Global npm packages and the crontab come with the rest of
 //! HY-4.
@@ -107,8 +107,18 @@ pub fn standard_parts(context: &Context, software: Option<Value>) -> Vec<Part> {
         "launchd_jobs".to_string(),
         Box::new(move || Ok(launchd_jobs(&ctx.home))),
     ));
+    // Formulae and casks are separate parts: one failing (an untrusted tap
+    // refuses `brew list --cask`) must not hide the other.
     let ctx = context.clone();
-    parts.push(("homebrew".to_string(), Box::new(move || homebrew(&ctx))));
+    parts.push((
+        "homebrew_formulae".to_string(),
+        Box::new(move || homebrew(&ctx, "--formula")),
+    ));
+    let ctx = context.clone();
+    parts.push((
+        "homebrew_casks".to_string(),
+        Box::new(move || homebrew(&ctx, "--cask")),
+    ));
     let ctx = context.clone();
     parts.push(("folders".to_string(), Box::new(move || Ok(folders(&ctx)))));
     parts.push((
@@ -326,38 +336,42 @@ pub fn which(name: &str, path: Option<&String>) -> Option<PathBuf> {
         })
 }
 
-fn homebrew(context: &Context) -> Result<Value, String> {
+fn homebrew(context: &Context, kind: &str) -> Result<Value, String> {
     let brew = which("brew", context.env.get("PATH"))
         .ok_or_else(|| "brew not found on the session PATH".to_string())?;
-    let list = |kind: &str| -> Result<Map<String, Value>, String> {
-        let mut command = Command::new(&brew);
-        command
-            .args(["list", kind, "--versions"])
-            .env_clear()
-            .envs(&context.env)
-            .env("HOMEBREW_NO_AUTO_UPDATE", "1")
-            .env("HOMEBREW_NO_ANALYTICS", "1")
-            .env("HOMEBREW_NO_ENV_HINTS", "1")
-            .current_dir(&context.home);
-        let output = crate::proc::run_capture(&mut command, None, context.timeout)
-            .map_err(|error| format!("brew list {kind}: {error}"))?;
-        if !output.status.success() {
-            return Err(format!(
-                "brew list {kind} exited with {}",
-                output.status.code().unwrap_or(-1)
-            ));
+    let mut command = Command::new(&brew);
+    command
+        .args(["list", kind, "--versions"])
+        .env_clear()
+        .envs(&context.env)
+        .env("HOMEBREW_NO_AUTO_UPDATE", "1")
+        .env("HOMEBREW_NO_ANALYTICS", "1")
+        .env("HOMEBREW_NO_ENV_HINTS", "1")
+        .current_dir(&context.home);
+    let output = crate::proc::run_capture(&mut command, None, context.timeout)
+        .map_err(|error| format!("brew list {kind}: {error}"))?;
+    if !output.status.success() {
+        let reason = String::from_utf8_lossy(&output.stderr)
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .chars()
+            .take(300)
+            .collect::<String>();
+        return Err(format!(
+            "brew list {kind} exited with {}: {reason}",
+            output.status.code().unwrap_or(-1)
+        ));
+    }
+    let mut out = Map::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let mut words = line.split_whitespace();
+        if let Some(name) = words.next() {
+            let versions: Vec<&str> = words.collect();
+            out.insert(name.to_string(), json!(versions.join(" ")));
         }
-        let mut out = Map::new();
-        for line in String::from_utf8_lossy(&output.stdout).lines() {
-            let mut words = line.split_whitespace();
-            if let Some(name) = words.next() {
-                let versions: Vec<&str> = words.collect();
-                out.insert(name.to_string(), json!(versions.join(" ")));
-            }
-        }
-        Ok(out)
-    };
-    Ok(json!({"formulae": list("--formula")?, "casks": list("--cask")?}))
+    }
+    Ok(Value::Object(out))
 }
 
 /// Compare two inventories into `changes.json` (HY-4). CI-runner processes
@@ -389,10 +403,6 @@ pub fn diff(before: &Value, after: &Value) -> Value {
                     .or_else(|| entry.get("name"))
                     .map(|value| value.to_string())
                     .unwrap_or_default()
-            }),
-            "homebrew" => json!({
-                "formulae": map_diff(&old["formulae"], &new["formulae"]),
-                "casks": map_diff(&old["casks"], &new["casks"]),
             }),
             "disk" => json!({
                 "free_bytes_before": old["free_bytes"],
@@ -488,12 +498,12 @@ mod tests {
     #[test]
     fn ac31_diff_reports_additions_and_changes() {
         let before = json!({"parts": {
-            "homebrew": {"formulae": {"jq": "1.7"}, "casks": {}},
+            "homebrew_formulae": {"jq": "1.7"},
             "folders": {"/h/Library/Application Support/A": 1.0},
             "processes": [{"pid": 1, "started_at": 1.0, "executable": "/bin/a"}],
         }, "missing": {}});
         let after = json!({"parts": {
-            "homebrew": {"formulae": {"jq": "1.7", "hello": "2.12"}, "casks": {}},
+            "homebrew_formulae": {"jq": "1.7", "hello": "2.12"},
             "folders": {
                 "/h/Library/Application Support/A": 2.0,
                 "/h/Library/Application Support/B": 3.0,
@@ -505,7 +515,7 @@ mod tests {
         }, "missing": {"applications": "timed out after 60 s"}});
         let changes = diff(&before, &after);
         assert_eq!(
-            changes["parts"]["homebrew"]["formulae"]["added"],
+            changes["parts"]["homebrew_formulae"]["added"],
             json!({"hello": "2.12"})
         );
         assert_eq!(

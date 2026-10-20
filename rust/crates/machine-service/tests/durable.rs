@@ -924,7 +924,7 @@ fn ac31_inventory_before_and_after_never_refuses() {
     let hygiene = &released.body["hygiene"];
     let changes = &hygiene["changes"]["parts"];
     assert_eq!(
-        changes["homebrew"]["formulae"]["added"],
+        changes["homebrew_formulae"]["added"],
         json!({"hello": "1.0"})
     );
     let support = fixture
@@ -953,7 +953,7 @@ fn ac31_inventory_before_and_after_never_refuses() {
     std::fs::write(fixture.root.join("brew-fails"), "").unwrap();
     let released = daemon.release(&name, &lease);
     assert_eq!(released.status, 200, "{}", released.body);
-    let missing = &released.body["hygiene"]["changes"]["missing"]["after"]["homebrew"];
+    let missing = &released.body["hygiene"]["changes"]["missing"]["after"]["homebrew_formulae"];
     assert!(
         missing.as_str().unwrap().contains("exited with 1"),
         "{missing}"
