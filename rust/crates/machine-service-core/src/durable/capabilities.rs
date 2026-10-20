@@ -517,7 +517,7 @@ pub fn ci_runner(ci_root: &Path, uid: u32) -> Value {
         });
     let busy = process::process_table(Some(uid))
         .iter()
-        .any(|info| info.comm == "Runner.Worker" && !info.zombie);
+        .any(|info| info.runs("Runner.Worker") && !info.zombie);
     json!({"present": present, "busy": busy, "name": name})
 }
 
