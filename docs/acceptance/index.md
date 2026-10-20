@@ -59,10 +59,11 @@ Each scenario names the [test layer](../arch/test-layers.md) that runs it. Stori
 5. AC-34: The CLI lists every machine from every instance (US23, TL-2, TL-6).
 6. AC-35: Old paths fail loudly after the coordinated switch (US30, TL-2).
 7. AC-36: An old variable name stops the daemon, and the installer rewrites it (US30, TL-2).
-8. AC-37: Each instance is registered in Consul with the tags it warrants (US23, TL-6).
-9. AC-38: An instance on a Mac without Tart offers only its durable machine (US31, TL-6).
-10. AC-39: Adding and removing an image line changes the list without a restart (US32, TL-1, TL-2, TL-4).
-11. AC-40: Editing a line and promoting a base take effect without a restart (US32, TL-2, TL-4).
-12. AC-41: A broken line keeps the last good list and is reported loudly (US32, TL-1, TL-2).
-13. AC-42: No partial catalog is ever published (US32, TL-1).
-14. AC-43: Durable exposure is off unless the operator turns it on (US33, TL-2, TL-6).
+8. AC-45: An old environment profile is refused with its fix (US30, TL-1, TL-2).
+9. AC-37: Each instance is registered in Consul with the tags it warrants (US23, TL-6).
+10. AC-38: An instance on a Mac without Tart offers only its durable machine (US31, TL-6).
+11. AC-39: Adding and removing an image line changes the list without a restart (US32, TL-1, TL-2, TL-4).
+12. AC-40: Editing a line and promoting a base take effect without a restart (US32, TL-2, TL-4).
+13. AC-41: A broken line keeps the last good list and is reported loudly (US32, TL-1, TL-2).
+14. AC-42: No partial catalog is ever published (US32, TL-1).
+15. AC-43: Durable exposure is off unless the operator turns it on (US33, TL-2, TL-6).

@@ -90,8 +90,9 @@ The human operator (WeZZard) who installs the service, keeps it healthy, trouble
 
 - As the operator, I want the rename to machine-service and `machctl`, and every caller's switch to the new names, to land together, so that no old name lingers and no caller is left behind (DC-33).
 - A caller that still uses an old path or variable fails at once with the new name in its error, instead of working unnoticed (DC-37). See [MG-3](../arch/rename.md#mg-3-one-coordinated-switch).
+- The selected-environment profile is renamed with everything else: `vmctlPath` becomes `machctlPath` at `schemaVersion` 2, and an old profile is refused with its fix in the error (DC-41, DC-42).
 
-**Tests:** AC-35 and AC-36 in [operator.acceptance](../acceptance/operator.acceptance).
+**Tests:** AC-35, AC-36 and AC-45 in [operator.acceptance](../acceptance/operator.acceptance).
 
 ## US31 — Install on a Mac without Tart
 

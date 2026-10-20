@@ -65,6 +65,15 @@ Feature: Federation, rename and installation
     Then the new LaunchAgent sets MACHINE_SERVICE_HOST and MACHINE_SERVICE_GUEST_LINK to the same values
     And it sets no VM_SERVICE_* variable
 
+  @AC-45 @TL-1 @TL-2
+  Scenario: An old environment profile is refused with its fix
+    Given a selected-environment profile at schemaVersion 1 with a vmctlPath field
+    When the operator runs "machctl --environment <profile> environment --json"
+    Then it fails and the error names machctlPath and schemaVersion 2
+    And pilot-images' bootstrap and mcp-relay's environment loader refuse the same profile the same way
+    Given the same profile at schemaVersion 2 with machctlPath naming the machctl executable
+    Then the command prints the resolved profile and exports MACHCTL, and no VMCTL
+
   @AC-37 @TL-6
   Scenario: Each instance is registered in Consul with the tags it warrants
     Given the catalog description printed by "machine-service-install catalog-description" is placed on each Mac
