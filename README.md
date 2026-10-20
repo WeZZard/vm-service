@@ -306,6 +306,8 @@ POST /acquire                {"purpose":"my-task","image":"macos26","env":"defau
 POST /machines/<name>/exec        {"argv":["uname","-a"]}  or  {"script":"echo hi"}
 POST /machines/<name>/push        {"local_path":"/host/f","remote_path":"/tmp/f"}
 POST /machines/<name>/pull        {"remote_path":"/tmp/f","local_path":"/host/f"}
+PUT  /machines/<name>/files?lease_id=<id>&path=<remote path>[&name=<item>]   body: bytes or tar
+GET  /machines/<name>/files?lease_id=<id>&path=<remote path>
 POST /machines/<name>/heartbeat   {"ttl_hours":4}
 POST /machines/<name>/release     {"reason":"done"}
 POST /gc
@@ -324,12 +326,28 @@ GET  /machines/<instance>/leases/<lease_id>/hygiene
 Errors are JSON `{"error": "..."}` with status 400/404/409/500.
 
 - `GET /machines` lists the leases under its top-level `machines` key. Each
-  lease record keeps its fields, including `vm`, and carries `kind: "virtual"`
-  and `instance`. With durable exposure on, the instance's own Mac is listed
-  there too, under its instance ID ([Durable machine](#durable-machine)).
+  lease record keeps its fields, including `vm`, and carries `kind: "virtual"`,
+  `instance` and its image's `capabilities`. With durable exposure on, the
+  instance's own Mac is listed there too, under its instance ID
+  ([Durable machine](#durable-machine)).
+- `GET /machines` also lists `offers`: one per image of the current catalog,
+  with `name` and `image` (the image), `kind: "virtual"`, `state: "offer"`,
+  `image_kind`, `base_vm`, `base_available`, `defaults`, `concurrency`
+  (`running`, `limit`, `acquirable`, as `GET /images` has them) and
+  `capabilities` read from the image: the line's resource defaults, the
+  measured paravirtual GPU of a macOS guest (`mac2`, `common3`, no `metal3`),
+  and the software of the image's validated application inventory. Facts only
+  a running guest could answer are `null` with their reason under `unknown`.
+  A Mac without Tart, or without a catalog, lists `offers: []` and says why
+  in `offers_unavailable`.
+- `PUT` and `GET /machines/<name>/files` move bytes for a client on another
+  Mac, for both kinds of machine ([Byte transfers](#byte-transfers)).
 - `GET /health` answers `ok`, `service`, `instance` (the Mac's
   `LocalHostName`) and `kinds`: `durable` when exposure is on, and `virtual`
-  when the image associations loaded.
+  when the image catalog is available and a Tart executable is found (`TART`
+  or `tart` on `PATH`). An image acquisition on a Mac without Tart answers 400
+  `this instance cannot create virtual machines: Tart is not installed (no
+  tart on PATH)`.
 - `GET /images`, `GET /machines` and `GET /health` carry the image catalog's
   status under `catalog`, and `POST /images/reload` rebuilds the catalog and
   answers with it. See [Image catalog](#image-catalog).
@@ -436,7 +454,19 @@ the service's own account, with a scratch workspace. The design is in
 - **Push and pull** copy between two paths on the Mac for a loopback client
   only, through a temporary sibling and a rename, and report `bytes` and
   `sha256`. A relative `remote_path` resolves against `work/`. Paths in the
-  agent key folder or the lease SSH material are refused.
+  agent key folder or the lease SSH material are refused. A client on another
+  Mac uses the byte-carrying endpoints ([Byte transfers](#byte-transfers)).
+- **Unavailable.** Without a lease, the machine is `unavailable`, with
+  `unavailable_reason`, while the service's user has no logged-in GUI session
+  (the console belongs to another user or to the login window). An
+  acquisition then answers 409 `durable machine unavailable: <name>
+  (<reason>)`, a capacity refusal a client may wait on. A display that could
+  not be read never makes the machine unavailable.
+- **Warnings.** The machine record's `warnings` lists `{code, message}`
+  entries. Below `MACHINE_SERVICE_DISK_WARN_GB` free GiB (default 30; `0`
+  turns it off; any value that is not a number stops the daemon) it carries
+  `low-free-disk`, `low free disk: <n> GiB free, below the warning level of
+  <n> GiB`. A warning never makes the machine unavailable.
 - **Heartbeat, TTL and GC.** A heartbeat renews the TTL (its `ttl_hours`, or
   the lease's own) and the lock's expiry. Past its TTL a lease is warned; past
   the 6-hour grace GC releases it.
@@ -477,7 +507,8 @@ the service's own account, with a scratch workspace. The design is in
 
 `capabilities` (schema version 1) carries `os`, `hardware` (chip, cores,
 memory, hardware UUID), `disk`, `gpu` (name, Metal families, `metal3`,
-argument buffer tier), `display` (console user, GUI session), `software`
+argument buffer tier), `display` (console user, GUI session, whether the
+screen is locked, from `ioreg`'s `IOConsoleUsers`), `software`
 (node, cua-driver, Claude Code, Codex, Tart, Xcode, Unity, Unreal),
 `permissions` (Screen Recording, Accessibility, event posting), `agents`,
 `ci_runner`, `network: "lan"`, `observed_at` and `unknown`. A fact the
@@ -494,6 +525,20 @@ service runs as its own child so macOS attributes the checks to it.
   from one, or started with this lease's `MACHINE_SERVICE_LEASE_ID`. One
   process snapshot is classified before any signal, so a child that left the
   session while its parent ran is still found.
+- A regular application (one with a Dock presence) is swept when the lease
+  launched it: it started after the lease began, was not running in the
+  inventory before, and its launchd job (`application.<bundle>…` in the
+  user's GUI domain) was started with this lease's `MACHINE_SERVICE_LEASE_ID`,
+  which `open` hands to the job from the lease command's environment. An
+  application that was already running, or that the owner or another program
+  opened, is never touched; `open -a` of a running application only
+  activates it. Only that one variable is parsed from `launchctl print`, and
+  nothing of its output is logged or kept. A matched application is asked to
+  quit (`NSRunningApplication.terminate`, through `osascript`), given 10 s,
+  then sent `SIGTERM` and `SIGKILL`; the hygiene record lists it with rule
+  `application` and signal `QUIT`, `TERM` or `KILL`. An application that
+  CuaDriver's own `launch_app` starts carries CuaDriver's environment and is
+  not swept.
 - The sweep never ends the service or its ancestors, the CI runner
   (`Runner.Listener`, `Runner.Worker`, `Runner.PluginHost`, or anything under
   `~/actions-runner`) or anything descending from it, or a process under
@@ -501,13 +546,22 @@ service runs as its own child so macOS attributes the checks to it.
 - macOS 27 does not let one process read another's environment, so the
   environment rule finds nothing there: a process that left the lease's
   sessions after its parents exited survives the release.
-- Regular applications started through Launch Services are not swept yet.
 - The inventory before and after records the user's processes (CI-runner
   processes marked `origin: ci`), the running regular applications, the
   installed applications, the launchd jobs, the Homebrew formulae and casks
-  (two parts), the top-level entries of the home folder, Application Support
+  (two parts), the global npm packages (`npm_globals`, `{name: version}`),
+  the crontab, the top-level entries of the home folder, Application Support
   and Preferences, the free disk and the `software` facts. Each part has 60 s;
   a part that fails is recorded under `missing` with its reason.
+- A crontab entry is recorded as its schedule and its program, keyed by the
+  SHA-256 of the whole line, so a change shows and no argument (a token
+  written into a crontab line) reaches a record that any LAN client can read.
+- Whether a CI job runs is sampled at acquisition, on every GC pass (once a
+  minute, and on `POST /gc`) and at release. The hygiene record's
+  `ci_busy_intervals` lists `{from, to}` for each stretch a job was seen
+  running, an interval still open at release closing there, and
+  `ci_sampling` says how often it looked (`interval_s`, `samples`). A job
+  that starts and ends between two samples is not seen.
 
 ## Application catalog
 
@@ -601,6 +655,9 @@ machctl acquire --purpose acceptance-example --image ubuntu2404 --source work --
 machctl images                    # images, capacity and the catalog's status
 machctl images --reload           # rebuild the catalog now; exit 1 unless current
 machctl acquire --purpose build-test --image macos26 --ttl-hours 4
+machctl acquire --purpose bench --require metal3 --require unreal   # any matching machine
+machctl acquire --purpose check --machine mac-b                     # a named durable machine
+machctl acquire --purpose x --image ubuntu2404 --instance mac-a
 machctl list                      # every machine from every instance
 machctl list --local              # only this Mac's instance; Consul is not asked
 machctl list --kind durable --require metal3
@@ -608,6 +665,8 @@ machctl exec pilot-mac-build-test-<id> -- swift --version
 machctl status <vm>@<instance>    # when two instances have a machine of that name
 machctl push  <vm> ./artifact.zip /tmp/artifact.zip
 machctl pull  <vm> /tmp/build.log ./build.log
+machctl push  --bytes <vm> ./folder /tmp/   # send the bytes even on loopback
+machctl exec  <machine> --lease-id <id> -- uname -a   # override the remembered lease
 machctl heartbeat <vm>            # call periodically for long tasks
 machctl release <vm>
 ```
@@ -635,17 +694,36 @@ instance never hangs the list.
   instance's rows while its catalog is `stale` or `unavailable`, naming the
   failing file, the error and the time of the failure.
 
+`machctl acquire` takes one of three forms. `--image <image>` (the default,
+`macos26`) leases a virtual machine from the local instance, or from the one
+`--instance <ID or address>` names. `--machine <name>` leases a named durable
+machine from the instance that lists it. `--require <capability>` (repeatable,
+the names `list` accepts) lists every instance, keeps the machines and offers
+with every capability, and prefers an available durable machine whose CI runner
+is idle, then any available durable machine, then an acquirable offer. Before
+each attempt it prints the choice on stderr, for example
+`chose mac-b (durable, metal3, CI idle)`, and when the owner refuses
+for capacity (`durable machine leased`, `durable machine unavailable`, `macOS
+VM limit reached`) it tries the next candidate. The forms exclude one another,
+and the flags that shape only a virtual machine (`--network`, `--profile`,
+`--cpu`, `--memory-mb`, `--disk-gb`, `--no-wait`, `--vnc`, `--source`,
+`--expected-source-fingerprint`) are refused with `--machine` and `--require`.
+
 `status`, `heartbeat`, `release`, `wait`, `exec`, `push` and `pull` send the
 command to the instance that lists the machine. `<vm>@<instance>` names the
 instance, and is required when two instances list the name. A name no instance
-lists goes to the local instance. Not built yet:
+lists goes to the local instance.
 
-- Push and pull to a machine on another Mac are refused until the
-  byte-carrying file endpoints (FD-4) exist.
-- `machctl acquire --require` and `--machine` (CL-2) wait for durable leases;
-  the capability filters above already serve `list`.
-- The CLI does not yet remember `lease_id`s in
-  `~/.local/state/machine-service/cli-leases.json` (CL-3).
+- The CLI remembers the leases it acquired in `cli-leases.json` in the state
+  folder (`$MACHINE_SERVICE_STATE`, else `~/.local/state/machine-service/`;
+  mode 600, changed under a lock and replaced by a rename), keyed by machine
+  and instance. `exec`, `push`, `pull`, `heartbeat` and `release` send the
+  remembered `lease_id`, which a durable machine requires; `--lease-id`
+  overrides it, and a release forgets it.
+- `push` and `pull` send the bytes over HTTP whenever the machine's owner is
+  another instance or not on loopback, and with `--bytes` on loopback
+  ([Byte transfers](#byte-transfers)). A folder travels as a tar stream, and a
+  pull lands through a temporary sibling only after its digest matched.
 
 A selected environment (`--environment` or `VM_ENVIRONMENT_FILE`) keeps every
 command on its own instance and never asks Consul.
@@ -653,6 +731,32 @@ command on its own instance and never asks Consul.
 (The installer links `~/.local/bin/machctl` to
 `~/.local/libexec/machine-service/machctl`. launchd starts the daemon, so
 `machine-service` does not need to be on PATH.)
+
+## Byte transfers
+
+A host path means nothing to an instance on another Mac, so two endpoints carry
+the bytes themselves, for both kinds of machine (FD-4):
+
+- `PUT /machines/<name>/files?lease_id=<id>&path=<remote path>[&name=<item>]`
+  takes a file's bytes with `Content-Type: application/octet-stream`, or a
+  folder as a tar stream of its contents with `Content-Type:
+  application/x-tar`, and the body's SHA-256 (hex) in `X-Content-SHA256`.
+  `name` is the item's name when `path` is an existing folder (default: the
+  last part of `path`). The answer is the path transfer's JSON with `bytes`,
+  `sha256` and `content` (`file` or `directory`).
+- `GET /machines/<name>/files?lease_id=<id>&path=<remote path>` answers a
+  file's bytes or a folder's tar stream, with the digest in
+  `X-Content-SHA256` and the item's name in `X-Content-Name`.
+- The instance checks the machine and, for a durable machine, the lease before
+  it keeps a byte. It stages the body under `<state>/transfers/<id>/`,
+  refuses a body whose digest differs (400, nothing written), and then runs
+  the path transfer it already has on the staged path: the local file system
+  for the durable machine, the guest link for a virtual machine. The staging
+  folder is removed when the request ends.
+- A tar stream carries regular files and folders only. One that names an
+  absolute path, a `..` component, a link or a device is refused whole.
+- Path-based `push` and `pull` serve loopback clients only, for both kinds of
+  machine.
 
 ## acquire semantics
 
@@ -710,6 +814,13 @@ agent fails, and requires evidence to be pulled to `/var/tmp/` before teardown.
 - `~/.local/state/machine-service/leases/<lease_id>/` — a durable lease's
   `lease.json`, `sessions.json`, `inventory-before.json`,
   `inventory-after.json`, `changes.json` and `hygiene.json`, kept 30 days
+- `~/.local/state/machine-service/leases/<lease_id>/ci-busy.json` — the CI
+  samples of a durable lease
+- `~/.local/state/machine-service/transfers/` — byte transfers in flight,
+  removed when each request ends
+- `~/.local/state/machine-service/cli-leases.json` — the leases `machctl`
+  acquired, written by the CLI; the installer's move of an old vm-service
+  state folder keeps it
 - `~/machine-service/leases/<lease_id>/` — a durable lease's workspace
 - `/var/tmp/com.wezzard.machine-service/durable-machine.lock` — the host-wide
   durable lease lock, shared by every instance on the Mac
