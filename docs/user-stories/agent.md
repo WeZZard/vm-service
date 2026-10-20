@@ -1,6 +1,6 @@
 # Profile: Agent
 
-An AI agent or script that needs a disposable VM for a bounded task. Concrete embodiments: a pi child agent driven through `vmctl`, a Claude Code session, a shell script doing build/test work.
+An AI agent or script that needs a disposable VM for a bounded task. Concrete embodiments: a pi child agent driven through `machctl`, a Claude Code session, a shell script doing build/test work.
 
 The agent's contract with the service is **lease-based**: it asks for a VM, works inside it, transfers evidence out, and gives the VM back. It never touches `tart` and never holds host credentials beyond what the service injects into the guest.
 
@@ -8,7 +8,7 @@ The agent's contract with the service is **lease-based**: it asks for a VM, work
 
 **As an** agent, **I want** to request a VM by `purpose` (a short slug that becomes the VM name), **so that** I get a machine dedicated to my task.
 
-- `POST /acquire` or `vmctl acquire --purpose <slug>`.
+- `POST /acquire` or `machctl acquire --purpose <slug>`.
 - Choose `image` (`macos26` or `ubuntu2404`), `env` pack, `ttl_hours`, optional `cpu`/`memory_mb`/`disk_gb` overrides.
 - Acquisition is synchronous in both readiness modes. The default verifies key-only command access and a checksum-verified transfer round trip. `wait: false` uses a shorter bootstrap deadline and one command probe, but does not skip those readiness requirements.
 - Cloning a macOS base can take minutes. The caller must allow a sufficiently long acquisition timeout.
@@ -55,14 +55,14 @@ The agent's contract with the service is **lease-based**: it asks for a VM, work
 
 **As an** agent, **I want** to heartbeat my lease, **so that** long tasks are not reclaimed mid-flight.
 
-- `POST /vms/<vm>/heartbeat` with `ttl_hours` (0.1–720) resets the TTL and clears any grace/warn state.
-- `POST /vms/<vm>/heartbeat` without `ttl_hours` resets the TTL to the lease's own initial `ttl_hours`, so `vmctl heartbeat <vm>` keeps a lease alive.
+- `POST /machines/<vm>/heartbeat` with `ttl_hours` (0.1–720) resets the TTL and clears any grace/warn state.
+- `POST /machines/<vm>/heartbeat` without `ttl_hours` resets the TTL to the lease's own initial `ttl_hours`, so `machctl heartbeat <vm>` keeps a lease alive.
 
 **Tests:** `TestTtlGc` (unit: heartbeat resets, bounds, unknown VM), `test_bare_heartbeat_renews_expired_ttl` (unit).
 
 ## US7 — See capacity before asking
 
-**As an** agent, **I want** `GET /images` (or `vmctl images --json`), **so that** I can pick an image that actually has capacity.
+**As an** agent, **I want** `GET /images` (or `machctl images --json`), **so that** I can pick an image that actually has capacity.
 
 **Tests:** `TestImagesSnapshot` (unit), `TestSnapshots` (integration), `TestServiceUp.test_daemon_and_images` (e2e).
 

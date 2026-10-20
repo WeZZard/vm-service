@@ -1,11 +1,11 @@
 /**
- * vm-use workflow — run one bounded VM task through the vm-service.
+ * vm-use workflow — run one bounded VM task through machine-service.
  *
  * Usage (from pi):  subagent { workflow: "vm-use", args: { task: "..." } }
  * Or copy this script inline. The child agent:
- *   1. acquires a fresh VM via vmctl (TTL-leased, default gateway credential pack)
+ *   1. acquires a fresh VM via machctl (TTL-leased, default gateway credential pack)
  *   2. does the task inside the guest
- *   3. transfers any evidence/outputs to the host (vmctl pull)
+ *   3. transfers any evidence/outputs to the host (machctl pull)
  *   4. ALWAYS releases the VM (finally block), even on failure
  *
  * Contract with the child: the task prompt instructs it to report
@@ -19,12 +19,14 @@ const purpose = (args.purpose || (args.task || 'task')
 const image = args.image || 'macos26';
 const ttl = args.ttlHours || 4;
 
-const VMCTL = `${process.env.HOME}/Artifacts/Repositories/com.github/WeZZard/vm-service/bin/vmctl`;
+// The installer links machctl into ~/.local/bin; a selected environment's
+// MACHCTL export names the CLI that profile uses.
+const MACHCTL = process.env.MACHCTL || `${process.env.HOME}/.local/bin/machctl`;
 
 // 1. acquire
 const acquire = await runs.host('acquire', {
   kind: 'command',
-  command: `${VMCTL} acquire --purpose ${purpose} --image ${image} --ttl-hours ${ttl} --json-output 2>/dev/null || ${VMCTL} acquire --purpose ${purpose} --image ${image} --ttl-hours ${ttl}`,
+  command: `${MACHCTL} acquire --purpose ${purpose} --image ${image} --ttl-hours ${ttl} --json-output 2>/dev/null || ${MACHCTL} acquire --purpose ${purpose} --image ${image} --ttl-hours ${ttl}`,
   timeoutMs: 20 * 60 * 1000,  // clone + boot can take several minutes
 });
 if (acquire.exitCode !== 0) {
@@ -45,25 +47,25 @@ try {
     task: [
       `You are working inside a leased macOS VM named ${vm}.`,
       `Host-side control (run via bash):`,
-      `  ${VMCTL} exec ${vm} -- <command...>    # run a command in the guest`,
-      `  ${VMCTL} exec ${vm} --script <host-file>`,
-      `  ${VMCTL} push ${vm} <host-path> <guest-path>`,
-      `  ${VMCTL} pull ${vm} <guest-path> <host-path>   # transfer evidence OUT before release`,
+      `  ${MACHCTL} exec ${vm} -- <command...>    # run a command in the guest`,
+      `  ${MACHCTL} exec ${vm} --script <host-file>`,
+      `  ${MACHCTL} push ${vm} <host-path> <guest-path>`,
+      `  ${MACHCTL} pull ${vm} <guest-path> <host-path>   # transfer evidence OUT before release`,
       ``,
       `TASK: ${args.task}`,
       ``,
-      `Rules: do all VM-side work through vmctl exec/push/pull. Pull every artifact,`,
+      `Rules: do all VM-side work through machctl exec/push/pull. Pull every artifact,`,
       `log, and evidence file to a host path under /var/tmp/ before finishing.`,
       `Do not release the VM yourself — the workflow owns teardown.`,
     ].join('\n'),
-    output: `/var/tmp/vm-service-${vm}/worker-output.md`,
+    output: `/var/tmp/machine-service-${vm}/worker-output.md`,
   });
   return { vm, childOutput: child.outputReference || child.output };
 } finally {
   // 4. teardown is part of the job
   await runs.host('release', {
     kind: 'command',
-    command: `${VMCTL} release ${vm} || true`,
+    command: `${MACHCTL} release ${vm} || true`,
     timeoutMs: 10 * 60 * 1000,
   });
 }

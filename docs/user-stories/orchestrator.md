@@ -29,7 +29,7 @@ The orchestrator's defining duty: **teardown happens even when the work fails**.
 
 **As an** orchestrator, **I want** a single place to acquire, delegate, collect, and release, **so that** children never manage teardown themselves.
 
-- The workflow acquires, hands the child only `vmctl exec/push/pull` verbs, requires evidence pulled to `/var/tmp/` before finishing, and releases in `finally` — even on child failure.
+- The workflow acquires, hands the child only `machctl exec/push/pull` verbs, requires evidence pulled to `/var/tmp/` before finishing, and releases in `finally` — even on child failure.
 - Child contract: `structuredOutput { verdict, summary, artifacts }`.
 
 **Tests:** E2E via `examples/pi-subagents/vm-use.workflow.js`; `tests/e2e/test_e2e.py::TestLifecycleE2E` proves the real clone→exec→release path against live Tart.

@@ -1,6 +1,7 @@
 # machine-service (Rust)
 
-This is the Rust translation of the Python `machine-service`. The Python sources in
+This is the Rust translation of the Python `vm-service`, the service's name
+before it was renamed machine-service. The Python sources in
 `../bin/` remain the behavioral specification and are not replaced by this
 workspace until the live acceptance phase completes.
 
@@ -13,7 +14,7 @@ workspace until the live acceptance phase completes.
 - `crates/application-catalog` — read-only installed-application catalog and base fingerprints.
 - `crates/console` — trusted viewer configuration, guest command construction, and the lease-bound console controller.
 - `crates/machine-service-core` — lease state, Tart lifecycle, SSH access, and operations.
-- `crates/vm-service` — the HTTP daemon.
+- `crates/machine-service` — the HTTP daemon.
 - `crates/machctl` — the CLI client.
 - `crates/console-worker` — the attempt-local console broker.
 - `crates/guest-console-agent` — the guest-side sharing adapter.
@@ -38,7 +39,7 @@ time next to the running executable, or through `VM_GUEST_CONSOLE_AGENT` and
 ## Running the daemon
 
 ```sh
-rust/target/release/vm-service
+rust/target/release/machine-service
 ```
 
 Configuration comes from the environment, or from a selected profile passed

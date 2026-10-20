@@ -1,4 +1,4 @@
-# vm-service
+# machine-service
 
 Turns this Mac's Tart installation into a **lease-based VM service for agents**.
 Agents never touch `tart` directly; they ask the service for a fresh, disposable
@@ -27,7 +27,7 @@ AGENTS.md mechanically:
 ## VNC design status
 
 - **The stock-Tart VNC replacement is deployed as part of the Rust port, but its console workflow is not yet live-accepted.** It uses guest-side sharing over SSH; it does not restore the rejected Tart patch.
-- [The revised service design](docs/design.md) includes the normal vm-service deployment and mcp-vm-relay upgrade path in the definition of completion. Source tests alone do not establish a working installed workflow.
+- [The revised service design](docs/design.md) includes the normal machine-service deployment and mcp-vm-relay upgrade path in the definition of completion. Source tests alone do not establish a working installed workflow.
 - [The acquisition contract](docs/acquisition-contract.md) and [console contract](docs/console-contract.md) describe capability discovery, `acquire --vnc`, and explicit `console-resolve`, `console-open`, and `console-cancel` operations.
 - [Installation](docs/vnc-installation.md) persists trusted viewer configuration, and [guest preparation](docs/guest-console-provisioning.md) defines the Linux X11 and macOS sharing prerequisites. A configuration check does not prove a stock-Tart boot or a displayed desktop.
 - [The mechanism investigation](docs/live-console-review.md) compares stock Tart, Linux X11 sharing, and macOS Screen Sharing, including unresolved compatibility and provisioning checks.
@@ -47,9 +47,9 @@ recoverable from this repository's history.
 
 | Path | Role |
 |------|------|
-| `rust/crates/vm-service` | Daemon binary: HTTP API on the configured bind address (loopback port 6240 by default), state in `~/.local/state/vm-service/state.json`, GC loop every 60s |
-| `rust/crates/vmctl` | CLI client (same operations as the HTTP API) |
-| `rust/crates/vm-service-core` | Lease records, Tart lifecycle, SSH access, env packs, and operations |
+| `rust/crates/machine-service` | Daemon binary: HTTP API on the configured bind address (loopback port 6240 by default), state in `~/.local/state/machine-service/state.json`, GC loop every 60s |
+| `rust/crates/machctl` | CLI client (same operations as the HTTP API) |
+| `rust/crates/machine-service-core` | Lease records, Tart lifecycle, SSH access, env packs, and operations |
 | `rust/crates/lease-keys` | Standard OpenSSH per-lease key generation, bootstrap, and safe cleanup |
 | `rust/crates/acquisition-options` | Pure option validation, configuration reporting, and discovery descriptions |
 | `rust/crates/environment` | Selected-environment profile resolution and startup ownership |
@@ -59,16 +59,16 @@ recoverable from this repository's history.
 | `rust/crates/console-worker` | Independently expiring loopback broker, SSH stream, and standard viewer launch |
 | `rust/crates/guest-console-agent` | Guest-side sharing agent, built once per guest operating system |
 | `rust/crates/runtime-launcher` | Service-owned guest launcher |
-| `rust/crates/vm-service-install` | Install/remove the launchd agent `com.wezzard.vm-service` (RunAtLoad + KeepAlive) |
+| `rust/crates/machine-service-install` | Install/remove the launchd agent `com.wezzard.machine-service` (RunAtLoad + KeepAlive) |
 | `bin/runtime-launcher.c` | C source of the service-owned guest launcher |
-| `examples/pi-subagents/vm-use.workflow.js` | Workflow: acquire → child works via vmctl → pull evidence → release in `finally` |
+| `examples/pi-subagents/vm-use.workflow.js` | Workflow: acquire → child works via machctl → pull evidence → release in `finally` |
 
 ## Selected environments
 
 For an isolated Tart store, service state, image checkout, and HTTP endpoint,
 select an explicit JSON profile with `VM_ENVIRONMENT_FILE` or
-`vmctl --environment /absolute/profile.json`. The profile overrides individual
-ambient configuration variables. `vmctl environment --json` resolves the
+`machctl --environment /absolute/profile.json`. The profile overrides individual
+ambient configuration variables. `machctl environment --json` resolves the
 configuration offline without creating state directories.
 
 See [Selected environments](docs/selected-environments.md) for the schema,
@@ -91,38 +91,38 @@ CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-musl-gcc \
   cargo build --release -p guest-console-agent --target aarch64-unknown-linux-musl
 
 # 2. Stage every executable the installer requires as a sibling.
-install -d ~/.local/libexec/vm-service
-install -m 0755 target/release/vm-service          ~/.local/libexec/vm-service/vm-service
-install -m 0755 target/release/vmctl               ~/.local/libexec/vm-service/vmctl
-install -m 0755 target/release/console-worker      ~/.local/libexec/vm-service/console-worker
-install -m 0755 target/release/vm-service-install  ~/.local/libexec/vm-service/vm-service-install
-install -m 0755 target/release/vm-service-guest-firewall ~/.local/libexec/vm-service/vm-service-guest-firewall
-install -m 0755 target/release/vm-service-dot-forwarder ~/.local/libexec/vm-service/vm-service-dot-forwarder
-install -m 0755 target/release/guest-console-agent ~/.local/libexec/vm-service/guest-console-agent
+install -d ~/.local/libexec/machine-service
+install -m 0755 target/release/machine-service         ~/.local/libexec/machine-service/machine-service
+install -m 0755 target/release/machctl                 ~/.local/libexec/machine-service/machctl
+install -m 0755 target/release/console-worker          ~/.local/libexec/machine-service/console-worker
+install -m 0755 target/release/machine-service-install ~/.local/libexec/machine-service/machine-service-install
+install -m 0755 target/release/vm-service-guest-firewall ~/.local/libexec/machine-service/vm-service-guest-firewall
+install -m 0755 target/release/vm-service-dot-forwarder ~/.local/libexec/machine-service/vm-service-dot-forwarder
+install -m 0755 target/release/guest-console-agent ~/.local/libexec/machine-service/guest-console-agent
 install -m 0755 target/aarch64-unknown-linux-musl/release/guest-console-agent \
-  ~/.local/libexec/vm-service/guest-console-agent-linux
+  ~/.local/libexec/machine-service/guest-console-agent-linux
 
 # 3. Validate, then install. Loopback only is the fresh-install default.
-~/.local/libexec/vm-service/vm-service-install --check
-~/.local/libexec/vm-service/vm-service-install install
+~/.local/libexec/machine-service/machine-service-install --check
+~/.local/libexec/machine-service/machine-service-install install
 
 # LAN-reachable (binds 0.0.0.0; required for Consul-discovered consumers on
 # other hosts). A repeated install preserves the bind address it finds.
-VM_SERVICE_HOST=0.0.0.0 ~/.local/libexec/vm-service/vm-service-install install
+MACHINE_SERVICE_HOST=0.0.0.0 ~/.local/libexec/machine-service/machine-service-install install
 
-launchctl list | grep vm-service          # health check
+launchctl list | grep machine-service     # health check
 curl -s localhost:6240/health
 ```
 
-- The installer requires `vm-service`, `vmctl`, `console-worker`,
+- The installer requires `machine-service`, `machctl`, `console-worker`,
   `guest-console-agent`, and `guest-console-agent-linux` beside itself.
   The daemon resolves its helpers relative to its own executable, and a Linux
   guest cannot execute the macOS agent build.
 - The installer refuses to install, restart, or remove while any lease record
   remains in the previous or the proposed state root, including retained failed
   or deleting records. Release the leases first.
-- The installer preserves installed environment values such as `VM_SERVICE_HOST`,
-  `VM_SERVICE_CONSOLE_CONFIG`, and the selected-environment selector, unless the
+- The installer preserves installed environment values such as `MACHINE_SERVICE_HOST`,
+  `MACHINE_SERVICE_CONSOLE_CONFIG`, and the selected-environment selector, unless the
   caller supplies an override for that setting.
 - Enabling the console for the first time requires an explicit
   `--console-config PATH` argument.
@@ -130,43 +130,73 @@ curl -s localhost:6240/health
   `launchctl`.
 - `rust/scripts/build-guest-agents.sh` builds both guest agents into
   `target/guest-agents`, but it builds them in the debug profile.
-- `vm-service-install remove` unloads the agent and deletes the plist.
+- `machine-service-install install` links `~/.local/bin/machctl` to the
+  `machctl` beside it. An existing link is replaced, and a file that is not a
+  link is left in place.
+- `machine-service-install remove` unloads the agent, deletes the plist, and
+  removes the `machctl` link it made.
+- The daemon refuses to start while any `VM_SERVICE_*` variable is set, and
+  names each one with its `MACHINE_SERVICE_*` replacement. The installer
+  refuses a caller that still exports one.
 
-Log at `/tmp/com.wezzard.vm-service.{out,err}`, service log at
-`~/.local/state/vm-service/service.log`.
+### Migrating from vm-service
+
+The service was renamed from vm-service, and its CLI from `vmctl` (DC-19,
+DC-35). Release every lease first; then `machine-service-install install`
+migrates an installed `com.wezzard.vm-service` agent in the same run:
+
+- The old agent's `VM_SERVICE_*` values are written under their
+  `MACHINE_SERVICE_*` names into `com.wezzard.machine-service`.
+- The old agent's job is unloaded and its plist removed.
+- `~/.local/state/vm-service/` moves to `~/.local/state/machine-service/` when
+  the new folder does not exist yet. It holds no lease and no lease key,
+  because the installer refuses while any lease record exists; the service log
+  moves with it.
+- `~/.config/vm-service/console.json` is copied to
+  `~/.config/machine-service/console.json` when the new file does not exist,
+  and the console variable is pointed at the copy.
+- The `~/.local/bin/vmctl` link into the old install folder is removed, and no
+  `vmctl` link is installed.
+- The old install folder `~/.local/libexec/vm-service/` is left in place for
+  the operator to delete.
+
+`--check` prints this plan without changing anything.
+
+Log at `/tmp/com.wezzard.machine-service.{out,err}`, service log at
+`~/.local/state/machine-service/service.log`.
 
 ## Guest firewall for `internet` leases
 
 An `internet` lease needs the guest firewall, a pf anchor whose table lists
 the running `internet` guests by address and keeps them off this host
 (DC-14, DC-15, [acquisition contract](docs/acquisition-contract.md#guest-network)).
-Install it once, as root, from the account that runs vm-service:
+Install it once, as root, from the account that runs machine-service:
 
 ```zsh
-sudo ~/.local/libexec/vm-service/vm-service-guest-firewall install   # --table PATH for another table file
-~/.local/libexec/vm-service/vm-service-guest-firewall status         # no root needed; lists the table's guests
-sudo ~/.local/libexec/vm-service/vm-service-guest-firewall remove
+sudo ~/.local/libexec/machine-service/vm-service-guest-firewall install   # --table PATH for another table file
+~/.local/libexec/machine-service/vm-service-guest-firewall status         # no root needed; lists the table's guests
+sudo ~/.local/libexec/machine-service/vm-service-guest-firewall remove
 ```
 
 - `install` creates the table file `/var/db/com.wezzard.vm-service/internet-guests`, owned by the account that ran `sudo`, writes `/etc/pf.anchors/com.wezzard.vm-service` and the LaunchDaemon `com.wezzard.vm-service.guest-firewall`, enables pf, and loads the anchor into `com.apple/250.vm-service`. `print` shows the anchor and the LaunchDaemon without installing them.
-- Every vm-service instance on the host writes the same table file. `VM_SERVICE_GUEST_FIREWALL_TABLE` points an instance at another one, which the anchor must read.
+- Every machine-service instance on the host writes the same table file. `MACHINE_SERVICE_GUEST_FIREWALL_TABLE` points an instance at another one, which the anchor must read.
 - Install the firewall while no `internet` lease is running, because SSH connections opened before the anchor loads have no pf state.
-- `VM_SERVICE_GUEST_DNS` sets the resolvers an `internet` guest reaches over DNS over TLS, by default `1.1.1.1#cloudflare-dns.com,8.8.8.8#dns.google`.
-- A macOS `internet` guest needs `vm-service-dot-forwarder` beside vm-service, or `VM_SERVICE_DOT_FORWARDER`; the host-native build runs in a macOS guest.
-- `VM_SERVICE_GUEST_FIREWALL_ANCHOR` points the service at another anchor file, as the test fixtures do.
+- `MACHINE_SERVICE_GUEST_DNS` sets the resolvers an `internet` guest reaches over DNS over TLS, by default `1.1.1.1#cloudflare-dns.com,8.8.8.8#dns.google`.
+- A macOS `internet` guest needs `vm-service-dot-forwarder` beside machine-service, or `MACHINE_SERVICE_DOT_FORWARDER`; the host-native build runs in a macOS guest.
+- `MACHINE_SERVICE_GUEST_FIREWALL_ANCHOR` points the service at another anchor file, as the test fixtures do.
 
 ## Consul discovery
 
 On machines running the home Consul agent + service-catalog registrar, drop a
-description at `~/.config/service-catalog/services/vm-service.json` (see the
+description at `~/.config/service-catalog/services/machine-service.json` (see the
 service-catalog repo; the file used on this Mac is in this repo at
-`services/vm-service.json`). The registrar then keeps this in Consul:
+`services/machine-service.json`). The registrar then keeps this in Consul:
 
-- service `vm-service`, tags `vm tart disposable-infra agents`, address = this
+- service `machine-service`, tags `vm tart disposable-infra agents`, address = this
   machine's LAN IP, port 6240, `loopback_only: false` when bound to `0.0.0.0`.
 - HTTP health check `GET /health` every 30 s.
-- DNS: `dig @<consul> -p 8600 vm-service.service.home.consul A +short`
-- HTTP: `GET /v1/health/service/vm-service?passing=true` on the agent (8500).
+- DNS: `dig @<consul> -p 8600 machine-service.service.home.consul A +short`
+- HTTP: `GET /v1/health/service/machine-service?passing=true` on the agent (8500).
 
 The API itself has no authentication — LAN exposure assumes the household
 trust model (same as the LLM gateway). Keep the loopback-only bind where that
@@ -177,18 +207,24 @@ model does not hold.
 ```
 GET  /health
 GET  /acquisition-capabilities
-GET  /vms
-GET  /vms/<name>
+GET  /machines
+GET  /machines/<name>
 POST /acquire                {"purpose":"my-task","image":"macos26","env":"default","ttl_hours":4}
-POST /vms/<name>/exec        {"argv":["uname","-a"]}  or  {"script":"echo hi"}
-POST /vms/<name>/push        {"local_path":"/host/f","remote_path":"/tmp/f"}
-POST /vms/<name>/pull        {"remote_path":"/tmp/f","local_path":"/host/f"}
-POST /vms/<name>/heartbeat   {"ttl_hours":4}
-POST /vms/<name>/release     {"reason":"done"}
+POST /machines/<name>/exec        {"argv":["uname","-a"]}  or  {"script":"echo hi"}
+POST /machines/<name>/push        {"local_path":"/host/f","remote_path":"/tmp/f"}
+POST /machines/<name>/pull        {"remote_path":"/tmp/f","local_path":"/host/f"}
+POST /machines/<name>/heartbeat   {"ttl_hours":4}
+POST /machines/<name>/release     {"reason":"done"}
 POST /gc
 ```
 
 Errors are JSON `{"error": "..."}` with status 400/409/500.
+
+- `GET /machines` lists the leases under its top-level `machines` key. Each
+  lease record keeps its fields, including `vm`.
+- Every `/vms` and `/vms/<name>/...` path was removed. It answers HTTP 410 Gone
+  with an error naming the `/machines` path that replaces it, and a
+  `replacement` field carrying that path. No operation runs (DC-37).
 
 ## Application catalog
 
@@ -260,7 +296,7 @@ shared daemon; restart remains an explicit operator action.
 
 ### Execution timeout
 
-- `POST /vms/<name>/exec` accepts a positive `timeout` in seconds and defaults to
+- `POST /machines/<name>/exec` accepts a positive `timeout` in seconds and defaults to
   600 seconds. The daemon forwards the requested value to the SSH subprocess
   without imposing a shorter deadline.
 - A receiver running a command for up to 3600 seconds must include its capture
@@ -284,25 +320,25 @@ shared daemon; restart remains an explicit operator action.
 - The image maintenance lock must remain held by the maintainer throughout work acceptance and promotion. This is not authorization to run builds or restart the production daemon automatically.
 
 ```sh
-vmctl acquire --purpose acceptance-example --image ubuntu2404 --source work --env none \
+machctl acquire --purpose acceptance-example --image ubuntu2404 --source work --env none \
   --expected-source-fingerprint /path/to/work-fingerprint.json
 ```
 
 ## CLI
 
 ```zsh
-vmctl acquire --purpose build-test --image macos26 --ttl-hours 4
-vmctl list
-vmctl exec pilot-mac-build-test-<id> -- swift --version
-vmctl push  <vm> ./artifact.zip /tmp/artifact.zip
-vmctl pull  <vm> /tmp/build.log ./build.log
-vmctl heartbeat <vm>            # call periodically for long tasks
-vmctl release <vm>
+machctl acquire --purpose build-test --image macos26 --ttl-hours 4
+machctl list
+machctl exec pilot-mac-build-test-<id> -- swift --version
+machctl push  <vm> ./artifact.zip /tmp/artifact.zip
+machctl pull  <vm> /tmp/build.log ./build.log
+machctl heartbeat <vm>            # call periodically for long tasks
+machctl release <vm>
 ```
 
-(Symlink `vmctl` onto PATH, for example as `~/.local/bin/vmctl` →
-`~/.local/libexec/vm-service/vmctl`, if you want it unqualified. launchd starts
-the daemon, so `vm-service` does not need to be on PATH.)
+(The installer links `~/.local/bin/machctl` to
+`~/.local/libexec/machine-service/machctl`. launchd starts the daemon, so
+`machine-service` does not need to be on PATH.)
 
 ## acquire semantics
 
@@ -320,7 +356,7 @@ the daemon, so `vm-service` does not need to be on PATH.)
   Cloning a 200 GB-provisioned macOS base takes minutes; allow a ≥10-minute
   client timeout.
 - `ttl_hours` (default 24, cap 720): lease lifetime. Long jobs must heartbeat.
-- `POST /vms/<name>/heartbeat` renews the TTL from now and clears any grace
+- `POST /machines/<name>/heartbeat` renews the TTL from now and clears any grace
   state. With `ttl_hours` it renews for that many hours; without it, the lease
   is renewed for its own initial `ttl_hours`. The recorded initial TTL is not
   changed.
@@ -350,10 +386,10 @@ agent fails, and requires evidence to be pulled to `/var/tmp/` before teardown.
 
 ## State & files
 
-- `~/.local/state/vm-service/state.json` — all leases
-- `~/.local/state/vm-service/state.lock` — cross-process flock
-- `~/.local/state/vm-service/service.log` — daemon log
-- `~/.local/state/vm-service/ssh/<vm>/` — private per-lease identity and known_hosts;
+- `~/.local/state/machine-service/state.json` — all leases
+- `~/.local/state/machine-service/state.lock` — cross-process flock
+- `~/.local/state/machine-service/service.log` — daemon log
+- `~/.local/state/machine-service/ssh/<vm>/` — private per-lease identity and known_hosts;
   never copy this directory into public reports or guest workspaces
 - `/tmp/tart-run-<vm>.log` — per-VM console log (same convention as pilot-images)
 

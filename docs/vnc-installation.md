@@ -2,7 +2,7 @@
 
 ## Scope and current verification boundary
 
-vm-service uses an **unmodified upstream Tart installation** for VM lifecycle operations. It does not compile Tart, patch a binary, inject framework code, or select Tart's experimental host-side VNC server. Console sharing attaches to the existing guest desktop through the lease's authenticated SSH connection.
+machine-service uses an **unmodified upstream Tart installation** for VM lifecycle operations. It does not compile Tart, patch a binary, inject framework code, or select Tart's experimental host-side VNC server. Console sharing attaches to the existing guest desktop through the lease's authenticated SSH connection.
 
 The installer validates host configuration and runs only `tart --version` against the selected runtime. A version string is not proof of upstream provenance, a successful headless boot, a prepared guest image, an authenticated viewer, or displayed pixels. Install Tart from its upstream distribution and retain its provenance separately. The previously observed stock Tart 2.32.1 headless stall on the tested prerelease macOS host remains a compatibility concern; this installation procedure does not claim to resolve it.
 
@@ -13,8 +13,8 @@ Console viewing is initially disabled. Configuration enables the service-side pa
 The service loads configuration once at startup, using this precedence:
 
 1. An explicit `load_config(path)` argument selects that file.
-2. `VM_SERVICE_CONSOLE_CONFIG` selects a persistent file for the service.
-3. Otherwise, the service reads `~/.config/vm-service/console.json` if it exists.
+2. `MACHINE_SERVICE_CONSOLE_CONFIG` selects a persistent file for the service.
+3. Otherwise, the service reads `~/.config/machine-service/console.json` if it exists.
 
 An absent default file means disabled support. An explicitly selected missing file or any invalid file is an error, not permission to fall back. Discovery uses the startup snapshot; it does not read configuration again, run a viewer, inspect a guest, or create a lease. Restart is required after configuration changes.
 
@@ -52,15 +52,15 @@ The Linux adapter expects TurboVNC's supported private standard-input password i
 
 ## Check and install
 
-Run the installer binary from the staging directory that holds the service executables beside it, which is `~/.local/libexec/vm-service/vm-service-install` in the example deployment. Its service and helper paths are relative to the binary itself, so it does not depend on a hard-coded developer checkout.
+Run the installer binary from the staging directory that holds the service executables beside it, which is `~/.local/libexec/machine-service/machine-service-install` in the example deployment. Its service and helper paths are relative to the binary itself, so it does not depend on a hard-coded developer checkout.
 
 First, create and protect the configuration at its intended permanent location. The installer consumes the existing file; it does not generate credentials, rewrite the file, or modify golden images. Initial enablement requires an explicit `--console-config PATH` argument, including when an enabled file already exists at the default location.
 
 Validate before changing launchd:
 
 ```sh
-~/.local/libexec/vm-service/vm-service-install --check \
-  --console-config "$HOME/.config/vm-service/console.json"
+~/.local/libexec/machine-service/machine-service-install --check \
+  --console-config "$HOME/.config/machine-service/console.json"
 ```
 
 `--dry-run` has the same behavior as `--check`. These modes read configuration and service state, validate the presence and executability of the sibling service executables (including `console-worker`, `guest-console-agent`, and `guest-console-agent-linux`), and run `tart --version`. They do not write a plist, create service state directories, call launchctl, boot a VM, launch a viewer, or restart a service. An installed selected-environment profile is resolved read-only. A successful check reports host configuration only.
@@ -68,8 +68,8 @@ Validate before changing launchd:
 After the existing leases have been released and a real deployment has been authorized, install with:
 
 ```sh
-~/.local/libexec/vm-service/vm-service-install \
-  --console-config "$HOME/.config/vm-service/console.json"
+~/.local/libexec/machine-service/machine-service-install \
+  --console-config "$HOME/.config/machine-service/console.json"
 ```
 
 The installer persists the selected path in the LaunchAgent's `EnvironmentVariables` using a plist serializer. Spaces, ampersands, and other XML characters are not interpolated into shell commands or raw XML. The installer does not copy the caller's complete shell environment into launchd.
@@ -77,11 +77,11 @@ The installer persists the selected path in the LaunchAgent's `EnvironmentVariab
 Existing no-flag operations remain available:
 
 ```sh
-~/.local/libexec/vm-service/vm-service-install
-~/.local/libexec/vm-service/vm-service-install remove
+~/.local/libexec/machine-service/machine-service-install
+~/.local/libexec/machine-service/machine-service-install remove
 ```
 
-A fresh ordinary installation keeps console support disabled unless an enabled configuration is explicitly selected. An upgrade preserves the installed configuration selector, bind address, service port, selected environment, state roots, and other installed environment values unless the caller supplies a service-setting override. The installer launches the service executable directly and does not select an interpreter, so `VM_SERVICE_PYTHON` no longer exists. The fresh-install bind default remains `127.0.0.1`.
+A fresh ordinary installation keeps console support disabled unless an enabled configuration is explicitly selected. An upgrade preserves the installed configuration selector, bind address, service port, selected environment, state roots, and other installed environment values unless the caller supplies a service-setting override. The installer launches the service executable directly and does not select an interpreter, so the former `VM_SERVICE_PYTHON` interpreter setting no longer exists. The fresh-install bind default remains `127.0.0.1`.
 
 The installer checks both the previous and proposed service state roots. It refuses installation, restart, or removal while any lease record remains, including failed or deleting records that may still own resources. It never stops a VM to make installation pass. The final check and restart hold the service state lock to prevent a pending acquisition from being added between them. Before changing the plist, the installer queries the actual launchctl job in both the user's GUI and user domains and verifies that the reported job belongs to the installed plist. Unknown job state or ambiguous ownership is a refusal, not an assumption that the service stopped.
 

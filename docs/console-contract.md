@@ -29,7 +29,7 @@
 ### Resolve
 
 ```http
-POST /vms/<vm>/console/resolve
+POST /machines/<vm>/console/resolve
 Content-Type: application/json
 
 {"lease_id":"<lease_id>"}
@@ -43,7 +43,7 @@ Content-Type: application/json
 ### Open
 
 ```http
-POST /vms/<vm>/console/open
+POST /machines/<vm>/console/open
 Content-Type: application/json
 
 {"lease_id":"<lease_id>","console_id":"<console_id>","attempt_id":"watch-1"}
@@ -59,7 +59,7 @@ Content-Type: application/json
 ### Cancel
 
 ```http
-POST /vms/<vm>/console/cancel
+POST /machines/<vm>/console/cancel
 Content-Type: application/json
 
 {"lease_id":"<lease_id>","console_id":"<console_id>","attempt_id":"watch-1"}

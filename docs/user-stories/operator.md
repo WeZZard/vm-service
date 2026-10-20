@@ -4,7 +4,7 @@ The human operator (WeZZard) who installs the service, keeps it healthy, trouble
 
 ## US11 — Drive the service from a CLI
 
-**As an** operator, **I want** a `vmctl` command for every HTTP operation, **so that** I can inspect and manage leases without hand-crafting HTTP.
+**As an** operator, **I want** a `machctl` command for every HTTP operation, **so that** I can inspect and manage leases without hand-crafting HTTP.
 
 - `acquire`, `wait --timeout-s`, `list [--json]`, `images [--json]`, `images-show`, `status`, `exec`, `push`, `pull`, `heartbeat`, `release`, `gc`.
 - Flags mirror the API: `--image`, `--env`, `--ttl-hours`, `--no-wait`; old `--line`/`--pack` flags still parse (hidden aliases).
@@ -27,8 +27,8 @@ The human operator (WeZZard) who installs the service, keeps it healthy, trouble
 **As an** operator, **I want** visibility into leases, capacity, and files, **so that** I can troubleshoot and verify the doctrines hold.
 
 - `GET /vms`, `GET /vms/<name>`, `GET /images`, `GET /health`.
-- State at `~/.local/state/vm-service/` (`state.json`, `state.lock`, `service.log`); per-VM console logs at `/tmp/tart-run-<vm>.log`.
-- The install script manages the `com.wezzard.vm-service` LaunchAgent; restart with `launchctl kickstart -k gui/$UID/com.wezzard.vm-service`.
+- State at `~/.local/state/machine-service/` (`state.json`, `state.lock`, `service.log`); per-VM console logs at `/tmp/tart-run-<vm>.log`.
+- The install script manages the `com.wezzard.machine-service` LaunchAgent; restart with `launchctl kickstart -k gui/$UID/com.wezzard.machine-service`.
 
 **Tests:** `TestImagesSnapshot` (unit capacity reporting), `TestSnapshots` (integration, live daemon over HTTP), `TestStateMigration` (unit, state file shape).
 

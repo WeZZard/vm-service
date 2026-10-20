@@ -10,7 +10,7 @@ remain the interface used by agents; no new guest daemon or SSH framework is
 introduced.
 
 Implementation: the `lease-keys` crate contains the provisioning and
-file-permission helpers; the `vm-service` daemon invokes native `ssh` and `scp`
+file-permission helpers; the `machine-service` daemon invokes native `ssh` and `scp`
 using the lease identity.
 There is deliberately no automatic replay of arbitrary guest commands.
 
