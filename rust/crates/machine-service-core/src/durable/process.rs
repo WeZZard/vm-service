@@ -8,7 +8,9 @@
 //! - belongs to a process session the lease started, or descends from a
 //!   member of one (`session`, `descendant`), or
 //! - carries `MACHINE_SERVICE_LEASE_ID` with this lease's ID in the
-//!   environment it was started with (`environment`).
+//!   environment it was started with (`environment`), or
+//! - is a regular application the lease launched (`application`, see
+//!   `apps.rs`).
 //!
 //! macOS 27 no longer lets a process read another process's start-up
 //! environment (`KERN_PROCARGS2` answers the arguments only, and `ps eww`
@@ -297,6 +299,8 @@ pub enum Rule {
     Descendant,
     /// Its start-up environment carries this lease's ID.
     Environment,
+    /// It is a regular application the lease launched (DC-73).
+    Application,
 }
 
 impl Rule {
@@ -306,6 +310,7 @@ impl Rule {
             Rule::Session => "session",
             Rule::Descendant => "descendant",
             Rule::Environment => "environment",
+            Rule::Application => "application",
         }
     }
 }
@@ -493,6 +498,18 @@ fn ancestors<'a>(
     })
 }
 
+/// The exclusion that protects `info` in `table`, if any (HY-3): the
+/// application rule applies the same exclusions as the others.
+pub fn excluded(
+    info: &ProcessInfo,
+    table: &[ProcessInfo],
+    context: &SweepContext,
+    arguments: &dyn Fn(i32) -> Option<Arguments>,
+) -> Option<Spared> {
+    let by_pid: HashMap<i32, &ProcessInfo> = table.iter().map(|info| (info.pid, info)).collect();
+    exclusion(info, &by_pid, context, arguments)
+}
+
 /// The exclusion that protects a process, if any (HY-3).
 fn exclusion(
     info: &ProcessInfo,
@@ -626,7 +643,7 @@ impl Ended {
 
 /// Whether `info` still names a living process: same PID, same start time,
 /// same user, not a zombie.
-fn still_alive(info: &ProcessInfo) -> bool {
+pub fn still_alive(info: &ProcessInfo) -> bool {
     process_info(info.pid)
         .is_some_and(|now| now.start == info.start && now.uid == info.uid && !now.zombie)
 }

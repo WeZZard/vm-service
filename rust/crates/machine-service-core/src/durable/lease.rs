@@ -148,6 +148,29 @@ impl DurableMachine {
         self.config.lease_dir(lease_id).join("sessions.json")
     }
 
+    fn ci_file(&self, lease_id: &str) -> PathBuf {
+        self.config.lease_dir(lease_id).join("ci-busy.json")
+    }
+
+    /// Sample whether a CI job runs now and fold it into the lease's busy
+    /// intervals (HY-5, DC-75). A sample that cannot be stored is logged;
+    /// hygiene never refuses (HY-1).
+    fn sample_ci(&self, lease_id: &str, now: f64) -> Value {
+        let path = self.ci_file(lease_id);
+        let state = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+            .unwrap_or(Value::Null);
+        let busy = super::capabilities::ci_runner(&self.config.ci_root, self.config.uid)["busy"]
+            .as_bool()
+            .unwrap_or(false);
+        let next = ci_sample(&state, busy, now);
+        if let Err(error) = Self::write_json(&path, &next) {
+            self.log(&format!("WARN: durable lease {lease_id}: {error}"));
+        }
+        next
+    }
+
     fn current_id(&self) -> Option<String> {
         let text = std::fs::read_to_string(self.current_file()).ok()?;
         let value: Value = serde_json::from_str(&text).ok()?;
@@ -294,6 +317,7 @@ impl DurableMachine {
             "configuration": null,
             "workspace": field("workspace"),
             "agents": field("agents"),
+            "warnings": super::capabilities::warnings(&capabilities, self.config.disk_warn_bytes),
             "capabilities": capabilities,
         });
         if let Some(reason) = unavailable {
@@ -537,6 +561,8 @@ impl DurableMachine {
             .map_err(|_| "durable state poisoned".to_string())?;
         record["state"] = json!("leased");
         self.write_record(&record)?;
+        // The first CI sample (HY-5); it touches only its own file.
+        self.sample_ci(&lease_id, unix_now());
         if let Ok(mut runtime) = self.runtime.lock() {
             *runtime = Some(Runtime {
                 lease_id,
@@ -960,16 +986,45 @@ impl DurableMachine {
         let table = process::process_table(Some(self.config.uid));
         let members = process::session_members(&table, &context, &process::process_arguments);
         let mut verdict = process::classify(&table, &context, &process::process_arguments);
+        // The applications the lease launched, from the same moment (HY-3,
+        // DC-73). Without a reading of the running applications none is
+        // matched: the rule never guesses.
+        let before_inventory = std::fs::read_to_string(lease_dir.join("inventory-before.json"))
+            .ok()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok());
+        let running = inventory::running_applications(self.config.fact_timeout)
+            .ok()
+            .and_then(|value| value.as_array().cloned())
+            .unwrap_or_default();
+        let mut jobs = super::apps::JobReader::new(self.config.uid);
+        let (apps, apps_spared) = super::apps::leftovers(
+            &table,
+            &running,
+            &super::apps::inventory_pids(before_inventory.as_ref()),
+            &context,
+            &mut |pid| jobs.lease_of(pid),
+            &process::process_arguments,
+        );
         let stopped = process::terminate(&members.matched, self.config.stop_grace);
 
         // 2. The leftover sweep (HY-3): what the snapshot matched beyond the
         // sessions, then whatever a second look still finds.
         let member_pids: std::collections::HashSet<i32> =
             members.matched.iter().map(|item| item.info.pid).collect();
-        verdict
-            .matched
-            .retain(|item| !member_pids.contains(&item.info.pid));
-        let mut swept = process::terminate(&verdict.matched, self.config.stop_grace);
+        let apps: Vec<process::Matched> = apps
+            .into_iter()
+            .filter(|app| !member_pids.contains(&app.info.pid))
+            .collect();
+        let app_pids: std::collections::HashSet<i32> =
+            apps.iter().map(|app| app.info.pid).collect();
+        verdict.matched.retain(|item| {
+            !member_pids.contains(&item.info.pid) && !app_pids.contains(&item.info.pid)
+        });
+        // Applications are asked to quit first, then the other leftovers
+        // get SIGTERM and SIGKILL (HY-3).
+        let mut swept = super::apps::end(&apps, self.config.stop_grace);
+        swept.extend(process::terminate(&verdict.matched, self.config.stop_grace));
+        verdict.spared.extend(apps_spared);
         let handled: std::collections::HashSet<i32> = member_pids
             .iter()
             .copied()
@@ -1063,6 +1118,9 @@ impl DurableMachine {
         };
 
         let released_at = unix_now();
+        // The last sample, then any interval still open ends at release
+        // (HY-5, DC-75).
+        let ci = ci_close(&self.sample_ci(&lease_id, released_at), released_at);
         let hygiene = json!({
             "lease_id": lease_id,
             "name": name,
@@ -1079,7 +1137,8 @@ impl DurableMachine {
             },
             "changes": changes,
             "workspace": workspace_report,
-            "ci_busy_intervals": null,
+            "ci_busy_intervals": ci["intervals"],
+            "ci_sampling": {"interval_s": ci["interval_s"], "samples": ci["samples"]},
             "failures": failures,
         });
         let hygiene_path = lease_dir.join("hygiene.json");
@@ -1192,6 +1251,11 @@ impl DurableMachine {
         let now = unix_now();
         if let Some(mut record) = self.current_record() {
             let state = record["state"].as_str().unwrap_or_default().to_string();
+            if state == "leased" {
+                if let Some(lease_id) = record["lease_id"].as_str() {
+                    self.sample_ci(lease_id, now);
+                }
+            }
             let ttl = record["ttl_expires_at"].as_f64().unwrap_or(f64::INFINITY);
             if state == "releasing" {
                 self.log(&format!(
@@ -1414,6 +1478,44 @@ fn remove_tree(path: &Path) -> Result<(), String> {
 /// destination receives the source under its own name. Returns the final
 /// path, the bytes moved and their SHA-256 (a file's digest, or a folder's
 /// digest over its sorted relative paths and file digests).
+/// Fold one CI sample into the busy intervals (HY-5, DC-75): a busy
+/// sample opens an interval when none is open; an idle one closes the open
+/// interval at its own time. A job that starts and ends between two samples
+/// is not seen, so the record says how often it looked.
+pub fn ci_sample(state: &Value, busy: bool, now: f64) -> Value {
+    let mut intervals: Vec<Value> = state["intervals"].as_array().cloned().unwrap_or_default();
+    let open = intervals
+        .last()
+        .is_some_and(|interval| interval["to"].is_null());
+    if busy && !open {
+        intervals.push(json!({"from": now, "to": null}));
+    } else if !busy && open {
+        if let Some(last) = intervals.last_mut() {
+            last["to"] = json!(now);
+        }
+    }
+    json!({
+        "interval_s": crate::GC_INTERVAL_S,
+        "samples": state["samples"].as_u64().unwrap_or(0) + 1,
+        "last_sample": now,
+        "intervals": intervals,
+    })
+}
+
+/// Close an interval still open at `at`, the end of the lease.
+pub fn ci_close(state: &Value, at: f64) -> Value {
+    let mut state = state.clone();
+    if let Some(last) = state["intervals"]
+        .as_array_mut()
+        .and_then(|intervals| intervals.last_mut())
+    {
+        if last["to"].is_null() {
+            last["to"] = json!(at);
+        }
+    }
+    state
+}
+
 pub fn copy_into_place(
     source: &Path,
     destination: &Path,
@@ -1601,6 +1703,26 @@ fn format_gmtime(seconds: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hy5_ci_busy_intervals() {
+        let state = ci_sample(&Value::Null, false, 100.0);
+        let state = ci_sample(&state, true, 160.0);
+        let state = ci_sample(&state, true, 220.0);
+        let state = ci_sample(&state, false, 280.0);
+        let state = ci_sample(&state, true, 340.0);
+        assert_eq!(state["samples"], 5);
+        assert_eq!(
+            state["intervals"],
+            json!([{"from": 160.0, "to": 280.0}, {"from": 340.0, "to": null}])
+        );
+        let closed = ci_close(&state, 400.0);
+        assert_eq!(closed["intervals"][1], json!({"from": 340.0, "to": 400.0}));
+        assert_eq!(
+            ci_close(&ci_sample(&Value::Null, false, 1.0), 2.0)["intervals"],
+            json!([])
+        );
+    }
 
     #[test]
     fn lease_ids_and_purposes() {

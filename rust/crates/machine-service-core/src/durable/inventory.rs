@@ -6,12 +6,16 @@
 //! missing with its reason and the others are kept. An inventory never
 //! refuses or blocks a lease (HY-1).
 //!
-//! This first cut records the user's processes, the running regular
-//! applications, the installed applications, the launchd jobs, the Homebrew
-//! formulae and the casks (two parts), the top-level entries of the home folder,
-//! `~/Library/Application Support` and `~/Library/Preferences`, and the free
-//! disk space. Global npm packages and the crontab come with the rest of
-//! HY-4.
+//! The parts are the user's processes, the running regular applications,
+//! the installed applications, the launchd jobs, the Homebrew formulae and
+//! the casks (two parts), the global npm packages, the crontab, the
+//! top-level entries of the home folder, `~/Library/Application Support`
+//! and `~/Library/Preferences`, and the free disk space.
+//!
+//! The crontab is recorded without its commands' arguments (DC-74): an
+//! entry is its schedule, its program and the SHA-256 of the whole line, so
+//! a change shows and a token written into a crontab line never reaches a
+//! hygiene record that any LAN client can read.
 
 use std::collections::{BTreeMap, HashSet};
 use std::os::unix::fs::MetadataExt;
@@ -120,6 +124,13 @@ pub fn standard_parts(context: &Context, software: Option<Value>) -> Vec<Part> {
         Box::new(move || homebrew(&ctx, "--cask")),
     ));
     let ctx = context.clone();
+    parts.push((
+        "npm_globals".to_string(),
+        Box::new(move || npm_globals(&ctx)),
+    ));
+    let ctx = context.clone();
+    parts.push(("crontab".to_string(), Box::new(move || crontab(&ctx))));
+    let ctx = context.clone();
     parts.push(("folders".to_string(), Box::new(move || Ok(folders(&ctx)))));
     parts.push((
         "disk".to_string(),
@@ -158,7 +169,7 @@ fn processes(context: &Context) -> Value {
 
 /// The running regular applications, those with a Dock presence, from
 /// `lsappinfo`.
-fn running_applications(timeout: Duration) -> Result<Value, String> {
+pub fn running_applications(timeout: Duration) -> Result<Value, String> {
     let mut command = Command::new("/usr/bin/lsappinfo");
     command.arg("list");
     let output = crate::proc::run_capture(&mut command, None, timeout)
@@ -374,6 +385,101 @@ fn homebrew(context: &Context, kind: &str) -> Result<Value, String> {
     Ok(Value::Object(out))
 }
 
+/// The global npm packages, `{name: version}`, from the session's `npm`.
+fn npm_globals(context: &Context) -> Result<Value, String> {
+    let npm = which("npm", context.env.get("PATH"))
+        .ok_or_else(|| "npm not found on the session PATH".to_string())?;
+    let mut command = Command::new(&npm);
+    command
+        .args(["ls", "--global", "--depth=0", "--json"])
+        .env_clear()
+        .envs(&context.env)
+        .env("NO_UPDATE_NOTIFIER", "1")
+        .env("npm_config_update_notifier", "false")
+        .current_dir(&context.home);
+    let output = crate::proc::run_capture(&mut command, None, context.timeout)
+        .map_err(|error| format!("npm ls --global: {error}"))?;
+    // `npm ls` exits non-zero for a problem in the tree and still answers.
+    parse_npm_globals(&String::from_utf8_lossy(&output.stdout)).ok_or_else(|| {
+        format!(
+            "npm ls --global exited with {} and no JSON",
+            output.status.code().unwrap_or(-1)
+        )
+    })
+}
+
+/// Parse `npm ls --global --depth=0 --json` into `{name: version}`.
+pub fn parse_npm_globals(text: &str) -> Option<Value> {
+    let parsed: Value = serde_json::from_str(text).ok()?;
+    let mut out = Map::new();
+    if let Some(dependencies) = parsed.get("dependencies").and_then(Value::as_object) {
+        for (name, entry) in dependencies {
+            out.insert(
+                name.clone(),
+                entry.get("version").cloned().unwrap_or(Value::Null),
+            );
+        }
+    }
+    Some(Value::Object(out))
+}
+
+/// The user's crontab, one entry per line (DC-74).
+fn crontab(context: &Context) -> Result<Value, String> {
+    let mut command = Command::new("/usr/bin/crontab");
+    command
+        .arg("-l")
+        .env_clear()
+        .envs(&context.env)
+        .current_dir(&context.home);
+    let output = crate::proc::run_capture(&mut command, None, context.timeout)
+        .map_err(|error| format!("crontab -l: {error}"))?;
+    if !output.status.success() {
+        let reason = String::from_utf8_lossy(&output.stderr).to_string();
+        if reason.contains("no crontab for") {
+            return Ok(json!({}));
+        }
+        return Err(format!(
+            "crontab -l exited with {}: {}",
+            output.status.code().unwrap_or(-1),
+            reason.lines().next().unwrap_or_default()
+        ));
+    }
+    Ok(parse_crontab(&String::from_utf8_lossy(&output.stdout)))
+}
+
+/// Parse a crontab into `{sha256: {schedule, program}}`: comments, blank
+/// lines and variable settings are left out, and no argument is kept.
+pub fn parse_crontab(text: &str) -> Value {
+    use sha2::{Digest, Sha256};
+    let mut out = Map::new();
+    for line in text.lines().map(str::trim) {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let words: Vec<&str> = line.split_whitespace().collect();
+        let first = words.first().copied().unwrap_or_default();
+        if !first.starts_with('@') && first.contains('=') {
+            continue;
+        }
+        let fields = if first.starts_with('@') { 1 } else { 5 };
+        if words.len() <= fields {
+            continue;
+        }
+        let digest: String = Sha256::digest(line.as_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        out.insert(
+            digest,
+            json!({
+                "schedule": words[..fields].join(" "),
+                "program": words[fields],
+            }),
+        );
+    }
+    Value::Object(out)
+}
+
 /// Compare two inventories into `changes.json` (HY-4). CI-runner processes
 /// keep their `origin` so a client does not attribute them to the lease.
 pub fn diff(before: &Value, after: &Value) -> Value {
@@ -460,6 +566,35 @@ fn map_diff(old: &Value, new: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// HY-4 (TL-1): global npm packages by name and version; a crontab by
+    /// schedule and program, with no argument and no variable kept.
+    #[test]
+    fn hy4_npm_and_crontab_parts() {
+        let npm = parse_npm_globals(
+            r#"{"name": "lib", "dependencies": {"@openai/codex": {"version": "0.154.0"}, "npm": {"version": "11.6.2"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(npm["@openai/codex"], "0.154.0");
+        assert_eq!(npm["npm"], "11.6.2");
+        assert_eq!(parse_npm_globals("{}").unwrap(), json!({}));
+        assert!(parse_npm_globals("not json").is_none());
+
+        let crontab = parse_crontab(
+            "# comment\nTOKEN=secret-value\n*/5 * * * * /usr/local/bin/backup --token secret-arg\n@reboot /bin/echo hi\n\n",
+        );
+        let entries: Vec<&Value> = crontab.as_object().unwrap().values().collect();
+        assert_eq!(entries.len(), 2);
+        let text = crontab.to_string();
+        assert!(!text.contains("secret"), "{text}");
+        assert!(entries
+            .iter()
+            .any(|entry| entry["schedule"] == "*/5 * * * *"
+                && entry["program"] == "/usr/local/bin/backup"));
+        assert!(entries
+            .iter()
+            .any(|entry| entry["schedule"] == "@reboot" && entry["program"] == "/bin/echo"));
+    }
 
     /// AC-31 (TL-1): a part that times out is recorded as missing with its
     /// reason, and the other parts are kept.
