@@ -1,4 +1,4 @@
-//! Read-only snapshots for `GET /vms` and `GET /images`.
+//! Read-only snapshots for `GET /machines` and `GET /images`.
 
 use serde_json::{json, Map, Value};
 
@@ -7,7 +7,8 @@ use crate::error::{OpError, OpResult};
 use crate::ops::{GRACE_HOURS, MAX_MACOS_RUNNING};
 use crate::service::Service;
 
-/// Build the `GET /vms` body.
+/// Build the `GET /machines` body. The lease set is under `machines`; the
+/// state file keeps its own `vms` key.
 pub fn snapshot(service: &Service) -> OpResult<Value> {
     let data = service.state.read()?;
     let now = unix_now();
@@ -71,7 +72,7 @@ pub fn snapshot(service: &Service) -> OpResult<Value> {
         }
     }
     Ok(json!({
-        "vms": vms,
+        "machines": vms,
         "limits": {"max_macos_running": MAX_MACOS_RUNNING, "grace_hours": GRACE_HOURS},
         "pilot_repo": service.config.pilot.to_string_lossy(),
         "port": service.config.port,

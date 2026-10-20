@@ -224,7 +224,7 @@ fn release_during(route: &str, body: Value) -> (common::Response, String) {
     let vm = response.body["vm"].as_str().expect("vm").to_string();
 
     let port = fixture.port();
-    let path = format!("/vms/{vm}/{route}");
+    let path = format!("/machines/{vm}/{route}");
     let operation = std::thread::spawn(move || {
         common::http_timeout(
             port,
@@ -256,7 +256,7 @@ fn release_during(route: &str, body: Value) -> (common::Response, String) {
     let released = common::try_http_timeout(
         port,
         "POST",
-        &format!("/vms/{vm}/release"),
+        &format!("/machines/{vm}/release"),
         Some(&json!({})),
         None,
         Duration::from_secs(10),

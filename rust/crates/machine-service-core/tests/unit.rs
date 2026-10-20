@@ -143,7 +143,7 @@ fn test_ttl_bounds() {
         .expect("0.1h is accepted");
     let vm = rec["vm"].as_str().expect("vm name").to_string();
     let snap = fixture.snapshot();
-    let remaining = snap["vms"][vm.as_str()]["ttl_hours_remaining"]
+    let remaining = snap["machines"][vm.as_str()]["ttl_hours_remaining"]
         .as_f64()
         .expect("ttl_hours_remaining");
     assert!(remaining <= 0.11, "remaining={remaining}");
@@ -1479,7 +1479,7 @@ fn test_internet_lease_boots_on_softnet_and_reports_its_network() {
         ]
     );
     assert_eq!(fixture.read_state()[&vm]["network"], json!("internet"));
-    assert_eq!(fixture.snapshot()["vms"][&vm]["network"], json!("internet"));
+    assert_eq!(fixture.snapshot()["machines"][&vm]["network"], json!("internet"));
     // The host still reaches an internet guest over its lease key.
     let out = fixture
         .service

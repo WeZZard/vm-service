@@ -107,7 +107,7 @@ impl LocalGuest {
 
     fn post(&self, vm: &str, route: &str, body: Value) -> Response {
         self.fixture
-            .request("POST", &format!("/vms/{vm}/{route}"), Some(&body))
+            .request("POST", &format!("/machines/{vm}/{route}"), Some(&body))
     }
 
     fn exec(&self, vm: &str, body: Value) -> Response {
@@ -421,7 +421,7 @@ fn release_stops_the_running_command_and_the_agent() {
     let unique = format!("600.{}", std::process::id());
     let sleeper = format!("sleep {unique}");
     let port = daemon.port();
-    let path = format!("/vms/{vm}/exec");
+    let path = format!("/machines/{vm}/exec");
     let body = json!({"argv": ["sleep", unique]});
     let running = std::thread::spawn(move || {
         common::http_timeout(
@@ -440,7 +440,7 @@ fn release_stops_the_running_command_and_the_agent() {
     let started = Instant::now();
     let released = guest
         .fixture
-        .request("POST", &format!("/vms/{vm}/release"), Some(&json!({})));
+        .request("POST", &format!("/machines/{vm}/release"), Some(&json!({})));
     assert_eq!(released.status, 200, "{}", released.body);
     assert!(
         started.elapsed() < Duration::from_secs(5),
@@ -470,7 +470,7 @@ fn release_of_an_idle_lease_ends_its_agent() {
     assert_eq!(pgrep(&guest.agent_pattern()).len(), 1);
     let released = guest
         .fixture
-        .request("POST", &format!("/vms/{vm}/release"), Some(&json!({})));
+        .request("POST", &format!("/machines/{vm}/release"), Some(&json!({})));
     assert_eq!(released.status, 200, "{}", released.body);
     wait_until(Duration::from_secs(5), "the agent to end", || {
         pgrep(&guest.agent_pattern()).is_empty()
@@ -491,7 +491,7 @@ fn an_exec_whose_link_dies_after_it_started_is_reported_uncertain() {
     let unique = format!("300.{}", std::process::id());
     let command = format!("echo ran >> {}; sleep {unique}", marker.display());
     let port = guest.fixture.port();
-    let path = format!("/vms/{vm}/exec");
+    let path = format!("/machines/{vm}/exec");
     let body = json!({"argv": ["sh", "-c", command]});
     let running = std::thread::spawn(move || {
         common::http_timeout(

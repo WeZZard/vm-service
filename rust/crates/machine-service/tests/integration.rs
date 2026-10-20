@@ -132,7 +132,7 @@ fn test_explicit_work_clone_retains_source_proof_and_leaves_work_untouched() {
         .expect("error")
         .contains("fingerprint"));
     let vm = lease["vm"].as_str().expect("vm").to_string();
-    let response = live.request("POST", &format!("/vms/{vm}/release"), Some(&json!({})));
+    let response = live.request("POST", &format!("/machines/{vm}/release"), Some(&json!({})));
     assert_eq!(response.status, 200);
     let path = lease["source_fingerprint"]["path"]
         .as_str()
@@ -173,7 +173,7 @@ fn test_exec_request_timeout_reaches_ssh_without_clamping() {
         ] {
             let mut body = command.clone();
             body["timeout"] = json!(timeout);
-            let response = live.request("POST", &format!("/vms/{vm}/exec"), Some(&body));
+            let response = live.request("POST", &format!("/machines/{vm}/exec"), Some(&body));
             assert_eq!(response.status, 200, "{}", response.body);
             // Deviation: the external `ssh` shim cannot see the request
             // deadline, so assert the command crossed the process boundary
@@ -196,7 +196,7 @@ fn test_health() {
     let live = Live::new();
     let response = live.request("GET", "/health", None);
     assert_eq!(response.status, 200);
-    assert_eq!(response.body, json!({"ok": true, "service": "vm-service"}));
+    assert_eq!(response.body, json!({"ok": true, "service": "machine-service"}));
 }
 
 #[test]
@@ -216,7 +216,7 @@ fn test_route_matching_keeps_the_query_string() {
     let live = Live::new();
     for path in [
         "/health?x=1",
-        "/vms?x=1",
+        "/machines?x=1",
         "/images?x=1",
         "/capabilities?x=1",
         "/acquisition-capabilities?x=1",
@@ -228,7 +228,7 @@ fn test_route_matching_keeps_the_query_string() {
     }
     // The VM route captures `[^/]+`, so a query becomes part of the captured
     // name and the lookup reports the unknown-VM error instead.
-    let response = live.request("GET", "/vms/ghost?x=1", None);
+    let response = live.request("GET", "/machines/ghost?x=1", None);
     assert_eq!(response.status, 404);
     assert_eq!(response.body["error"], "unknown VM");
     // Mutating routes are unroutable with a query as well, and must not run.
@@ -246,27 +246,27 @@ fn test_route_matching_keeps_the_query_string() {
     // A VM action route and the console route are unroutable with a query too.
     let response = live.request(
         "POST",
-        "/vms/ghost/exec?x=1",
+        "/machines/ghost/exec?x=1",
         Some(&json!({"argv": ["true"]})),
     );
     assert_eq!(response.status, 404, "{}", response.body);
     assert_eq!(response.body["error"], "not found");
     let response = live.request(
         "POST",
-        "/vms/ghost/console/resolve?x=1",
+        "/machines/ghost/console/resolve?x=1",
         Some(&json!({"lease_id": "0123456789abcdef0123456789abcdef"})),
     );
     assert_eq!(response.status, 404, "{}", response.body);
     assert_eq!(response.body["error"], "not found");
     // The same routes without a query keep working.
     assert_eq!(live.request("GET", "/health", None).status, 200);
-    assert_eq!(live.request("GET", "/vms", None).status, 200);
+    assert_eq!(live.request("GET", "/machines", None).status, 200);
 }
 
 #[test]
 fn test_unknown_vm_404() {
     let live = Live::new();
-    let response = live.request("GET", "/vms/ghost", None);
+    let response = live.request("GET", "/machines/ghost", None);
     assert_eq!(response.status, 404);
     assert_eq!(response.body["error"], "unknown VM");
 }
@@ -452,7 +452,7 @@ fn test_state_persists_across_requests() {
     );
     let record = response.body;
     let vm = record["vm"].as_str().expect("vm").to_string();
-    let response = live.request("GET", &format!("/vms/{vm}"), None);
+    let response = live.request("GET", &format!("/machines/{vm}"), None);
     assert_eq!(response.status, 200);
     assert_eq!(response.body["vm"], record["vm"]);
     assert_eq!(response.body["state"], "running");
@@ -471,12 +471,12 @@ fn test_release_roundtrip() {
     let vm = response.body["vm"].as_str().expect("vm").to_string();
     let response = live.request(
         "POST",
-        &format!("/vms/{vm}/release"),
+        &format!("/machines/{vm}/release"),
         Some(&json!({"reason": "test"})),
     );
     assert_eq!(response.status, 200);
     assert!(response.body["released"].as_bool().unwrap_or(false));
-    let response = live.request("GET", &format!("/vms/{vm}"), None);
+    let response = live.request("GET", &format!("/machines/{vm}"), None);
     assert_eq!(response.status, 404);
 }
 
@@ -491,7 +491,7 @@ fn test_heartbeat_roundtrip_and_bounds() {
     let vm = response.body["vm"].as_str().expect("vm").to_string();
     let response = live.request(
         "POST",
-        &format!("/vms/{vm}/heartbeat"),
+        &format!("/machines/{vm}/heartbeat"),
         Some(&json!({"ttl_hours": 5})),
     );
     assert_eq!(response.status, 200);
@@ -501,7 +501,7 @@ fn test_heartbeat_roundtrip_and_bounds() {
     assert!((remaining - 5.0).abs() <= 0.02);
     let response = live.request(
         "POST",
-        &format!("/vms/{vm}/heartbeat"),
+        &format!("/machines/{vm}/heartbeat"),
         Some(&json!({"ttl_hours": 9999})),
     );
     assert_eq!(response.status, 409);
@@ -516,7 +516,7 @@ fn test_exec_requires_argv_or_script() {
         Some(&json!({"purpose": "ex", "image": "ubuntu2404", "env": "none"})),
     );
     let vm = response.body["vm"].as_str().expect("vm").to_string();
-    let response = live.request("POST", &format!("/vms/{vm}/exec"), Some(&json!({})));
+    let response = live.request("POST", &format!("/machines/{vm}/exec"), Some(&json!({})));
     assert_eq!(response.status, 409);
     assert!(response.body["error"]
         .as_str()
@@ -540,7 +540,7 @@ fn test_exec_rejects_non_running() {
     std::fs::write(&state_file, state.to_string()).expect("write state");
     let response = live.request(
         "POST",
-        &format!("/vms/{vm}/exec"),
+        &format!("/machines/{vm}/exec"),
         Some(&json!({"argv": ["true"]})),
     );
     assert_eq!(response.status, 409);
@@ -561,7 +561,7 @@ fn test_exec_ok() {
     let vm = response.body["vm"].as_str().expect("vm").to_string();
     let response = live.request(
         "POST",
-        &format!("/vms/{vm}/exec"),
+        &format!("/machines/{vm}/exec"),
         Some(&json!({"argv": ["echo", "hi"]})),
     );
     assert_eq!(response.status, 200);
@@ -629,7 +629,7 @@ fn test_images_snapshot_shape() {
 #[test]
 fn test_vms_snapshot_includes_limits() {
     let live = Live::new();
-    let response = live.request("GET", "/vms", None);
+    let response = live.request("GET", "/machines", None);
     assert_eq!(response.status, 200);
     assert_eq!(response.body["limits"]["max_macos_running"], 2);
     assert_eq!(response.body["limits"]["grace_hours"], 6);
@@ -866,7 +866,7 @@ fn test_release_cli() {
         "{}",
         String::from_utf8_lossy(&output.stdout)
     );
-    let response = live.request("GET", &format!("/vms/{vm}"), None);
+    let response = live.request("GET", &format!("/machines/{vm}"), None);
     assert_eq!(response.status, 404);
 }
 
