@@ -103,3 +103,110 @@ Feature: Agent operations over guest sessions and remote sessions
     And vm-service's remote session listener on port 443 with TLS
     When the client opens a remote session through the proxy
     Then exec, write and read calls succeed
+
+Feature: Leasing and working on durable machines
+
+  @AC-20 @TL-2 @TL-6
+  Scenario: A durable machine is acquired by name
+    Given an instance with durable exposure on, whose durable machine is "available"
+    When the agent posts /acquire with machine set to the durable machine's name and purpose "metal-check"
+    Then the response is the machine record with kind "durable", a new lease_id and a workspace path
+    And the workspace exists and is empty
+    And the machine's state is "leased"
+    When the agent posts /acquire with both machine and image
+    Then the request is refused with HTTP 400 and nothing is reserved
+    When the agent posts /acquire with machine and cpu set
+    Then the request is refused with HTTP 400 naming cpu
+
+  @AC-21 @TL-2 @TL-6
+  Scenario: A durable machine admits one lease at a time, across instances
+    Given a durable lease held through one instance with durable exposure on
+    When another instance on the same Mac, with its own state directory and exposure on, is asked to acquire the durable machine
+    Then it refuses with HTTP 409 and "durable machine leased" naming the purpose and the expiry time
+    And the first lease is unchanged
+
+  @AC-22 @TL-2
+  Scenario: An operation with a stale lease_id is refused
+    Given a durable lease "A" that was released
+    And a new durable lease "B" on the same machine
+    When the agent sends an exec with lease "A"'s lease_id
+    Then the request is refused with HTTP 409 and no command runs
+    When the agent sends an exec without a lease_id
+    Then the request is refused with HTTP 409 and no command runs
+
+  @AC-23 @TL-2 @TL-6
+  Scenario: A command runs as wezzard in the GUI session, without the owner's credentials
+    Given a durable lease acquired with env "default"
+    And the owner's login environment defines ANTHROPIC_AUTH_TOKEN and OPENAI_API_KEY
+    When the agent runs "id -un; echo $PATH; env | cut -d= -f1; pwd"
+    Then the user is "wezzard"
+    And PATH contains "/opt/homebrew/bin"
+    And the variable names include MACHINE_SERVICE_LEASE_ID, MACHINE_SERVICE_WORKSPACE and TMPDIR
+    And the variable names include neither ANTHROPIC_AUTH_TOKEN nor OPENAI_API_KEY
+    And the working directory is the workspace's "work" folder
+    And the command's responsible process for privacy permissions is the machine-service executable, not sshd
+
+  @AC-24 @TL-2 @TL-6
+  Scenario: Claude Code reaches the gateway with the machine's key
+    Given "~/.config/machine-service/agents/claude-code.env" holds ANTHROPIC_API_KEY, with mode 600 in a mode 700 folder
+    And "endpoints.json" beside it names the claude-code base URL "http://<gateway-host>"
+    When a durable lease is acquired with env "default"
+    Then a command sees ANTHROPIC_BASE_URL equal to "http://<gateway-host>"
+    And a command sees ANTHROPIC_API_KEY set
+    And a command does not see ANTHROPIC_AUTH_TOKEN or CLAUDE_CODE_OAUTH_TOKEN
+    And "claude -p 'reply ok'" answers through the gateway, which attributes the request to this machine's Claude Code key
+    When a durable lease is acquired with env "none"
+    Then a command sees neither ANTHROPIC_BASE_URL nor ANTHROPIC_API_KEY
+
+  @AC-25 @TL-2 @TL-6
+  Scenario: Codex reaches the gateway through a per-session custom provider
+    Given "~/.config/machine-service/agents/codex.env" holds LITELLM_CODEX_KEY
+    And "endpoints.json" names the codex base URL "http://<gateway-host>/v1"
+    When a durable lease is acquired with env "default"
+    Then CODEX_HOME is the workspace's "codex" folder
+    And its config.toml selects a model provider whose base_url is "http://<gateway-host>/v1", as written in endpoints.json, and whose env_key is LITELLM_CODEX_KEY
+    And no file in the workspace contains the key's value
+    And "~/.codex/config.toml" is unchanged
+    And "codex exec" with a model named on its command line answers through the gateway
+
+  @AC-26 @TL-1 @TL-2
+  Scenario: A key is never printed, logged or returned
+    Given a durable lease with both agent keys loaded
+    When the agent runs "echo $ANTHROPIC_API_KEY $LITELLM_CODEX_KEY"
+    Then the exec output contains "[redacted]" twice and neither key's value
+    And neither key's value appears in the lease record, the service log, GET /machines, the release report or any error
+
+  @AC-27 @TL-1 @TL-2
+  Scenario: An unsafe or missing key file is reported, not loaded, and never refuses
+    Given "codex.env" has mode 644 and "claude-code.env" is absent
+    When the agent lists the machines
+    Then the durable machine's agents capability reports codex "unsafe-mode" and claude_code "absent"
+    When the agent acquires the durable machine with env "default"
+    Then the acquisition succeeds and neither key is loaded
+
+  @AC-28 @TL-2 @TL-6
+  Scenario: Push and pull to an instance on another Mac carry the bytes
+    Given a lease on a machine owned by an instance that is not on loopback
+    When the CLI pushes a 64 MiB random file and a directory of 100 files, and pulls both back
+    Then each request carries the body's SHA-256 in X-Content-SHA256
+    And the pulled bytes match the pushed bytes
+    When one byte of a push body is changed in transit
+    Then the push fails with a digest mismatch and no file exists at the destination path
+
+  @AC-29 @TL-2 @TL-6
+  Scenario: A machine is chosen by capability
+    Given instances whose machines are a macOS 26 virtual machine offer, a durable machine with Metal 3 whose CI runner is busy, and a durable machine with Metal 3 whose CI runner is idle
+    When the agent runs "machctl acquire --purpose unreal-pp --require metal3"
+    Then the CLI prints that it chose the durable machine whose CI runner is idle, and why
+    And the virtual machine offer is not chosen, because its gpu reports metal3 false with families mac2 and common3
+
+  @AC-44 @TL-1 @TL-2
+  Scenario: A key without a configured endpoint is not loaded
+    Given "claude-code.env" holds ANTHROPIC_API_KEY
+    And "endpoints.json" is absent
+    When the agent lists the machines
+    Then the durable machine's agents capability reports claude_code with key "present" and endpoint "absent"
+    When the agent acquires the durable machine with env "default"
+    Then the acquisition succeeds
+    And a command sees neither ANTHROPIC_API_KEY nor ANTHROPIC_BASE_URL
+    And no source file, default or document of the service names a gateway host

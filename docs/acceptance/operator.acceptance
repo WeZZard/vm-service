@@ -34,3 +34,96 @@ Feature: Choosing and testing the guest link
     Given the installed vm-service running on port 6240
     When the live suites run against a second instance on another port and state directory
     Then the installed service's process, state directory and leases are unchanged
+
+Feature: Federation, rename and installation
+
+  @AC-34 @TL-2 @TL-6
+  Scenario: The CLI lists every machine from every instance
+    Given the local instance and two instances that Consul lists as "machine-service"
+    And one of those instances is stopped
+    When the operator runs "machctl list"
+    Then the list shows the local instance's machines first, then the reachable instance's machines
+    And the stopped instance appears as "unreachable" with its error and its Consul health status
+    And the local instance appears once even though Consul also lists it
+
+  @AC-35 @TL-2
+  Scenario: Old paths fail loudly after the coordinated switch
+    Given the renamed service
+    When a client sends GET /vms or POST /vms/<name>/exec
+    Then the answer is HTTP 410 Gone and the error names the /machines path that replaces it
+    And no operation runs
+    When the operator runs "machctl list" and "machctl --help"
+    Then the output matches machctl's golden help files
+    And no "vmctl" link remains in "~/.local/bin" pointing into the old install folder
+
+  @AC-36 @TL-2
+  Scenario: An old variable name stops the daemon, and the installer rewrites it
+    Given machine-service started with VM_SERVICE_PORT set to 6290
+    Then it refuses to start and names VM_SERVICE_PORT and its replacement MACHINE_SERVICE_PORT
+    Given an installed vm-service whose LaunchAgent sets VM_SERVICE_HOST and VM_SERVICE_GUEST_LINK
+    When the operator runs "machine-service-install install"
+    Then the new LaunchAgent sets MACHINE_SERVICE_HOST and MACHINE_SERVICE_GUEST_LINK to the same values
+    And it sets no VM_SERVICE_* variable
+
+  @AC-37 @TL-6
+  Scenario: Each instance is registered in Consul with the tags it warrants
+    Given the catalog description printed by "machine-service-install catalog-description" is placed on each Mac
+    Then Consul lists "machine-service" on mac-mini-m4-pro with the tags vm and tart and without durable
+    And Consul lists "machine-service" on mac-mini-m4-1 and mac-mini-m4-2 with the tag durable and without vm
+    And Consul lists no "vm-service"
+
+  @AC-38 @TL-6
+  Scenario: An instance on a Mac without Tart offers only its durable machine
+    Given a Mac with no Tart installed
+    When the operator installs machine-service there with durable exposure on and without the virtual-machine helpers
+    Then the installer succeeds
+    And GET /health reports kinds ["durable"]
+    And GET /machines lists the durable machine and no virtual machine offer
+    And an acquisition with an image is refused with HTTP 400 naming the missing Tart
+
+  @AC-39 @TL-1 @TL-2 @TL-4
+  Scenario: Adding and removing an image line changes the list without a restart
+    Given a running instance whose image repository has the lines "macos26" and "ubuntu2404"
+    When the operator adds the line folder "linux-extra" with a valid line.conf
+    Then GET /images and GET /machines list "linux-extra" on the next request, and the daemon's process ID is unchanged
+    And an acquisition of image "linux-extra" succeeds
+    When the operator removes the folder "ubuntu2404" while a lease of "ubuntu2404" is running
+    Then the next GET /images no longer lists "ubuntu2404"
+    And the running lease's heartbeat and release still succeed
+
+  @AC-40 @TL-2 @TL-4
+  Scenario: Editing a line and promoting a base take effect without a restart
+    Given a running instance
+    When the operator changes CPU from 6 to 4 in "images/macos26/line.conf"
+    Then "machctl images-show macos26" reports a CPU default of 4
+    Given a line whose base VM does not exist yet
+    When the operator promotes its work VM to the base name
+    Then the next GET /images reports that image acquirable
+
+  @AC-41 @TL-1 @TL-2
+  Scenario: A broken line keeps the last good list and is reported loudly
+    Given a running instance whose catalog is "current" at generation 7
+    When the operator introduces a syntax error into "images/macos26/line.conf"
+    Then GET /images still lists every image of generation 7
+    And its catalog status is "stale" with the failing file, the error and the failure time
+    And GET /health reports the catalog status "stale"
+    And the service log has exactly one ERROR line for that failure, however many requests follow
+    When the operator fixes the file
+    Then the next GET /images reports catalog status "current" at a new generation
+
+  @AC-42 @TL-1
+  Scenario: No partial catalog is ever published
+    Given readers that read the catalog continuously
+    When the catalog is rebuilt one thousand times, alternating between two different sets of lines
+    Then every snapshot a reader saw is exactly one of the two complete sets, labelled with its own generation and input identity
+    And line.conf files were executed only by the process that owns daemon.lock, with the strict parser
+
+  @AC-43 @TL-2 @TL-6
+  Scenario: Durable exposure is off unless the operator turns it on
+    Given an instance installed without --expose-durable
+    Then GET /machines lists no durable machine
+    And GET /health reports no "durable" kind
+    And an acquisition that names the Mac is refused with HTTP 404 "durable machine not exposed on <instance>"
+    And the catalog description it prints has no "durable" tag
+    When the operator reinstalls it with --expose-durable on
+    Then GET /machines lists the durable machine as "available"

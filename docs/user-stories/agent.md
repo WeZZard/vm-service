@@ -100,3 +100,32 @@ The agent's contract with the service is **lease-based**: it asks for a VM, work
 - Execution accepts an explicit positive timeout without a shorter 3600-second backend cap. The caller is responsible for selecting a suitable operation budget and continuing lease renewal.
 
 **Tests:** `TestAcquireValidation.test_ttl_bounds` (unit), `TestImagesSnapshot` (unit), `TestVmctl.test_acquire_old_flag_aliases` (integration).
+
+## US24 — Acquire a durable machine by capability
+
+- As an agent, I want to lease a durable machine when my task needs what a virtual machine cannot give, such as Metal 3 for an Unreal post-process evaluation, so that the task runs where it can succeed.
+- I choose by the capability report, which every machine carries in the same shape, and I can name a machine or ask for a set of capabilities. See [MM-3](../arch/machines.md#mm-3-capability-report) and [CL-2](../ux/cli/list.md#cl-2-acquire-by-capability).
+- A durable machine admits one lease at a time. A busy machine refuses with a reason I can wait on. See [DM-2](../arch/durable-machine.md#dm-2-one-lease-at-a-time).
+
+**Tests:** AC-20, AC-21, AC-22 and AC-29 in [agent.acceptance](../acceptance/agent.acceptance).
+
+## US25 — Work in a durable-machine session
+
+- As an agent, I want to run commands and move files on a durable machine as the admin account `wezzard`, in a scratch workspace, so that I can install what my task needs in the middle of it.
+- My commands see the login shell's `PATH` and the GUI session, and none of the owner's own credentials. See [DM-4](../arch/durable-machine.md#dm-4-exec).
+
+**Tests:** AC-23 in [agent.acceptance](../acceptance/agent.acceptance).
+
+## US26 — Claude Code and Codex reach the gateway with the machine's keys
+
+- As an agent running Claude Code or Codex in a durable-machine session, I want both to reach the LiteLLM gateway with that machine's own key, so that the owner can track usage per machine.
+- Claude Code uses `ANTHROPIC_BASE_URL` and `ANTHROPIC_API_KEY`, never `ANTHROPIC_AUTH_TOKEN`. Codex uses a custom provider with `LITELLM_CODEX_KEY`. The gateway's base URLs come from the machine's local configuration, never from an image or a default (DC-32). No key ever appears in a response, a log or a file the service writes. See [AK](../arch/agent-keys.md).
+
+**Tests:** AC-24 to AC-27 and AC-44 in [agent.acceptance](../acceptance/agent.acceptance).
+
+## US27 — Work on a machine on another Mac
+
+- As an agent on one Mac, I want to lease and work on a machine that another Mac's instance owns, so that I can use every machine on the intranet.
+- Push and pull carry the bytes and their digest, because my file paths do not exist on the other Mac. See [FD-4](../arch/federation.md#fd-4-working-on-a-remote-instance).
+
+**Tests:** AC-28 in [agent.acceptance](../acceptance/agent.acceptance).

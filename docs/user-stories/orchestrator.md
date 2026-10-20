@@ -56,3 +56,17 @@ The orchestrator's defining duty: **teardown happens even when the work fails**.
 - Verified by racing real threads against the locked phase: 6 threads compete for 2 macOS slots → exactly 2 win; same purpose+image in parallel → exactly one winner, the rest rejected with `already leased`.
 
 **Tests:** `TestConcurrency` (`test_parallel_acquires_never_oversubscribe_macos`, `test_parallel_same_purpose_same_image_one_wins`, `test_parallel_same_purpose_different_images_both_win`) — unit.
+
+## US28 — Every durable lease leaves a hygiene record
+
+- As an orchestrator, I want each durable lease to start in a scratch workspace, to have its leftover processes swept at release, and to keep an inventory before and after, so that I can see what a task left on a machine that outlives it.
+- Hygiene reports and never refuses or blocks. See [HY](../arch/hygiene.md).
+
+**Tests:** AC-30, AC-31 and AC-33 in [orchestrator.acceptance](../acceptance/orchestrator.acceptance).
+
+## US29 — Leases coexist with the CI runner
+
+- As an orchestrator, I want leases on 192.168.50.4 and 192.168.50.5 to run beside the readycheck-dev CI runner without pausing it, and I want to know when a CI job ran during my lease, so that I can judge my results.
+- See [HY-5](../arch/hygiene.md#hy-5-coexistence-with-the-ci-runner).
+
+**Tests:** AC-32 in [orchestrator.acceptance](../acceptance/orchestrator.acceptance).
