@@ -7,9 +7,11 @@
 //! (DC-39). With exposure off the daemon lists no durable machine and
 //! refuses every durable request before any lock or workspace is touched.
 
+pub mod agents;
 pub mod config;
 pub mod exec;
 pub mod hostlock;
 pub mod process;
+pub mod session_env;
 
 pub use config::DurableConfig;
