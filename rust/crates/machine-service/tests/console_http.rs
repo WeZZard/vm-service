@@ -114,7 +114,9 @@ fn test_legacy_console_request_fails_without_retrofit() {
         Some(&json!({"lease_id": lease_id})),
     );
     assert_eq!(response.status, 409, "{}", response.body);
-    let record = live.fixture.request("GET", &format!("/machines/{vm}"), None);
+    let record = live
+        .fixture
+        .request("GET", &format!("/machines/{vm}"), None);
     assert!(
         record.body.get("console").is_none(),
         "console was retrofitted: {}",

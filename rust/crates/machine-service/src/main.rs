@@ -332,7 +332,10 @@ fn handle_get(service: &Service, request: &mut Request, url: &str) -> OpResult<(
     if let Some(name) = path.strip_prefix("/machines/") {
         if !name.is_empty() && !name.contains('/') {
             let machines = snapshot::snapshot(service)?;
-            if let Some(record) = machines.get("machines").and_then(|machines| machines.get(name)) {
+            if let Some(record) = machines
+                .get("machines")
+                .and_then(|machines| machines.get(name))
+            {
                 return Ok((200, record.clone()));
             }
             return Ok((404, json!({"error": "unknown VM"})));

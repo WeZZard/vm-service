@@ -92,7 +92,10 @@ fn ac35_old_paths_are_gone_and_machines_serves_their_operations() {
         let response = fixture.request(method, path, body.as_ref());
         assert_eq!(response.status, 410, "{method} {path}: {}", response.body);
         let error = response.body["error"].as_str().expect("error");
-        assert!(error.contains(replacement.as_str()), "{method} {path}: {error}");
+        assert!(
+            error.contains(replacement.as_str()),
+            "{method} {path}: {error}"
+        );
         assert_eq!(response.body["replacement"], json!(replacement));
     }
 
@@ -109,14 +112,14 @@ fn ac35_old_paths_are_gone_and_machines_serves_their_operations() {
     assert_eq!(one.body["vm"], json!(vm));
 
     let output = run_machctl(&["list"], &fixture.machctl_env());
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(String::from_utf8_lossy(&output.stdout).contains(&vm));
 
-    let released = fixture.request(
-        "POST",
-        &format!("/machines/{vm}/release"),
-        Some(&json!({})),
-    );
+    let released = fixture.request("POST", &format!("/machines/{vm}/release"), Some(&json!({})));
     assert_eq!(released.status, 200, "{}", released.body);
 }
 
@@ -126,7 +129,10 @@ fn health_names_machine_service() {
     let fixture = LegacyFixture::new();
     let _daemon = fixture.start_daemon();
     let health = fixture.request("GET", "/health", None);
-    assert_eq!(health.body, json!({"ok": true, "service": "machine-service"}));
+    assert_eq!(
+        health.body,
+        json!({"ok": true, "service": "machine-service"})
+    );
     let root = fixture.request("GET", "/", None);
     assert_eq!(root.body["service"], "machine-service");
     assert_eq!(root.body["endpoints"][3], "/machines");

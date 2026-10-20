@@ -125,7 +125,9 @@ fn table_addresses(live: &Live) -> Vec<String> {
     machine_service_core::guest_firewall::parse_table(&text)
         .into_iter()
         .filter_map(|line| match line {
-            machine_service_core::guest_firewall::Line::Guest(guest) => Some(guest.address.to_string()),
+            machine_service_core::guest_firewall::Line::Guest(guest) => {
+                Some(guest.address.to_string())
+            }
             machine_service_core::guest_firewall::Line::Other(_) => None,
         })
         .collect()

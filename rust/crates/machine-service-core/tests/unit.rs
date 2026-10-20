@@ -1479,7 +1479,10 @@ fn test_internet_lease_boots_on_softnet_and_reports_its_network() {
         ]
     );
     assert_eq!(fixture.read_state()[&vm]["network"], json!("internet"));
-    assert_eq!(fixture.snapshot()["machines"][&vm]["network"], json!("internet"));
+    assert_eq!(
+        fixture.snapshot()["machines"][&vm]["network"],
+        json!("internet")
+    );
     // The host still reaches an internet guest over its lease key.
     let out = fixture
         .service

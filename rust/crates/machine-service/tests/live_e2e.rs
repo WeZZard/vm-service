@@ -43,7 +43,9 @@ fn require_daemon(port: u16) -> bool {
     match common::try_http(port, "GET", "/health", None, None) {
         Ok(response) if response.status == 200 => true,
         _ => {
-            eprintln!("machine-service daemon not reachable at 127.0.0.1:{port}; skipping live E2E");
+            eprintln!(
+                "machine-service daemon not reachable at 127.0.0.1:{port}; skipping live E2E"
+            );
             false
         }
     }

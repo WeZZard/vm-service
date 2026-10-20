@@ -60,8 +60,8 @@ mod tests {
     #[test]
     fn ac36_refusal_names_every_old_variable_and_its_replacement() {
         assert_eq!(refuse_legacy_variables(["PATH", "VM_RELAY_URL"]), Ok(()));
-        let error = refuse_legacy_variables(["VM_SERVICE_PORT", "PATH", "VM_SERVICE_HOST"])
-            .unwrap_err();
+        let error =
+            refuse_legacy_variables(["VM_SERVICE_PORT", "PATH", "VM_SERVICE_HOST"]).unwrap_err();
         assert_eq!(
             error,
             "VM_SERVICE_* variables are no longer read; rename them: \
