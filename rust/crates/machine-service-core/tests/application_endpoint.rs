@@ -1,13 +1,18 @@
 //! Application-association discovery, ported from
-//! `tests/unit/test_application_endpoint.py`.
+//! `tests/unit/test_application_endpoint.py` and moved onto the image catalog
+//! (`docs/arch/image-catalog.md`, IC).
 //!
 //! The Python suite loaded the daemon module and drove `GET /applications`
 //! through `Handler.do_GET`, patching `Path.home` and the module globals. The
-//! Rust port keeps association state in one `Service` and exposes the same
-//! trusted-config surface: [`Service::initialize_application_associations`],
-//! [`Service::application_associations`], [`Service::association_tuples`], and
-//! [`Service::associations_initialized`]. Catalog loading is the free function
-//! `application_catalog::load_catalog`.
+//! Rust port reads the associations from the image catalog, which the daemon
+//! starts with [`Service::initialize_image_catalog`] once it owns
+//! `daemon.lock` and reads with [`Service::application_associations`]. Catalog
+//! loading is the free function `application_catalog::load_catalog`.
+//!
+//! The Python cases that pinned "configuration changes need a restart" were
+//! superseded by DC-34: a change now rebuilds the catalog on the next read,
+//! and a broken change keeps the last good associations. Those cases are
+//! rewritten here to the new rule rather than deleted.
 //!
 //! Cases that assert daemon startup order (`main`, `fcntl.flock`,
 //! `ThreadingHTTPServer`, `threading.Thread`) live in the `machine-service` binary,
@@ -19,12 +24,14 @@
 mod common;
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use machine_service_core::application_catalog;
+use machine_service_core::catalog::Freshness;
 use machine_service_core::host::Host;
 use machine_service_core::service::Service;
 
@@ -43,11 +50,12 @@ fn seed_fixture_line(pilot: &Path) {
     std::fs::write(&conf, FIXTURE_CONF).expect("fixture conf");
 }
 
-/// A fresh service over the same pilot directory, mirroring Python's
-/// `load_daemon(); fresh.PILOT = svc.PILOT`.
+/// A fresh service over `pilot` whose catalog reads the real files, the
+/// analogue of Python's `load_daemon(); fresh.PILOT = svc.PILOT`.
 fn service_with_pilot(fixture: &common::Fixture, pilot: PathBuf) -> Arc<Service> {
     let mut config = fixture.service.config.clone();
     config.pilot = pilot;
+    fixture.host.file_lines.store(true, Ordering::SeqCst);
     Arc::new(Service::with_host(
         config,
         None,
@@ -61,49 +69,62 @@ fn sha256_hex(raw: &[u8]) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+/// Rewrite a `line.conf` so its identity certainly moves, even within one
+/// timestamp tick.
+fn rewrite(path: &Path, text: &str) {
+    let temporary = path.with_extension("tmp");
+    std::fs::write(&temporary, text).expect("write conf");
+    std::fs::rename(&temporary, path).expect("replace conf");
+}
+
 // --------------------------------------------------------------------- tests
 
+/// AC-42: before the daemon starts the catalog, which it does only once it
+/// owns `daemon.lock`, a read answers unavailable and executes nothing.
 #[test]
-fn test_uninitialized_503_never_initializes_or_runs_process() {
-    let fixture = common::Fixture::new();
-    seed_fixture_line(&pilot(&fixture));
+fn test_uninitialized_read_never_initializes_or_runs_process() {
+    let fixture = common::Fixture::with_file_lines();
+    let pilot = pilot(&fixture);
+    seed_fixture_line(&pilot);
+    // A line that would leave a marker if anything sourced it.
+    let marker = pilot.join("sourced");
+    let conf = pilot.join("images/zz-marker/line.conf");
+    std::fs::create_dir_all(conf.parent().expect("parent")).expect("dir");
+    std::fs::write(
+        &conf,
+        format!(
+            "touch {}\nLINE_KIND=linux\nBASE_VM=marker-base\nCLONE_PREFIX=m-\n",
+            marker.display()
+        ),
+    )
+    .expect("marker conf");
 
-    // The Python handler answers 503 from `application_associations()` without
-    // attempting initialization. Twice, it must stay uninitialized.
     for _ in 0..2 {
         let error = fixture.service.application_associations().unwrap_err();
         assert!(
             error.to_string().contains("unavailable"),
-            "uninitialized read must fail closed: {error}"
+            "an unstarted read must fail closed: {error}"
         );
     }
-    assert!(!fixture.service.associations_initialized());
+    assert_eq!(
+        fixture.service.image_catalog().status.freshness,
+        Freshness::Unavailable
+    );
+    assert!(!marker.exists(), "a read executed a line.conf");
 
-    // The reads were not startup attempts: initialization still succeeds
-    // (Python's `_application_associations_attempted` stayed false).
     fixture
         .service
-        .initialize_application_associations()
-        .expect("a later startup initialization is still allowed");
+        .initialize_image_catalog()
+        .expect("the daemon's start still succeeds");
+    assert!(marker.exists(), "the start executes the lines");
 }
 
 #[test]
-fn test_initialized_success_cache_independence_and_detachment() {
-    let fixture = common::Fixture::new();
+fn test_initialized_success_and_detachment() {
+    let fixture = common::Fixture::with_file_lines();
     seed_fixture_line(&pilot(&fixture));
 
-    // Poison the permissive lifecycle cache; associations must not consult it.
-    {
-        let mut cache = fixture.service.lines.lock().expect("lines");
-        let mut poison = Map::new();
-        poison.insert("poison".to_string(), json!({"ssh_pass": "secret"}));
-        cache.lines = Some(poison);
-    }
-
-    fixture
-        .service
-        .initialize_application_associations()
-        .expect("init");
+    fixture.service.initialize_image_catalog().expect("init");
     let expected = json!({"fixture": {"kind": "linux", "base_vm": "fixture-base"}});
     let associations = fixture
         .service
@@ -119,8 +140,6 @@ fn test_initialized_success_cache_independence_and_detachment() {
         .as_object_mut()
         .expect("object")
         .insert("base_vm".to_string(), json!("mutated"));
-    // Clearing the cache must not affect associations either.
-    fixture.service.lines.lock().expect("lines").lines = None;
     let again = fixture
         .service
         .application_associations()
@@ -135,7 +154,7 @@ fn test_initialized_success_cache_independence_and_detachment() {
 
 #[test]
 fn test_discovery_reads_images_and_ignores_legacy_lines() {
-    let fixture = common::Fixture::new();
+    let fixture = common::Fixture::with_file_lines();
     let pilot = pilot(&fixture);
     seed_fixture_line(&pilot);
     let legacy = pilot.join("lines/legacy/line.conf");
@@ -146,33 +165,27 @@ fn test_discovery_reads_images_and_ignores_legacy_lines() {
     )
     .expect("legacy conf");
 
-    let mut cache = machine_service_core::lines::LineCache::default();
-    let (lines, bases) =
-        machine_service_core::lines::discover_lines(&fixture.service.config, &mut cache, true)
-            .expect("discover");
-    let mut names: Vec<String> = lines.keys().cloned().collect();
-    names.sort();
-    assert_eq!(names, vec!["fixture".to_string()]);
-    assert_eq!(bases["fixture"], "fixture-base");
-
-    fixture
-        .service
-        .initialize_application_associations()
-        .expect("init");
-    let mut associated: Vec<String> = fixture
+    fixture.service.initialize_image_catalog().expect("init");
+    let view = fixture.service.image_catalog();
+    let names: Vec<&String> = view.snapshot().expect("snapshot").lines.keys().collect();
+    assert_eq!(names, vec!["fixture"]);
+    assert_eq!(
+        view.snapshot().expect("snapshot").lines["fixture"].base_vm,
+        "fixture-base"
+    );
+    let associated: Vec<String> = fixture
         .service
         .application_associations()
         .expect("associations")
         .keys()
         .cloned()
         .collect();
-    associated.sort();
     assert_eq!(associated, vec!["fixture".to_string()]);
 }
 
 #[test]
 fn test_legacy_only_configuration_does_not_initialize_catalog() {
-    let fixture = common::Fixture::new();
+    let fixture = common::Fixture::with_file_lines();
     let pilot = pilot(&fixture);
     let legacy = pilot.join("lines/legacy/line.conf");
     std::fs::create_dir_all(legacy.parent().expect("parent")).expect("legacy dir");
@@ -182,56 +195,51 @@ fn test_legacy_only_configuration_does_not_initialize_catalog() {
     )
     .expect("legacy conf");
 
-    let error = fixture
-        .service
-        .initialize_application_associations()
-        .unwrap_err();
+    let error = fixture.service.initialize_image_catalog().unwrap_err();
     assert!(error.to_string().contains("unreadable"), "{error}");
-    assert!(!fixture.service.associations_initialized());
-    assert!(fixture.service.association_tuples().is_empty());
+    let view = fixture.service.image_catalog();
+    assert!(view.snapshot().is_none());
+    assert_eq!(view.status.freshness, Freshness::Unavailable);
 }
 
+/// AC-40: a configuration change takes effect on the next read, without a
+/// restart. Supersedes the Python `test_restart_only_config_change` (DC-34).
 #[test]
-fn test_restart_only_config_change() {
-    let fixture = common::Fixture::new();
+fn test_config_change_takes_effect_without_restart() {
+    let fixture = common::Fixture::with_file_lines();
     let pilot = pilot(&fixture);
     seed_fixture_line(&pilot);
     let conf = pilot.join("images/fixture/line.conf");
 
-    fixture
-        .service
-        .initialize_application_associations()
-        .expect("init");
-    // Change the config on disk after startup.
-    std::fs::write(
+    fixture.service.initialize_image_catalog().expect("init");
+    let first = fixture.service.image_catalog();
+    rewrite(
         &conf,
         "LINE_KIND=macos\nBASE_VM=new-base\nCLONE_PREFIX=new-\n",
-    )
-    .expect("rewrite conf");
-
-    assert_eq!(
-        fixture.service.application_associations().expect("view")["fixture"]["base_vm"],
-        "fixture-base"
     );
-    let error = fixture
-        .service
-        .initialize_application_associations()
-        .unwrap_err();
-    assert!(error.to_string().contains("restart"), "{error}");
 
-    let fresh = service_with_pilot(&fixture, pilot);
-    fresh
-        .initialize_application_associations()
-        .expect("fresh init");
     assert_eq!(
-        fresh.application_associations().expect("fresh view")["fixture"],
+        fixture.service.application_associations().expect("view")["fixture"],
         json!({"kind": "macos", "base_vm": "new-base"})
+    );
+    let second = fixture.service.image_catalog();
+    assert_eq!(second.status.freshness, Freshness::Current);
+    assert!(
+        second.status.generation > first.status.generation,
+        "a rebuild publishes a new generation"
+    );
+    // The view taken before the change keeps its own snapshot (IC-4).
+    assert_eq!(
+        first.snapshot().expect("first").lines["fixture"].base_vm,
+        "fixture-base"
     );
 }
 
+/// AC-41, AC-42: every strict rule fails the whole build, nothing partial is
+/// published, and a failure after a good build keeps the last good snapshot.
 #[test]
 fn test_strict_config_failure_no_partial_snapshot_or_fallback() {
-    let fixture = common::Fixture::new();
+    let fixture = common::Fixture::with_file_lines();
     let pilot = pilot(&fixture);
     seed_fixture_line(&pilot);
     let invalid = [
@@ -240,49 +248,61 @@ fn test_strict_config_failure_no_partial_snapshot_or_fallback() {
         "LINE_KIND=linux\nBASE_VM=../bad\nCLONE_PREFIX=x\n",
         "LINE_KIND=windows\nBASE_VM=base\nCLONE_PREFIX=x\n",
         "LINE_KIND=linux\nBASE_VM=base\nCLONE_PREFIX=x\nfalse\n",
+        "LINE_KIND=linux\nBASE_VM=base\nCLONE_PREFIX=x\nCPU=four\n",
     ];
+    let bad = pilot.join("images/zzz/line.conf");
     for text in invalid {
-        let service = service_with_pilot(&fixture, pilot.clone());
-        let bad = pilot.join("images/zzz/line.conf");
         std::fs::create_dir_all(bad.parent().expect("bad parent")).expect("bad dir");
-        std::fs::write(&bad, text).expect("bad conf");
+        rewrite(&bad, text);
+        let service = service_with_pilot(&fixture, pilot.clone());
 
-        let error = service.initialize_application_associations().unwrap_err();
+        let error = service.initialize_image_catalog().unwrap_err();
         assert!(!error.to_string().is_empty(), "{text}");
+        let view = service.image_catalog();
         assert!(
-            !service.associations_initialized(),
+            view.snapshot().is_none(),
             "{text}: published a partial snapshot"
         );
-        assert!(
-            service.association_tuples().is_empty(),
-            "{text}: published partial tuples"
+        assert_eq!(view.status.freshness, Freshness::Unavailable, "{text}");
+        assert_eq!(
+            view.status
+                .failure
+                .as_ref()
+                .and_then(|f| f.failure.file.clone()),
+            Some(bad.display().to_string()),
+            "{text}: the status names the failing file"
         );
         assert!(
             service.application_associations().is_err(),
             "{text}: served a partial view"
         );
-        assert!(
-            service.initialize_application_associations().is_err(),
-            "{text}: retried after a failed setup"
-        );
+
+        // After a good build, the same failure keeps the last good lines.
+        std::fs::remove_dir_all(bad.parent().expect("bad parent")).expect("remove bad");
+        let service = service_with_pilot(&fixture, pilot.clone());
+        service.initialize_image_catalog().expect("good start");
+        std::fs::create_dir_all(bad.parent().expect("bad parent")).expect("bad dir");
+        rewrite(&bad, text);
+        let view = service.image_catalog();
+        assert_eq!(view.status.freshness, Freshness::Stale, "{text}");
+        let names: Vec<&String> = view.snapshot().expect("last good").lines.keys().collect();
+        assert_eq!(names, vec!["fixture"], "{text}");
+        std::fs::remove_dir_all(bad.parent().expect("bad parent")).expect("remove bad");
     }
 }
 
 #[test]
 fn test_timeout_enumeration_no_lines_fail_closed() {
     // Python patched `subprocess.run` to raise TimeoutExpired/OSError. The
-    // Rust parser returns `None` for a timed-out or failed `/bin/zsh` source;
-    // an unsourceable conf is the reachable equivalent of that failure.
-    let fixture = common::Fixture::new();
+    // Rust parser fails a timed-out or failed `/bin/zsh` source; an
+    // unsourceable conf is the reachable equivalent of that failure.
+    let fixture = common::Fixture::with_file_lines();
     let pilot = pilot(&fixture);
     seed_fixture_line(&pilot);
     std::fs::write(pilot.join("images/fixture/line.conf"), "exit 1\n").expect("bad conf");
-    let error = fixture
-        .service
-        .initialize_application_associations()
-        .unwrap_err();
+    let error = fixture.service.initialize_image_catalog().unwrap_err();
     assert!(!error.to_string().is_empty(), "{error}");
-    assert!(!fixture.service.associations_initialized());
+    assert!(fixture.service.image_catalog().snapshot().is_none());
 
     // missing / empty / unreadable images directory.
     for mode in ["missing", "empty", "permission"] {
@@ -304,33 +324,43 @@ fn test_timeout_enumeration_no_lines_fail_closed() {
             }
             _ => {}
         }
-        let error = service.initialize_application_associations().unwrap_err();
+        let error = service.initialize_image_catalog().unwrap_err();
         assert!(!error.to_string().is_empty(), "{mode}: {error}");
-        assert!(!service.associations_initialized(), "{mode}");
+        assert!(service.image_catalog().snapshot().is_none(), "{mode}");
     }
 }
 
+/// AC-41: a failed build is not retried by requests while the files stay as
+/// they are, and the next change is tried at once, with no restart.
 #[test]
 fn test_failed_setup_requests_do_not_retry() {
-    let fixture = common::Fixture::new();
+    let fixture = common::Fixture::with_file_lines();
     let pilot = pilot(&fixture);
     seed_fixture_line(&pilot);
-    std::fs::write(pilot.join("images/fixture/line.conf"), "false\n").expect("bad conf");
+    let conf = pilot.join("images/fixture/line.conf");
+    std::fs::write(&conf, "false\n").expect("bad conf");
 
-    assert!(fixture
-        .service
-        .initialize_application_associations()
-        .is_err());
-    // Two requests answer 503 without retrying the failed setup.
+    assert!(fixture.service.initialize_image_catalog().is_err());
+    let failed_at = |service: &Service| {
+        service
+            .image_catalog()
+            .status
+            .failure
+            .expect("failure")
+            .failed_at
+    };
+    let first = failed_at(&fixture.service);
+    // Two requests answer unavailable without retrying the failed build.
     for _ in 0..2 {
         assert!(fixture.service.application_associations().is_err());
+        assert_eq!(failed_at(&fixture.service), first, "a request retried");
     }
-    assert!(!fixture.service.associations_initialized());
-    // The failed attempt is latched.
-    assert!(fixture
-        .service
-        .initialize_application_associations()
-        .is_err());
+
+    rewrite(&conf, FIXTURE_CONF);
+    assert_eq!(
+        fixture.service.application_associations().expect("fixed")["fixture"]["base_vm"],
+        "fixture-base"
+    );
 }
 
 #[test]
@@ -343,13 +373,10 @@ fn test_lock_loser_no_configuration_and_programming_error_propagates() {}
 
 #[test]
 fn test_live_inventory_and_fingerprint_refresh() {
-    let fixture = common::Fixture::new();
+    let fixture = common::Fixture::with_file_lines();
     let pilot = pilot(&fixture);
     seed_fixture_line(&pilot);
-    fixture
-        .service
-        .initialize_application_associations()
-        .expect("init");
+    fixture.service.initialize_image_catalog().expect("init");
 
     let base = fixture
         .dir

@@ -313,10 +313,13 @@ fn test_legacy_server_rejects_selected_header_but_keeps_health_shape() {
     let fingerprint = Selected::new();
     let fingerprint = fingerprint.fingerprint();
     let health = live.request("GET", "/health", None);
-    assert_eq!(
-        health.body,
-        json!({"ok": true, "service": "machine-service"})
-    );
+    assert_eq!(health.body["ok"], true);
+    assert_eq!(health.body["service"], "machine-service");
+    // A legacy server reports no environment; the catalog status is the only
+    // other member (IC-5).
+    let mut keys: Vec<&String> = health.body.as_object().expect("health").keys().collect();
+    keys.sort();
+    assert_eq!(keys, ["catalog", "ok", "service"]);
     let gc = common::http(
         live.port(),
         "POST",

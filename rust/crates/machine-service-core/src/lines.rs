@@ -1,18 +1,17 @@
-//! Image "line" discovery from `pilot-images/images/*/line.conf`.
+//! Reading one image line's `pilot-images/images/<image>/line.conf`.
 //!
 //! The configuration files are zsh assignments, so they are sourced with zsh
-//! and the required keys are echoed back. This matches the Python
-//! `_parse_line_conf` and `discover_lines`.
+//! and the required keys are echoed back. Only the image catalog's builder
+//! calls this, in the daemon that owns `daemon.lock` (IC-4,
+//! `docs/arch/image-catalog.md`); see [`crate::catalog`].
 
 use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value};
 
-use crate::config::{log_to_file, Config};
-use crate::error::{OpError, OpResult};
-use crate::proc::run_capture;
+use crate::proc::{run_capture, ProcError};
 use crate::ssh::shell_quote;
 
 /// The keys read out of a `line.conf`.
@@ -27,31 +26,35 @@ pub const CONF_KEYS: [&str; 8] = [
     "MEMORY_MB",
 ];
 
-/// Cached discovery result, invalidated by the images directory mtime.
-#[derive(Debug, Default)]
-pub struct LineCache {
-    pub mtime: f64,
-    pub lines: Option<Map<String, Value>>,
-    pub bases: Option<Map<String, Value>>,
-}
+/// How long one `line.conf` may take to source.
+pub const SOURCE_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Source one `line.conf` and return the requested keys, or `None` on failure.
-pub fn parse_line_conf(conf_path: &Path, strict: bool) -> Option<Map<String, Value>> {
+/// Source one `line.conf` strictly and return the requested keys.
+///
+/// Strict means a failing `source`, a nonzero exit, or a timeout fails the
+/// file. The error names the cause without zsh's own diagnostic, which may
+/// quote the file's contents, credentials included.
+pub fn read_line_conf(conf_path: &Path) -> Result<Map<String, Value>, String> {
     let quoted = shell_quote(&conf_path.to_string_lossy());
     let prints: Vec<String> = CONF_KEYS
         .iter()
         .map(|key| format!("print -- \"{key}=${{{key}}}\""))
         .collect();
-    let script = if strict {
-        format!("source {quoted} || exit $?; {}", prints.join(" ; "))
-    } else {
-        format!("source {quoted} && {}", prints.join(" ; "))
-    };
+    let script = format!("source {quoted} || exit $?; {}", prints.join(" ; "));
     let mut command = Command::new("/bin/zsh");
     command.args(["-c", &script]);
-    let output = run_capture(&mut command, None, Duration::from_secs(15)).ok()?;
+    let output = run_capture(&mut command, None, SOURCE_TIMEOUT).map_err(|error| match error {
+        ProcError::Timeout => format!(
+            "line configuration parse failed: timed out after {} s",
+            SOURCE_TIMEOUT.as_secs()
+        ),
+        other => format!("line configuration parse failed: {other}"),
+    })?;
     if !output.status.success() {
-        return None;
+        return Err(match output.status.code() {
+            Some(code) => format!("line configuration parse failed (zsh exit status {code})"),
+            None => "line configuration parse failed (zsh killed by a signal)".to_string(),
+        });
     }
     let text = String::from_utf8_lossy(&output.stdout);
     let mut values = Map::new();
@@ -64,175 +67,31 @@ pub fn parse_line_conf(conf_path: &Path, strict: bool) -> Option<Map<String, Val
         }
     }
     if !values.contains_key("BASE_VM") || !values.contains_key("CLONE_PREFIX") {
-        return None;
+        return Err("line configuration parse failed (BASE_VM or CLONE_PREFIX missing)".into());
     }
-    Some(values)
+    Ok(values)
 }
 
-/// Discover image lines, caching on the images directory mtime.
+/// The per-image resource defaults `(cpu, memory_mb, disk_gb)`.
 ///
-/// Returns the per-image configuration map and the base-VM map.
-pub fn discover_lines(
-    config: &Config,
-    cache: &mut LineCache,
-    force: bool,
-) -> OpResult<(Map<String, Value>, Map<String, Value>)> {
-    let selected = config.environment.is_some();
-    let lines_dir = config.pilot.join("images");
-    let mtime = std::fs::metadata(&lines_dir)
-        .and_then(|meta| meta.modified())
-        .ok()
-        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|duration| duration.as_secs_f64())
-        .unwrap_or(0.0);
-    if !force && cache.lines.is_some() && (selected || cache.mtime == mtime) {
-        return Ok((
-            cache.lines.clone().unwrap_or_default(),
-            cache.bases.clone().unwrap_or_default(),
-        ));
-    }
-
-    let mut lines = Map::new();
-    let mut bases = Map::new();
-    let mut entries: Vec<std::path::PathBuf> = Vec::new();
-    if let Ok(read) = std::fs::read_dir(&lines_dir) {
-        for entry in read.flatten() {
-            let path = entry.path();
-            if path.join("line.conf").is_file() {
-                entries.push(path);
-            }
-        }
-    }
-    entries.sort();
-
-    for directory in entries {
-        let name = directory
-            .file_name()
-            .map(|name| name.to_string_lossy().to_string())
-            .unwrap_or_default();
-        let conf_path = directory.join("line.conf");
-        let Some(conf) = parse_line_conf(&conf_path, selected) else {
-            if selected {
-                return Err(OpError::new(format!(
-                    "invalid selected image configuration: {}",
-                    conf_path.display()
-                )));
-            }
-            log_to_file(
-                &config.log_file,
-                &format!(
-                    "WARN: could not parse {}/line.conf; skipping line '{name}'",
-                    directory.display()
-                ),
-            );
-            continue;
-        };
-        let defaults = match resource_defaults(&conf) {
-            Ok(defaults) => defaults,
-            Err(()) => {
-                if selected {
-                    return Err(OpError::new("invalid selected image resource defaults"));
-                }
-                json!({"cpu": 6, "memory_mb": 16384, "disk_gb": Value::Null})
-            }
-        };
-        let text = |key: &str| conf.get(key).and_then(Value::as_str).map(str::to_string);
-        let record = json!({
-            "kind": text("LINE_KIND").unwrap_or_else(|| "macos".to_string()),
-            "base_vm": conf.get("BASE_VM").cloned().unwrap_or(Value::Null),
-            "work_vm": text("WORK_VM").filter(|value| !value.is_empty()),
-            "clone_prefix": conf.get("CLONE_PREFIX").cloned().unwrap_or(Value::Null),
-            "ssh_user": text("GUEST_USER").unwrap_or_default(),
-            "ssh_pass": text("GUEST_PASS").unwrap_or_default(),
-            "defaults": defaults,
-            "source": conf_path.to_string_lossy(),
-        });
-        if let Some(base) = conf.get("BASE_VM") {
-            bases.insert(name.clone(), base.clone());
-        }
-        lines.insert(name, record);
-    }
-
-    if lines.is_empty() {
-        if selected {
-            return Err(OpError::new(
-                "selected image repository has no usable image configurations",
-            ));
-        }
-        lines = hardcoded_lines();
-        bases = hardcoded_bases();
-        log_to_file(
-            &config.log_file,
-            "WARN: no lines discovered from pilot-images; using hardcoded fallback",
-        );
-    }
-    cache.mtime = mtime;
-    cache.lines = Some(lines.clone());
-    cache.bases = Some(bases.clone());
-    Ok((lines, bases))
-}
-
-/// Resolve the per-image resource defaults, mirroring the Python parsing.
-fn resource_defaults(conf: &Map<String, Value>) -> Result<Value, ()> {
-    let number = |key: &str, fallback: i64| -> Result<i64, ()> {
+/// An absent or empty CPU or memory value takes the service default; an
+/// absent, empty or zero disk value means inherit (`None`). A value that is
+/// not an integer is an error naming the key.
+pub fn resource_defaults(conf: &Map<String, Value>) -> Result<(i64, i64, Option<i64>), String> {
+    let number = |key: &str| -> Result<Option<i64>, String> {
         match conf.get(key).and_then(Value::as_str) {
-            None => Ok(fallback),
-            Some("") => Ok(fallback),
-            Some(text) => text.parse::<i64>().map_err(|_| ()),
+            None | Some("") => Ok(None),
+            Some(text) => text
+                .parse::<i64>()
+                .map(Some)
+                .map_err(|_| format!("invalid resource defaults: {key} is not an integer")),
         }
     };
-    let cpu = number("CPU", 6)?;
-    let memory_mb = number("MEMORY_MB", 16384)?;
+    let cpu = number("CPU")?.unwrap_or(6);
+    let memory_mb = number("MEMORY_MB")?.unwrap_or(16384);
     // An absent or zero disk value means inherit, represented as null.
-    let disk_gb = match conf.get("DISK_GB").and_then(Value::as_str) {
-        None => None,
-        Some("") => None,
-        Some(text) => {
-            let parsed = text.parse::<i64>().map_err(|_| ())?;
-            if parsed == 0 {
-                None
-            } else {
-                Some(parsed)
-            }
-        }
-    };
-    Ok(json!({"cpu": cpu, "memory_mb": memory_mb, "disk_gb": disk_gb}))
-}
-
-fn hardcoded_lines() -> Map<String, Value> {
-    let mut map = Map::new();
-    map.insert(
-        "macos26".to_string(),
-        json!({
-            "kind": "macos", "base_vm": "pilot-macos26-base", "work_vm": Value::Null,
-            "clone_prefix": "pilot-mac-", "ssh_user": "station", "ssh_pass": "station",
-            "defaults": {"cpu": 6, "memory_mb": 16384, "disk_gb": 200},
-            "source": "hardcoded",
-        }),
-    );
-    map.insert(
-        "ubuntu2404".to_string(),
-        json!({
-            "kind": "linux", "base_vm": "pilot-ubuntu-base", "work_vm": Value::Null,
-            "clone_prefix": "pilot-", "ssh_user": "admin", "ssh_pass": "admin",
-            "defaults": {"cpu": 6, "memory_mb": 16384, "disk_gb": 80},
-            "source": "hardcoded",
-        }),
-    );
-    map
-}
-
-fn hardcoded_bases() -> Map<String, Value> {
-    let mut map = Map::new();
-    map.insert(
-        "macos26".to_string(),
-        Value::String("pilot-macos26-base".to_string()),
-    );
-    map.insert(
-        "ubuntu2404".to_string(),
-        Value::String("pilot-ubuntu-base".to_string()),
-    );
-    map
+    let disk_gb = number("DISK_GB")?.filter(|value| *value != 0);
+    Ok((cpu, memory_mb, disk_gb))
 }
 
 /// The active-state tuple used for lease slot accounting.

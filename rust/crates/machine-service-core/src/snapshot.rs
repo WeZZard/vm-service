@@ -2,6 +2,7 @@
 
 use serde_json::{json, Map, Value};
 
+use crate::catalog::CatalogView;
 use crate::config::unix_now;
 use crate::error::{OpError, OpResult};
 use crate::ops::{GRACE_HOURS, MAX_MACOS_RUNNING};
@@ -79,15 +80,12 @@ pub fn snapshot(service: &Service) -> OpResult<Value> {
     }))
 }
 
-/// Build the `GET /images` body.
-pub fn images_snapshot(service: &Service) -> OpResult<Value> {
-    let (lines, _) = {
-        let mut cache = service
-            .lines
-            .lock()
-            .map_err(|_| OpError::new("lines poisoned"))?;
-        service.host.discover_lines(&mut cache, false)?
-    };
+/// Build the `GET /images` body from one catalog read, with its `catalog`
+/// status (IC-5). Fails with the diagnostic while no snapshot exists.
+pub fn images_snapshot(service: &Service, view: &CatalogView) -> OpResult<Value> {
+    let catalog = view
+        .snapshot()
+        .ok_or_else(|| OpError::new(view.status.diagnostic()))?;
     let data = service.state.read()?;
     let records: Vec<&Value> = data
         .get("vms")
@@ -131,15 +129,11 @@ pub fn images_snapshot(service: &Service) -> OpResult<Value> {
     capacity["macos_taken"] = json!(macos_taken);
 
     let mut out = Map::new();
-    let mut names: Vec<&String> = lines.keys().collect();
-    names.sort();
-    for name in names {
-        let cfg = &lines[name];
-        let kind = cfg.get("kind").and_then(Value::as_str).unwrap_or("macos");
-        let base_vm = cfg
-            .get("base_vm")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
+    for (name, line) in &catalog.lines {
+        let kind = line.kind.as_str();
+        let base_vm = line.base_vm.as_str();
+        // Whether the base exists is read live, so promoting a base needs no
+        // rebuild (IC-1).
         let exists = service.host.vm_exists(base_vm)?;
         let running_line = records
             .iter()
@@ -179,15 +173,15 @@ pub fn images_snapshot(service: &Service) -> OpResult<Value> {
                 "kind": kind,
                 "base_vm": base_vm,
                 "base_available": exists,
-                "clone_prefix": cfg.get("clone_prefix").cloned().unwrap_or(Value::Null),
-                "defaults": cfg.get("defaults").cloned().unwrap_or(Value::Null),
-                "source": cfg.get("source").cloned().unwrap_or(Value::Null),
+                "clone_prefix": line.clone_prefix,
+                "defaults": line.defaults.to_json(),
+                "source": line.source,
                 "concurrency": {"running": running_line, "limit": limit, "acquirable": acquirable},
                 "active_purposes": purposes,
             }),
         );
     }
-    Ok(json!({"images": out, "capacity": capacity}))
+    Ok(json!({"images": out, "capacity": capacity, "catalog": view.status.to_json()}))
 }
 
 fn number(value: f64) -> Value {

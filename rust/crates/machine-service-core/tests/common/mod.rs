@@ -13,19 +13,22 @@ pub mod guest;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Map, Value};
 use tempfile::TempDir;
 
 use machine_service_core::acquisition_options::GuestNetwork;
+use machine_service_core::catalog::{
+    BuiltLines, CatalogFailure, CatalogSource, FileIdentity, IdentityEntry, ImageLine,
+    InputIdentity, ResourceDefaults,
+};
 use machine_service_core::config::{Config, GuestLink};
 use machine_service_core::console_api::ConsoleController;
 use machine_service_core::error::{OpError, OpResult};
 use machine_service_core::guest_link::{GuestChannel, START_COMMAND, UPLOAD_COMMAND};
 use machine_service_core::host::{BootProcess, Host, TartOutput};
-use machine_service_core::lines::LineCache;
 use machine_service_core::service::Service;
 
 /// The IP reported by the fake host, matching `ServiceFixture`.
@@ -326,12 +329,14 @@ pub struct FakeHost {
     pub tart: FakeTart,
     /// In-memory SSH and SCP.
     pub ssh: FakeSSH,
-    /// The image map returned by `discover_lines`.
-    pub lines: Map<String, Value>,
-    /// Replaces [`FakeHost::lines`] when set, for tests that change an image's configuration.
-    pub lines_override: Mutex<Option<Map<String, Value>>>,
-    /// The base-VM map returned by `discover_lines`.
-    pub bases: Map<String, Value>,
+    /// The image catalog's in-memory source.
+    pub catalog: Arc<MemoryLines>,
+    /// Replaces the default lines when set, for tests that change an image's
+    /// configuration. Shared with [`FakeHost::catalog`].
+    pub lines_override: Arc<Mutex<Option<Map<String, Value>>>>,
+    /// When set before the service is built, the service reads the real
+    /// `images/*/line.conf` files instead of [`FakeHost::catalog`].
+    pub file_lines: AtomicBool,
     /// The IP `wait_ip` reports.
     pub wait_ip_value: Mutex<Option<String>>,
     /// What `wait_ssh` reports.
@@ -405,12 +410,17 @@ impl FakeHost {
             PROBE_CLOSED,
         );
         ssh.map(machine_service_core::isolation::EGRESS_MARKER, 0, EGRESS_OK);
+        let lines_override = Arc::new(Mutex::new(None));
+        let catalog = Arc::new(MemoryLines::new(
+            default_lines(),
+            Arc::clone(&lines_override),
+        ));
         Self {
             tart: FakeTart::new(),
             ssh,
-            lines: default_lines(),
-            lines_override: Mutex::new(None),
-            bases: default_bases(),
+            catalog: Arc::clone(&catalog),
+            lines_override,
+            file_lines: AtomicBool::new(false),
             wait_ip_value: Mutex::new(Some(FAKE_IP.to_string())),
             wait_ssh_ok: AtomicBool::new(true),
             stub_transfer: AtomicBool::new(true),
@@ -614,16 +624,11 @@ impl Host for FakeHost {
         *self.gauge.lock().expect("gauge")
     }
 
-    fn discover_lines(
-        &self,
-        _cache: &mut LineCache,
-        _force: bool,
-    ) -> OpResult<(Map<String, Value>, Map<String, Value>)> {
-        let lines = self.lines_override.lock().expect("lines_override").clone();
-        Ok((
-            lines.unwrap_or_else(|| self.lines.clone()),
-            self.bases.clone(),
-        ))
+    fn catalog_source(&self) -> Option<Arc<dyn CatalogSource>> {
+        if self.file_lines.load(Ordering::SeqCst) {
+            return None;
+        }
+        Some(Arc::clone(&self.catalog) as Arc<dyn CatalogSource>)
     }
 
     fn home_dir(&self) -> Option<PathBuf> {
@@ -659,18 +664,124 @@ pub fn default_lines() -> Map<String, Value> {
     lines
 }
 
-/// The base-VM map matching [`default_lines`].
-pub fn default_bases() -> Map<String, Value> {
-    let mut bases = Map::new();
-    bases.insert(
-        "macos26".to_string(),
-        Value::String("pilot-macos26-base".to_string()),
-    );
-    bases.insert(
-        "ubuntu2404".to_string(),
-        Value::String("pilot-ubuntu-base".to_string()),
-    );
-    bases
+// -------------------------------------------------------------- MemoryLines
+
+/// The image catalog's in-memory source: the fixture's lines as JSON
+/// records, replaced through a shared override, with counters of identity
+/// reads and builds.
+///
+/// The identity of a set of lines is the SHA-256 of each record, so any
+/// change to the override is a changed input, exactly as an edited
+/// `line.conf` is for the real source.
+pub struct MemoryLines {
+    default: Map<String, Value>,
+    lines_override: Arc<Mutex<Option<Map<String, Value>>>>,
+    /// How many times the catalog computed the identity.
+    pub identity_reads: AtomicUsize,
+    /// How many times the catalog built.
+    pub builds: AtomicUsize,
+}
+
+impl MemoryLines {
+    /// A source serving `default` unless `lines_override` holds lines.
+    pub fn new(
+        default: Map<String, Value>,
+        lines_override: Arc<Mutex<Option<Map<String, Value>>>>,
+    ) -> Self {
+        Self {
+            default,
+            lines_override,
+            identity_reads: AtomicUsize::new(0),
+            builds: AtomicUsize::new(0),
+        }
+    }
+
+    fn current(&self) -> Map<String, Value> {
+        self.lines_override
+            .lock()
+            .expect("lines_override")
+            .clone()
+            .unwrap_or_else(|| self.default.clone())
+    }
+}
+
+impl CatalogSource for MemoryLines {
+    fn identity(&self) -> InputIdentity {
+        self.identity_reads.fetch_add(1, Ordering::SeqCst);
+        let entries = self
+            .current()
+            .iter()
+            .map(|(image, record)| {
+                let text = record.to_string();
+                IdentityEntry {
+                    image: image.clone(),
+                    path: PathBuf::from(format!("memory://{image}/line.conf")),
+                    file: FileIdentity::Regular {
+                        inode: 0,
+                        size: text.len() as u64,
+                        mtime_ns: 0,
+                        sha256: Some(sha256_hex(text.as_bytes())),
+                    },
+                }
+            })
+            .collect();
+        InputIdentity {
+            entries,
+            unreadable: None,
+        }
+    }
+
+    fn build(&self, _identity: &InputIdentity) -> Result<BuiltLines, CatalogFailure> {
+        self.builds.fetch_add(1, Ordering::SeqCst);
+        let mut built = BuiltLines::default();
+        for (image, record) in self.current() {
+            let (line, password) = line_from_json(&record);
+            built.lines.insert(image.clone(), line);
+            built.credentials.insert(image, password);
+        }
+        Ok(built)
+    }
+}
+
+/// Split a fixture's JSON line record into the catalog's line and its guest
+/// password.
+pub fn line_from_json(record: &Value) -> (ImageLine, String) {
+    let text = |key: &str| {
+        record
+            .get(key)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    let default = |key: &str| {
+        record
+            .get("defaults")
+            .and_then(|defaults| defaults.get(key))
+            .and_then(Value::as_i64)
+    };
+    let line = ImageLine {
+        kind: text("kind"),
+        base_vm: text("base_vm"),
+        work_vm: record
+            .get("work_vm")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        clone_prefix: text("clone_prefix"),
+        guest_user: text("ssh_user"),
+        defaults: ResourceDefaults {
+            cpu: default("cpu"),
+            memory_mb: default("memory_mb"),
+            disk_gb: default("disk_gb"),
+        },
+        source: text("source"),
+    };
+    (line, text("ssh_pass"))
+}
+
+/// Hex SHA-256.
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(bytes))
 }
 
 // ------------------------------------------------------------------ Fixture
@@ -699,23 +810,32 @@ impl Fixture {
     /// `self.svc.CONSOLES = <manager>` replacement, using the same
     /// `verify_transfer` stub as [`Fixture::new`].
     pub fn with_consoles(consoles: Arc<dyn ConsoleController>) -> Self {
-        Self::build(true, Some(consoles), GuestLink::default())
+        Self::build(true, Some(consoles), GuestLink::default(), false)
     }
 
     /// Build a fixture, optionally exercising the real transfer check.
     pub fn with_transfer_stub(stub: bool) -> Self {
-        Self::build(stub, None, GuestLink::default())
+        Self::build(stub, None, GuestLink::default(), false)
     }
 
     /// Build a fixture whose guest operations use `link`.
     pub fn with_guest_link(link: GuestLink) -> Self {
-        Self::build(true, None, link)
+        Self::build(true, None, link, false)
+    }
+
+    /// Build a fixture whose image catalog reads the real
+    /// `<pilot>/images/*/line.conf` files. The catalog is not started: the
+    /// test seeds the files and starts it, as the daemon does once it owns
+    /// `daemon.lock`.
+    pub fn with_file_lines() -> Self {
+        Self::build(true, None, GuestLink::default(), true)
     }
 
     fn build(
         stub: bool,
         consoles: Option<Arc<dyn ConsoleController>>,
         guest_link: GuestLink,
+        file_lines: bool,
     ) -> Self {
         let dir = tempfile::tempdir().expect("tempdir");
         // macOS `/var` is a symlink; lease keys intentionally reject those.
@@ -735,12 +855,18 @@ impl Fixture {
         };
         let host = Arc::new(FakeHost::new(root.join("home")));
         host.stub_transfer.store(stub, Ordering::SeqCst);
+        host.file_lines.store(file_lines, Ordering::SeqCst);
         let state_file = config.state_file.clone();
         let host_trait = Arc::clone(&host) as Arc<dyn Host>;
         let service = Arc::new(match consoles {
             Some(consoles) => Service::with_consoles(config, consoles, host_trait),
             None => Service::with_host(config, None, host_trait),
         });
+        if !file_lines {
+            service
+                .initialize_image_catalog()
+                .expect("in-memory image catalog");
+        }
         Self {
             dir,
             host,
@@ -795,7 +921,9 @@ impl Fixture {
 
     /// Snapshot the `GET /images` body.
     pub fn images_snapshot(&self) -> Value {
-        machine_service_core::snapshot::images_snapshot(&self.service).expect("images snapshot")
+        let view = self.service.image_catalog();
+        machine_service_core::snapshot::images_snapshot(&self.service, &view)
+            .expect("images snapshot")
     }
 
     /// Acquire with the Python defaults: base source, NAT, TTL 24h, wait.

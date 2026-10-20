@@ -20,8 +20,8 @@
 //!   (`state::set_store_failure`, `debug_assertions`-gated) and is exercised by
 //!   the stock-console failure tests; here the single "running implies
 //!   ssh_verified" transition is still asserted on the final record.
-//! * `mock.patch.object(svc, "line_cfg")` — replaced by counting
-//!   `discover_lines` on the test host.
+//! * `mock.patch.object(svc, "line_cfg")` — replaced by counting the image
+//!   catalog's identity reads on the test host's in-memory catalog source.
 //! * `mock.patch.object(svc, "operation_lock")` in the two concurrency tests —
 //!   the real lock is not observable; a bounded wait substitutes for the
 //!   Python "release reached the per-VM lock" event.
@@ -40,12 +40,12 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::{Duration, Instant};
 
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 
+use machine_service_core::catalog::CatalogSource;
 use machine_service_core::config::unix_now;
 use machine_service_core::error::{OpError, OpResult};
 use machine_service_core::host::{BootProcess, Host, TartOutput};
-use machine_service_core::lines::LineCache;
 use machine_service_core::service::Service;
 use machine_service_core::ssh::shell_quote;
 
@@ -58,15 +58,13 @@ use machine_service_core::ssh::shell_quote;
 type TartObserver = Arc<dyn Fn(&str, &[String]) + Send + Sync>;
 
 /// A `Host` that delegates to the in-memory `FakeHost` and adds injectable
-/// `bootstrap` failure, a no-op `delete`, a `discover_lines` counter, and a
-/// post-`tart` observer.
+/// `bootstrap` failure, a no-op `delete`, and a post-`tart` observer. Its
+/// image catalog is the inner fake's.
 struct TestHost {
     inner: Arc<common::FakeHost>,
     shared: Arc<Mutex<Shared>>,
     bootstrap_error: Mutex<Option<String>>,
     no_op_delete: AtomicBool,
-    discover_calls: Mutex<usize>,
-    lines_override: Mutex<Option<Map<String, Value>>>,
     tart_observer: Mutex<Option<TartObserver>>,
 }
 
@@ -77,8 +75,6 @@ impl TestHost {
             shared,
             bootstrap_error: Mutex::new(None),
             no_op_delete: AtomicBool::new(false),
-            discover_calls: Mutex::new(0),
-            lines_override: Mutex::new(None),
             tart_observer: Mutex::new(None),
         }
     }
@@ -198,16 +194,8 @@ impl Host for TestHost {
         self.inner.host_macos_guests()
     }
 
-    fn discover_lines(
-        &self,
-        cache: &mut LineCache,
-        force: bool,
-    ) -> OpResult<(Map<String, Value>, Map<String, Value>)> {
-        *self.discover_calls.lock().expect("discover_calls") += 1;
-        if let Some(lines) = self.lines_override.lock().expect("lines_override").clone() {
-            return Ok((lines, self.inner.bases.clone()));
-        }
-        self.inner.discover_lines(cache, force)
+    fn catalog_source(&self) -> Option<Arc<dyn CatalogSource>> {
+        self.inner.catalog_source()
     }
 
     fn home_dir(&self) -> Option<PathBuf> {
@@ -307,6 +295,9 @@ impl KeyFixture {
             None,
             Arc::clone(&host) as Arc<dyn Host>,
         ));
+        service
+            .initialize_image_catalog()
+            .expect("in-memory image catalog");
         install_hooks(&base.host, &Arc::downgrade(&service), &state_dir, &shared);
         Self {
             base,
@@ -410,12 +401,17 @@ impl KeyFixture {
         *self.host.tart_observer.lock().expect("tart_observer") = Some(observer);
     }
 
+    /// How many times the image catalog was read since the last reset.
     fn discover_calls(&self) -> usize {
-        *self.host.discover_calls.lock().expect("discover_calls")
+        self.base.host.catalog.identity_reads.load(Ordering::SeqCst)
     }
 
     fn reset_discover_calls(&self) {
-        *self.host.discover_calls.lock().expect("discover_calls") = 0;
+        self.base
+            .host
+            .catalog
+            .identity_reads
+            .store(0, Ordering::SeqCst);
     }
 
     fn bootstrap_vm(&self, index: usize) -> String {
@@ -1238,6 +1234,9 @@ fn restart_uses_persisted_identity_without_bootstrap_or_rekey() {
         None,
         Arc::clone(&fixture.host) as Arc<dyn Host>,
     ));
+    restarted
+        .initialize_image_catalog()
+        .expect("restarted image catalog");
     fixture.reset_bootstrap();
     fixture.reset_ssh();
     fixture.reset_discover_calls();
@@ -1283,7 +1282,12 @@ fn changed_line_credentials_do_not_change_leased_exec_push_pull_identity() {
             "source": "test://ubuntu2404/line.conf"
         }),
     );
-    *fixture.host.lines_override.lock().expect("lines_override") = Some(replacement);
+    *fixture
+        .base
+        .host
+        .lines_override
+        .lock()
+        .expect("lines_override") = Some(replacement);
     fixture.reset_bootstrap();
     fixture.reset_ssh();
     fixture.reset_scp();

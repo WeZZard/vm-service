@@ -106,23 +106,24 @@ fn serve(config: Config) -> Result<(), String> {
         std::mem::forget(descriptor);
     }
 
-    if let Err(error) = service.initialize_application_associations() {
+    // The image catalog executes `line.conf` files only from here on, in the
+    // process that owns `daemon.lock` (IC-4). A legacy startup whose files
+    // are broken serves with the catalog `unavailable`, and the builder has
+    // already logged the failure; a selected environment refuses to start
+    // (IC-5).
+    if let Err(error) = service.initialize_image_catalog() {
         if selected {
             return Err(format!("selected image configuration is invalid: {error}"));
         }
-        let bounded: String = error.to_string().chars().take(512).collect();
-        service.log(&format!("WARN: /applications unavailable: {bounded}"));
     }
-    if selected {
-        let mut cache = service
-            .lines
-            .lock()
-            .map_err(|_| "lines poisoned".to_string())?;
-        service
-            .host
-            .discover_lines(&mut cache, true)
-            .map_err(|error| error.to_string())?;
-    }
+    // Starts rebuilds early; correctness never depends on it (IC-3, DC-38).
+    let _watcher = match machine_service_core::catalog::watch::watch_catalog(&service.catalog) {
+        Ok(watcher) => watcher,
+        Err(error) => {
+            service.log(&format!("WARN: image catalog watcher not started: {error}"));
+            None
+        }
+    };
 
     // No acquisition survives a restart; release the records it left behind
     // before any request can observe or retry them.
@@ -269,6 +270,9 @@ fn handle_get(service: &Service, request: &mut Request, url: &str) -> OpResult<(
     }
     if path == "/health" {
         let mut body = json!({"ok": true, "service": "machine-service"});
+        // A health check never waits for a rebuild; a changed file reads as
+        // `stale` until the rebuild this read starts has finished (IC-5).
+        body["catalog"] = service.catalog.peek().status.to_json();
         if let Some(environment) = service
             .config
             .environment
@@ -283,17 +287,17 @@ fn handle_get(service: &Service, request: &mut Request, url: &str) -> OpResult<(
         return Ok((200, control_only::descriptor()));
     }
     if path == "/acquisition-capabilities" {
-        let images = if service.associations_initialized() {
-            Some(Value::Array(
-                service
-                    .association_tuples()
-                    .into_iter()
-                    .map(|(image, kind, _)| json!({"image": image, "os": kind}))
+        // The descriptor's shape is closed, so it carries no catalog status.
+        let view = service.image_catalog();
+        let images = view.snapshot().map(|snapshot| {
+            Value::Array(
+                snapshot
+                    .lines
+                    .iter()
+                    .map(|(image, line)| json!({"image": image, "os": line.kind}))
                     .collect(),
-            ))
-        } else {
-            None
-        };
+            )
+        });
         let capabilities = service.consoles.capabilities();
         // A stat of the Softnet executable Tart would run and a read of the
         // guest firewall's anchor file; no process starts.
@@ -311,10 +315,19 @@ fn handle_get(service: &Service, request: &mut Request, url: &str) -> OpResult<(
         ));
     }
     if path == "/images" {
-        return Ok((200, snapshot::images_snapshot(service)?));
+        let view = service.image_catalog();
+        if view.snapshot().is_none() {
+            return Ok((503, catalog_unavailable(&view)));
+        }
+        return Ok((200, snapshot::images_snapshot(service, &view)?));
     }
     if path == "/applications" {
-        let associations = service.application_associations()?;
+        // The catalog's shape is closed, so a failure answers 503 with the
+        // diagnostic alone (IC-5).
+        let associations = match service.application_associations() {
+            Ok(associations) => associations,
+            Err(error) => return Ok((503, json!({"error": error.to_string()}))),
+        };
         let log = |message: &str| service.log(message);
         match application_catalog::load_catalog(
             &service.config.pilot,
@@ -327,7 +340,9 @@ fn handle_get(service: &Service, request: &mut Request, url: &str) -> OpResult<(
         }
     }
     if path == "/machines" {
-        return Ok((200, snapshot::snapshot(service)?));
+        let mut body = snapshot::snapshot(service)?;
+        body["catalog"] = service.image_catalog().status.to_json();
+        return Ok((200, body));
     }
     if let Some(name) = path.strip_prefix("/machines/") {
         if !name.is_empty() && !name.contains('/') {
@@ -419,11 +434,26 @@ fn handle_post(service: &Service, request: &mut Request, url: &str) -> OpResult<
         }
     }
 
+    if path == "/images/reload" {
+        // Rebuild even when the files did not change, and report the result
+        // (IC-3).
+        let view = service.catalog.reload();
+        if view.snapshot().is_none() {
+            return Ok((503, catalog_unavailable(&view)));
+        }
+        return Ok((200, json!({"catalog": view.status.to_json()})));
+    }
+
     if path == "/gc" {
         service.gc_once()?;
         return Ok((200, json!({"gc": "done"})));
     }
     Ok((404, json!({"error": "not found"})))
+}
+
+/// The HTTP 503 body of a catalog request while no snapshot exists (IC-5).
+fn catalog_unavailable(view: &machine_service_core::catalog::CatalogView) -> Value {
+    json!({"error": view.status.diagnostic(), "catalog": view.status.to_json()})
 }
 
 fn handle_console(

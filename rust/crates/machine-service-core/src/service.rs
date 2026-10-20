@@ -1,5 +1,5 @@
-//! The service object: resolved configuration, lease state, line discovery,
-//! console controller, and application associations.
+//! The service object: resolved configuration, lease state, the image
+//! catalog, and the console controller.
 //!
 //! The Python daemon used module-level globals. The Rust port keeps the same
 //! values in one `Service` so the daemon can serve concurrently and tests can
@@ -12,31 +12,14 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{Map, Value};
 
+use crate::catalog::{CatalogView, FileSource, ImageCatalog, REBUILD_WAIT};
 use crate::config::{log_to_file, Config};
 use crate::console_api::{ConsoleConfig, ConsoleController, Manager};
 use crate::error::{OpError, OpResult};
 use crate::guest_link::LiveSession;
 use crate::host::{BootProcess, Host, RealHost};
-use crate::lines::LineCache;
 use crate::reentrant::ReentrantLock;
 use crate::state::State;
-
-/// One validated image-to-base association.
-#[derive(Debug, Clone)]
-pub struct Association {
-    /// The image name (the `images/<name>` directory).
-    pub image: String,
-    /// The OS kind, `linux` or `macos`.
-    pub kind: String,
-    /// The configured base VM.
-    pub base_vm: String,
-}
-
-#[derive(Default)]
-struct Associations {
-    attempted: bool,
-    value: Option<Vec<Association>>,
-}
 
 /// The bound service instance.
 pub struct Service {
@@ -44,13 +27,13 @@ pub struct Service {
     pub config: Config,
     /// The lease state store.
     pub state: State,
-    /// Line discovery cache.
-    pub lines: Mutex<LineCache>,
+    /// The image catalog (`docs/arch/image-catalog.md`, IC-1): every reader
+    /// of the image lines goes through it.
+    pub catalog: Arc<ImageCatalog>,
     /// The console controller.
     pub consoles: Arc<dyn ConsoleController>,
-    /// The host boundary: Tart, SSH, and line discovery.
+    /// The host boundary: Tart, SSH, and the image catalog's source.
     pub host: Arc<dyn Host>,
-    associations: Mutex<Associations>,
     operation_locks: Mutex<HashMap<String, Arc<ReentrantLock>>>,
     /// Per-VM cancellation flags, set once a release has committed the
     /// `releasing` state. Guest operations observe them; see
@@ -102,13 +85,21 @@ impl Service {
             config.lock_file.clone(),
             fingerprint,
         );
+        let source = host
+            .catalog_source()
+            .unwrap_or_else(|| Arc::new(FileSource::new(config.pilot.join("images"))));
+        let log_file = config.log_file.clone();
+        let catalog = ImageCatalog::new(
+            source,
+            Arc::new(move |message: &str| log_to_file(&log_file, message)),
+            REBUILD_WAIT,
+        );
         Self {
             config,
             state,
-            lines: Mutex::new(LineCache::default()),
+            catalog,
             consoles,
             host,
-            associations: Mutex::new(Associations::default()),
             operation_locks: Mutex::new(HashMap::new()),
             release_flags: Mutex::new(HashMap::new()),
             absent_passes: Mutex::new(HashMap::new()),
@@ -116,22 +107,34 @@ impl Service {
         }
     }
 
-    /// Resolve one image configuration through the host, or fail with the
-    /// Python error text.
+    /// Read the image catalog, rebuilding it first when its files changed
+    /// (IC-3).
+    pub fn image_catalog(&self) -> CatalogView {
+        self.catalog.read()
+    }
+
+    /// Resolve one image line from the catalog, or fail with the Python
+    /// error text.
+    ///
+    /// The record carries the line's guest password from the same build, for
+    /// the lease bootstrap only; the snapshot itself holds none (IC-1).
     pub fn line_cfg(&self, image: &str) -> OpResult<Value> {
-        let mut cache = self
-            .lines
-            .lock()
-            .map_err(|_| OpError::new("lines poisoned"))?;
-        let (lines, _) = self.host.discover_lines(&mut cache, false)?;
-        match lines.get(image) {
-            Some(value) => Ok(value.clone()),
+        let view = self.image_catalog();
+        let snapshot = view
+            .snapshot()
+            .ok_or_else(|| OpError::new(view.status.diagnostic()))?;
+        match snapshot.lines.get(image) {
+            Some(line) => {
+                let mut record = line.to_json();
+                record["ssh_pass"] =
+                    Value::String(view.guest_password(image).unwrap_or_default().to_string());
+                Ok(record)
+            }
             None => {
-                let mut names: Vec<&String> = lines.keys().collect();
-                names.sort();
-                let available = names
-                    .iter()
-                    .map(|name| name.as_str())
+                let available = snapshot
+                    .lines
+                    .keys()
+                    .map(String::as_str)
                     .collect::<Vec<_>>()
                     .join(", ");
                 Err(OpError::new(format!(
@@ -252,145 +255,36 @@ impl Service {
         })
     }
 
-    /// Publish all image associations or none, mirroring
-    /// `initialize_application_associations`.
-    pub fn initialize_application_associations(&self) -> OpResult<()> {
-        let mut associations = self
-            .associations
-            .lock()
-            .map_err(|_| OpError::new("association state poisoned"))?;
-        if associations.attempted {
-            return Err(OpError::new(
-                "application associations require daemon restart",
-            ));
+    /// Allow catalog rebuilds and build the first snapshot (IC-4). The
+    /// daemon calls this once it owns `daemon.lock`, before it serves; no
+    /// `line.conf` is executed for this service before then.
+    ///
+    /// A failure leaves the catalog `unavailable` but armed, so the next
+    /// change to the files is tried at once.
+    pub fn initialize_image_catalog(&self) -> OpResult<()> {
+        let view = self.catalog.start();
+        match view.snapshot() {
+            Some(_) => Ok(()),
+            None => Err(OpError::new(view.status.diagnostic())),
         }
-        associations.attempted = true;
-
-        let mut pending: Vec<Association> = Vec::new();
-        let images_dir = self.config.pilot.join("images");
-        let entries = std::fs::read_dir(&images_dir)
-            .map_err(|_| OpError::new("application association configuration unreadable"))?;
-        let mut directories: Vec<PathBuf> = entries.flatten().map(|entry| entry.path()).collect();
-        directories.sort();
-        for directory in directories {
-            let Ok(metadata) = std::fs::metadata(&directory) else {
-                return Err(OpError::new(
-                    "application association configuration unreadable",
-                ));
-            };
-            if !metadata.is_dir() {
-                continue;
-            }
-            let conf_path = directory.join("line.conf");
-            let conf_meta = match std::fs::metadata(&conf_path) {
-                Ok(meta) => meta,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(_) => {
-                    return Err(OpError::new(
-                        "application association configuration unreadable",
-                    ))
-                }
-            };
-            if !conf_meta.is_file() {
-                return Err(OpError::new("nonregular line configuration"));
-            }
-            let conf = crate::lines::parse_line_conf(&conf_path, true)
-                .ok_or_else(|| OpError::new("line configuration parse failed"))?;
-            let image = directory
-                .file_name()
-                .map(|name| name.to_string_lossy().to_string())
-                .unwrap_or_default();
-            let kind = conf
-                .get("LINE_KIND")
-                .and_then(Value::as_str)
-                .unwrap_or("macos")
-                .to_string();
-            let base = conf
-                .get("BASE_VM")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string();
-            for key in [&image, &base] {
-                if !valid_association_key(key) {
-                    return Err(OpError::new("invalid image/base association"));
-                }
-            }
-            if kind != "linux" && kind != "macos" {
-                return Err(OpError::new("invalid association OS"));
-            }
-            pending.push(Association {
-                image,
-                kind,
-                base_vm: base,
-            });
-            if pending.len() > application_catalog::MAX_IMAGES {
-                return Err(OpError::new("too many image associations"));
-            }
-        }
-        if pending.is_empty() {
-            return Err(OpError::new("no configured image associations"));
-        }
-        associations.value = Some(pending);
-        Ok(())
     }
 
-    /// Read-only detached association view. Never initializes or retries.
+    /// The image-to-`{kind, base_vm}` associations `/applications` pairs
+    /// with the portable inventories, from the current catalog.
     pub fn application_associations(&self) -> OpResult<Map<String, Value>> {
-        let associations = self
-            .associations
-            .lock()
-            .map_err(|_| OpError::new("association state poisoned"))?;
-        let value = associations.value.as_ref().ok_or_else(|| {
-            OpError::new("application associations unavailable; daemon restart required")
-        })?;
-        let mut out = Map::new();
-        for association in value {
-            out.insert(
-                association.image.clone(),
-                serde_json::json!({"kind": association.kind, "base_vm": association.base_vm}),
-            );
-        }
-        Ok(out)
-    }
-
-    /// The raw association tuples for capability reporting.
-    pub fn association_tuples(&self) -> Vec<(String, String, String)> {
-        self.associations
-            .lock()
-            .map(|associations| {
-                associations
-                    .value
-                    .as_ref()
-                    .map(|value| {
-                        value
-                            .iter()
-                            .map(|item| {
-                                (item.image.clone(), item.kind.clone(), item.base_vm.clone())
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default()
+        let view = self.image_catalog();
+        let snapshot = view
+            .snapshot()
+            .ok_or_else(|| OpError::new(view.status.diagnostic()))?;
+        Ok(snapshot
+            .lines
+            .iter()
+            .map(|(image, line)| {
+                (
+                    image.clone(),
+                    serde_json::json!({"kind": line.kind, "base_vm": line.base_vm}),
+                )
             })
-            .unwrap_or_default()
+            .collect())
     }
-
-    /// Whether associations were initialized, for capability reporting.
-    pub fn associations_initialized(&self) -> bool {
-        self.associations
-            .lock()
-            .map(|associations| associations.value.is_some())
-            .unwrap_or(false)
-    }
-}
-
-fn valid_association_key(value: &str) -> bool {
-    if value.is_empty() || value.len() > 128 {
-        return false;
-    }
-    let mut chars = value.chars();
-    match chars.next() {
-        Some(c) if c.is_ascii_alphanumeric() => {}
-        _ => return false,
-    }
-    chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
 }

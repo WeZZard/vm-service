@@ -1,6 +1,7 @@
 //! `machine-service` core: lease state, Tart lifecycle, SSH access, and the HTTP
 //! operations the daemon exposes.
 
+pub mod catalog;
 pub mod config;
 pub mod console_api;
 pub mod error;
