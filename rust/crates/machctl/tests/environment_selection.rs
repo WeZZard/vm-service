@@ -53,7 +53,7 @@ impl Fixture {
         );
 
         let mut profile = Map::new();
-        profile.insert("schemaVersion".to_string(), json!(1));
+        profile.insert("schemaVersion".to_string(), json!(2));
         profile.insert("id".to_string(), json!("fixture"));
         profile.insert("vmServiceUrl".to_string(), json!("http://127.0.0.1:6249/"));
         profile.insert("imageRepository".to_string(), json!(repo.to_string_lossy()));
@@ -73,9 +73,9 @@ impl Fixture {
             "relayStateDir".to_string(),
             json!(root.join("relay").to_string_lossy()),
         );
-        // `vmctlPath` and `tartPath` must be executable regular files; the
-        // real binary satisfies both roles for `vmctlPath`.
-        profile.insert("vmctlPath".to_string(), json!(MACHCTL));
+        // `machctlPath` and `tartPath` must be executable regular files; the
+        // real binary satisfies both roles for `machctlPath`.
+        profile.insert("machctlPath".to_string(), json!(MACHCTL));
         profile.insert("tartPath".to_string(), json!(fake.to_string_lossy()));
 
         let file = root.join("environment.json");
@@ -221,4 +221,49 @@ fn test_bound_cli_sequence_refuses_profile_edits_but_explicit_selection_can_chan
     let bundle: Value = serde_json::from_slice(&explicit.stdout).expect("bundle json");
     assert_eq!(bundle["identity"]["id"], "edited-profile");
     assert!(!fixture.root.join("store").exists());
+}
+
+/// AC-45: `machctl --environment <profile> environment --json` refuses a
+/// profile at schemaVersion 1 with a `vmctlPath` field, naming `machctlPath`
+/// and schemaVersion 2; the same profile at schemaVersion 2 with
+/// `machctlPath` prints the resolved profile and exports `MACHCTL`, and no
+/// `VMCTL`.
+#[test]
+fn ac45_old_profile_is_refused_and_schema_two_exports_machctl() {
+    let mut fixture = Fixture::new();
+    let machctl = fixture.profile.remove("machctlPath").expect("machctlPath");
+    fixture.profile.insert("vmctlPath".to_string(), machctl.clone());
+    fixture.profile.insert("schemaVersion".to_string(), json!(1));
+    fixture.save();
+
+    let output = fixture.run(
+        &["--environment", fixture.profile_path(), "environment", "--json"],
+        &[],
+    );
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("machctlPath"), "{stderr}");
+    assert!(stderr.contains("schemaVersion 2"), "{stderr}");
+    assert!(output.stdout.is_empty());
+
+    fixture.profile.remove("vmctlPath");
+    fixture.profile.insert("machctlPath".to_string(), machctl.clone());
+    fixture.profile.insert("schemaVersion".to_string(), json!(2));
+    fixture.save();
+
+    let output = fixture.run(
+        &["--environment", fixture.profile_path(), "environment", "--json"],
+        &[],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let bundle: Value = serde_json::from_slice(&output.stdout).expect("bundle json");
+    assert_eq!(bundle["profile"]["schemaVersion"], json!(2));
+    assert_eq!(bundle["environment"]["MACHCTL"], machctl);
+    let exports = bundle["environment"].as_object().expect("exports");
+    assert!(!exports.contains_key("VMCTL"));
+    assert!(exports.keys().all(|key| !key.starts_with("VM_SERVICE_")));
 }

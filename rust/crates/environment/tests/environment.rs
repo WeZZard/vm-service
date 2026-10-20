@@ -90,7 +90,7 @@ impl Fixture {
         fs::write(&fake, "#!/bin/sh\nprintf \"%s\\n\" \"$TART_HOME\"\n").expect("write fake");
         fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).expect("chmod fake");
 
-        // `vmctlPath` must be an executable regular file, and the resolver is
+        // `machctlPath` must be an executable regular file, and the resolver is
         // fitted with a synthetic `tart` for the same reason. The Python
         // `bin/vmctl` this fixture used to point at was removed together with
         // the rest of the Python implementation.
@@ -100,7 +100,7 @@ impl Fixture {
             .expect("chmod fake machctl");
 
         let mut profile = Map::new();
-        profile.insert("schemaVersion".to_string(), json!(1));
+        profile.insert("schemaVersion".to_string(), json!(2));
         profile.insert("id".to_string(), json!("fixture"));
         profile.insert("vmServiceUrl".to_string(), json!("http://127.0.0.1:6249/"));
         profile.insert("imageRepository".to_string(), string(&repo));
@@ -111,7 +111,7 @@ impl Fixture {
             string(root.join("images-state")),
         );
         profile.insert("relayStateDir".to_string(), string(root.join("relay")));
-        profile.insert("vmctlPath".to_string(), string(&fake_machctl));
+        profile.insert("machctlPath".to_string(), string(&fake_machctl));
         profile.insert("tartPath".to_string(), string(&fake));
 
         let file = root.join("environment.json");
@@ -279,10 +279,10 @@ fn schema_numeric_one_and_symlink_resolution() {
 
     fs::create_dir_all(fixture.root.join("home")).expect("create home");
     let mut raw = fixture.profile.clone();
-    raw.insert("schemaVersion".to_string(), json!(1.0));
+    raw.insert("schemaVersion".to_string(), json!(2.0));
     raw.insert("tartHome".to_string(), string(alias.join("new")));
     let profile = canonical_profile(&Value::Object(raw), &fixture.env).expect("valid profile");
-    assert_eq!(profile["schemaVersion"].as_i64(), Some(1));
+    assert_eq!(profile["schemaVersion"].as_i64(), Some(2));
     assert!(profile["schemaVersion"].is_i64() || profile["schemaVersion"].is_u64());
     assert_eq!(profile["tartHome"], string(fixture.root.join("home/new")));
 }
@@ -433,12 +433,13 @@ fn error_messages_match_python() {
     let mut raw = fixture.profile.clone();
     raw.insert("schemaVersion".to_string(), json!(true));
     let error = canonical_profile(&Value::Object(raw), &fixture.env).expect_err("bool version");
-    assert_eq!(error.to_string(), "schemaVersion must be integer 1");
+    assert_eq!(error.to_string(), "schemaVersion must be integer 2");
 
-    // Python's check is `type(x) not in (int, float) or x != 1`, so an integral
-    // float is accepted, while a bool, a string, a non-integral float and any
-    // other integer are rejected. Measured on CPython 3.14.7.
-    for literal in ["1.0", "1.00", "1e0", "1.0e0"] {
+    // Python's check was `type(x) not in (int, float) or x != 1`, so an
+    // integral float is accepted, while a bool, a string, a non-integral float
+    // and any other integer are rejected. Measured on CPython 3.14.7 at schema
+    // 1; schema 2 keeps the same rule (DC-42).
+    for literal in ["2.0", "2.00", "2e0", "2.0e0"] {
         let mut raw = fixture.profile.clone();
         raw.insert(
             "schemaVersion".to_string(),
@@ -462,7 +463,7 @@ fn error_messages_match_python() {
             "the file path rejected schemaVersion {literal}"
         );
     }
-    for literal in ["3.0", "1.5", "2", "0", "\"1\"", "null"] {
+    for literal in ["3.0", "1.5", "1", "1.0", "0", "\"2\"", "null"] {
         let mut raw = fixture.profile.clone();
         raw.insert(
             "schemaVersion".to_string(),
@@ -487,4 +488,81 @@ fn error_messages_match_python() {
         error.to_string(),
         "id must be a lowercase slug of 1..48 characters"
     );
+}
+
+/// AC-45: a profile at schemaVersion 1 with a `vmctlPath` field is refused,
+/// and the error names `machctlPath` and schemaVersion 2. A profile that
+/// carries `vmctlPath` at any version is refused the same way, and no reader
+/// falls back to the old field (DC-42).
+#[test]
+fn ac45_schema_one_and_vmctl_path_are_refused_with_their_fix() {
+    let fixture = Fixture::new();
+    let machctl = fixture.profile["machctlPath"].clone();
+
+    let mut old = fixture.profile.clone();
+    old.remove("machctlPath");
+    old.insert("vmctlPath".to_string(), machctl.clone());
+    old.insert("schemaVersion".to_string(), json!(1));
+    let mut old_field_only = old.clone();
+    old_field_only.insert("schemaVersion".to_string(), json!(2));
+    let mut old_version_only = fixture.profile.clone();
+    old_version_only.insert("schemaVersion".to_string(), json!(1));
+    let mut both_fields = fixture.profile.clone();
+    both_fields.insert("vmctlPath".to_string(), machctl);
+
+    for raw in [old, old_field_only, old_version_only, both_fields] {
+        let error = canonical_profile(&Value::Object(raw.clone()), &fixture.env)
+            .expect_err("a retired profile must be refused");
+        let message = error.to_string();
+        assert!(message.contains("machctlPath"), "{message}");
+        assert!(message.contains("schemaVersion 2"), "{message}");
+
+        fs::write(
+            &fixture.file,
+            serde_json::to_vec(&Value::Object(raw)).expect("serialize"),
+        )
+        .expect("write profile");
+        let error = load_environment_with(
+            Some(fixture.file.to_str().expect("utf8 path")),
+            &fixture.env,
+        )
+        .expect_err("a retired profile file must be refused");
+        assert!(error.to_string().contains("machctlPath"), "{error}");
+    }
+}
+
+/// AC-45: a schema 2 profile exports `MACHCTL` from `machctlPath` and the
+/// service's `MACHINE_SERVICE_*` names, and no `VMCTL` or `VM_SERVICE_*`.
+#[test]
+fn ac45_schema_two_exports_machctl_and_the_renamed_variables() {
+    let fixture = Fixture::new();
+    fixture.save();
+    let bundle = load_environment_with(
+        Some(fixture.file.to_str().expect("utf8 path")),
+        &fixture.env,
+    )
+    .expect("valid profile")
+    .expect("selected");
+    let exports = bundle["environment"].as_object().expect("exports");
+    let mut names: Vec<&str> = exports.keys().map(String::as_str).collect();
+    names.sort();
+    assert_eq!(
+        names,
+        [
+            "MACHCTL",
+            "MACHINE_SERVICE_HOST",
+            "MACHINE_SERVICE_PORT",
+            "MACHINE_SERVICE_STATE",
+            "PILOT_IMAGES_STATE_DIR",
+            "PILOT_REPO",
+            "TART",
+            "TART_HOME",
+            "VM_ENVIRONMENT_FILE",
+            "VM_ENVIRONMENT_FINGERPRINT",
+            "VM_RELAY_STATE_DIR",
+            "VM_RELAY_URL",
+        ]
+    );
+    assert_eq!(exports["MACHCTL"], bundle["profile"]["machctlPath"]);
+    assert_eq!(bundle["profile"]["schemaVersion"], json!(2));
 }
