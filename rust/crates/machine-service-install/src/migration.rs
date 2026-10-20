@@ -121,7 +121,7 @@ impl Legacy {
         };
         let state_move = if !selected && state_is_default {
             migrated.remove(STATE_KEY);
-            (legacy_state.is_dir() && !exists(&new_state)).then(|| (legacy_state, new_state))
+            (legacy_state.is_dir() && !exists(&new_state)).then_some((legacy_state, new_state))
         } else {
             None
         };
@@ -132,9 +132,7 @@ impl Legacy {
             None => true,
             Some(value) => Path::new(value) == legacy_console,
         };
-        let console_copy = if console_is_default
-            && exists(&legacy_console)
-            && !exists(&new_console)
+        let console_copy = if console_is_default && exists(&legacy_console) && !exists(&new_console)
         {
             if migrated.contains_key(CONSOLE_KEY) {
                 migrated.insert(
@@ -202,7 +200,11 @@ impl Legacy {
             println!("state: {} moves to {}", from.display(), to.display());
         }
         if let Some((from, to)) = &self.console_copy {
-            println!("console configuration: {} is copied to {}", from.display(), to.display());
+            println!(
+                "console configuration: {} is copied to {}",
+                from.display(),
+                to.display()
+            );
         }
     }
 
@@ -257,7 +259,10 @@ pub fn remove_legacy_link(home: &Path, old_dirs: &[PathBuf]) -> Result<(), Insta
     let Some(target) = link_target(&link)? else {
         return Ok(());
     };
-    if old_dirs.iter().any(|directory| target.starts_with(directory)) {
+    if old_dirs
+        .iter()
+        .any(|directory| target.starts_with(directory))
+    {
         std::fs::remove_file(&link)?;
         println!("removed {}", link.display());
     }

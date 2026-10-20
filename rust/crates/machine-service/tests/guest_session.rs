@@ -438,9 +438,10 @@ fn release_stops_the_running_command_and_the_agent() {
     });
 
     let started = Instant::now();
-    let released = guest
-        .fixture
-        .request("POST", &format!("/machines/{vm}/release"), Some(&json!({})));
+    let released =
+        guest
+            .fixture
+            .request("POST", &format!("/machines/{vm}/release"), Some(&json!({})));
     assert_eq!(released.status, 200, "{}", released.body);
     assert!(
         started.elapsed() < Duration::from_secs(5),
@@ -468,9 +469,10 @@ fn release_of_an_idle_lease_ends_its_agent() {
     let vm = guest.acquire();
     assert_eq!(guest.exec(&vm, json!({"argv": ["true"]})).status, 200);
     assert_eq!(pgrep(&guest.agent_pattern()).len(), 1);
-    let released = guest
-        .fixture
-        .request("POST", &format!("/machines/{vm}/release"), Some(&json!({})));
+    let released =
+        guest
+            .fixture
+            .request("POST", &format!("/machines/{vm}/release"), Some(&json!({})));
     assert_eq!(released.status, 200, "{}", released.body);
     wait_until(Duration::from_secs(5), "the agent to end", || {
         pgrep(&guest.agent_pattern()).is_empty()

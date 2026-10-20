@@ -196,7 +196,10 @@ fn test_health() {
     let live = Live::new();
     let response = live.request("GET", "/health", None);
     assert_eq!(response.status, 200);
-    assert_eq!(response.body, json!({"ok": true, "service": "machine-service"}));
+    assert_eq!(
+        response.body,
+        json!({"ok": true, "service": "machine-service"})
+    );
 }
 
 #[test]

@@ -232,12 +232,21 @@ fn test_bound_cli_sequence_refuses_profile_edits_but_explicit_selection_can_chan
 fn ac45_old_profile_is_refused_and_schema_two_exports_machctl() {
     let mut fixture = Fixture::new();
     let machctl = fixture.profile.remove("machctlPath").expect("machctlPath");
-    fixture.profile.insert("vmctlPath".to_string(), machctl.clone());
-    fixture.profile.insert("schemaVersion".to_string(), json!(1));
+    fixture
+        .profile
+        .insert("vmctlPath".to_string(), machctl.clone());
+    fixture
+        .profile
+        .insert("schemaVersion".to_string(), json!(1));
     fixture.save();
 
     let output = fixture.run(
-        &["--environment", fixture.profile_path(), "environment", "--json"],
+        &[
+            "--environment",
+            fixture.profile_path(),
+            "environment",
+            "--json",
+        ],
         &[],
     );
     assert!(!output.status.success());
@@ -247,12 +256,21 @@ fn ac45_old_profile_is_refused_and_schema_two_exports_machctl() {
     assert!(output.stdout.is_empty());
 
     fixture.profile.remove("vmctlPath");
-    fixture.profile.insert("machctlPath".to_string(), machctl.clone());
-    fixture.profile.insert("schemaVersion".to_string(), json!(2));
+    fixture
+        .profile
+        .insert("machctlPath".to_string(), machctl.clone());
+    fixture
+        .profile
+        .insert("schemaVersion".to_string(), json!(2));
     fixture.save();
 
     let output = fixture.run(
-        &["--environment", fixture.profile_path(), "environment", "--json"],
+        &[
+            "--environment",
+            fixture.profile_path(),
+            "environment",
+            "--json",
+        ],
         &[],
     );
     assert!(

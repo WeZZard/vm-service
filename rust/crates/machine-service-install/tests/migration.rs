@@ -40,9 +40,14 @@ fn ac36_install_rewrites_the_old_agents_variables() {
     let data = harness.saved();
     let environment = data["EnvironmentVariables"].as_object().unwrap();
     assert_eq!(environment["MACHINE_SERVICE_HOST"], json!("0.0.0.0"));
-    assert_eq!(environment["MACHINE_SERVICE_GUEST_LINK"], json!("ssh-session"));
+    assert_eq!(
+        environment["MACHINE_SERVICE_GUEST_LINK"],
+        json!("ssh-session")
+    );
     assert!(
-        environment.keys().all(|key| !key.starts_with("VM_SERVICE_")),
+        environment
+            .keys()
+            .all(|key| !key.starts_with("VM_SERVICE_")),
         "{environment:?}"
     );
     assert_eq!(data["Label"], json!("com.wezzard.machine-service"));
@@ -108,7 +113,10 @@ fn ac35_install_moves_state_and_console_and_replaces_the_cli_link() {
         "old log\n"
     );
     assert!(!legacy_state.exists());
-    assert!(stdout.contains(&format!("state: {}", state.display())), "{stdout}");
+    assert!(
+        stdout.contains(&format!("state: {}", state.display())),
+        "{stdout}"
+    );
 
     let console = harness.home.join(".config/machine-service/console.json");
     assert_eq!(
@@ -186,14 +194,15 @@ fn check_reports_the_migration_without_changing_anything() {
     let harness = Harness::new();
     let legacy_state = harness.home.join(".local/state/vm-service");
     fs::create_dir_all(&legacy_state).unwrap();
-    let legacy = harness.save_legacy(&[
-        ("HOME", harness.home_str()),
-        ("VM_SERVICE_HOST", "0.0.0.0"),
-    ]);
+    let legacy =
+        harness.save_legacy(&[("HOME", harness.home_str()), ("VM_SERVICE_HOST", "0.0.0.0")]);
 
     let stdout = succeed(&harness, &["--check"]);
 
-    assert!(stdout.contains("migrating com.wezzard.vm-service"), "{stdout}");
+    assert!(
+        stdout.contains("migrating com.wezzard.vm-service"),
+        "{stdout}"
+    );
     assert!(stdout.contains("Check passed"), "{stdout}");
     assert!(legacy.exists());
     assert!(legacy_state.exists());

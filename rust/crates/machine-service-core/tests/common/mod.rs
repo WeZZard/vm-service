@@ -399,7 +399,11 @@ impl FakeHost {
     pub fn new(home: PathBuf) -> Self {
         let home_tart_store = home.join(".tart");
         let ssh = FakeSSH::new();
-        ssh.map(machine_service_core::isolation::PROBE_MARKER, 0, PROBE_CLOSED);
+        ssh.map(
+            machine_service_core::isolation::PROBE_MARKER,
+            0,
+            PROBE_CLOSED,
+        );
         ssh.map(machine_service_core::isolation::EGRESS_MARKER, 0, EGRESS_OK);
         Self {
             tart: FakeTart::new(),

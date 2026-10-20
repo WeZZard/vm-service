@@ -141,7 +141,9 @@ fn owner_ids(owner: Option<u32>) -> Result<(u32, u32), String> {
         None => std::env::var("SUDO_UID")
             .ok()
             .and_then(|value| value.parse().ok())
-            .ok_or("run it with sudo from the account that runs machine-service, or pass --owner UID")?,
+            .ok_or(
+                "run it with sudo from the account that runs machine-service, or pass --owner UID",
+            )?,
     };
     if uid == 0 {
         return Err(

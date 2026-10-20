@@ -288,11 +288,12 @@ fn main() {
 
     let (arguments, command_argv) = split_exec_arguments(arguments);
 
-    let cli =
-        match Cli::try_parse_from(std::iter::once("machctl".to_string()).chain(arguments.clone())) {
-            Ok(cli) => cli,
-            Err(error) => argparse_error::exit_with(&root, &arguments, &error),
-        };
+    let cli = match Cli::try_parse_from(
+        std::iter::once("machctl".to_string()).chain(arguments.clone()),
+    ) {
+        Ok(cli) => cli,
+        Err(error) => argparse_error::exit_with(&root, &arguments, &error),
+    };
     let mut cli = cli;
     if let (Some(argv), Cmd::Exec(exec)) = (command_argv, &mut cli.cmd) {
         exec.argv = argv;
@@ -467,8 +468,12 @@ fn main() {
                     0
                 });
             loop {
-                let (status, resp) =
-                    client.call("GET", &format!("/machines/{}", args.vm), None, DEFAULT_TIMEOUT_S);
+                let (status, resp) = client.call(
+                    "GET",
+                    &format!("/machines/{}", args.vm),
+                    None,
+                    DEFAULT_TIMEOUT_S,
+                );
                 if status == 200 && resp.get("state").and_then(Value::as_str) == Some("running") {
                     println!("{}", pretty(&resp));
                     return;
@@ -530,7 +535,8 @@ fn main() {
         }
 
         Cmd::Status { vm } => {
-            let (status, resp) = client.call("GET", &format!("/machines/{vm}"), None, DEFAULT_TIMEOUT_S);
+            let (status, resp) =
+                client.call("GET", &format!("/machines/{vm}"), None, DEFAULT_TIMEOUT_S);
             if status != 200 {
                 die_from(status, &resp, Some(&vm));
             }
@@ -1201,7 +1207,10 @@ mod tests {
 
     #[test]
     fn leases_table_empty_and_rows() {
-        assert_eq!(format_leases(&json!({"machines": {}})), "no active leases\n");
+        assert_eq!(
+            format_leases(&json!({"machines": {}})),
+            "no active leases\n"
+        );
         let resp = json!({
             "machines": {
                 "vm-a": {

@@ -154,7 +154,10 @@ fn initial_enable_requires_explicit_path() {
 #[test]
 fn invalid_config_and_tart_leave_old_install_untouched() {
     let harness = Harness::new();
-    harness.save_old(&[("HOME", harness.home_str()), ("MACHINE_SERVICE_HOST", "0.0.0.0")]);
+    harness.save_old(&[
+        ("HOME", harness.home_str()),
+        ("MACHINE_SERVICE_HOST", "0.0.0.0"),
+    ]);
     let original = fs::read(&harness.plist).unwrap();
 
     fs::set_permissions(&harness.config, fs::Permissions::from_mode(0o666)).unwrap();

@@ -102,7 +102,10 @@ impl Selected {
                 ("PATH".to_string(), common::path_with(&bin)),
                 // Stale ambient values that the selected profile must override.
                 ("TART_HOME".to_string(), "/must-not-use".to_string()),
-                ("MACHINE_SERVICE_STATE".to_string(), "/must-not-use".to_string()),
+                (
+                    "MACHINE_SERVICE_STATE".to_string(),
+                    "/must-not-use".to_string(),
+                ),
                 (
                     "FAKE_ROOT".to_string(),
                     store.to_string_lossy().into_owned(),
@@ -310,7 +313,10 @@ fn test_legacy_server_rejects_selected_header_but_keeps_health_shape() {
     let fingerprint = Selected::new();
     let fingerprint = fingerprint.fingerprint();
     let health = live.request("GET", "/health", None);
-    assert_eq!(health.body, json!({"ok": true, "service": "machine-service"}));
+    assert_eq!(
+        health.body,
+        json!({"ok": true, "service": "machine-service"})
+    );
     let gc = common::http(
         live.port(),
         "POST",
@@ -340,7 +346,10 @@ fn test_import_is_inert_even_with_invalid_selector_and_unittest_args() {
     let port = common::free_port();
     let env = vec![
         ("VM_ENVIRONMENT_FILE".to_string(), "/absent".to_string()),
-        ("MACHINE_SERVICE_STATE".to_string(), state.display().to_string()),
+        (
+            "MACHINE_SERVICE_STATE".to_string(),
+            state.display().to_string(),
+        ),
         ("MACHINE_SERVICE_PORT".to_string(), port.to_string()),
         ("HOME".to_string(), home.display().to_string()),
     ];

@@ -262,7 +262,10 @@ pub fn run(cli: &Cli, source: &Path, home: &Path) -> Result<(), InstallError> {
 
     let payload = if action == Action::Install {
         let mut checked = env.clone();
-        if let Some(source) = legacy.as_ref().and_then(|legacy| legacy.validation_console()) {
+        if let Some(source) = legacy
+            .as_ref()
+            .and_then(|legacy| legacy.validation_console())
+        {
             checked.insert("MACHINE_SERVICE_CONSOLE_CONFIG".to_string(), source);
         }
         let mut base = old.clone();
@@ -350,7 +353,13 @@ pub fn run(cli: &Cli, source: &Path, home: &Path) -> Result<(), InstallError> {
     // No `vmctl` link survives the switch (MG-3, AC-35).
     let mut old_dirs = vec![home.join(migration::LEGACY_INSTALL_DIR)];
     if let Some(legacy) = &legacy {
-        old_dirs.extend(legacy.install_dir(legacy_map.as_ref().and_then(|map| map.get("ProgramArguments"))));
+        old_dirs.extend(
+            legacy.install_dir(
+                legacy_map
+                    .as_ref()
+                    .and_then(|map| map.get("ProgramArguments")),
+            ),
+        );
     }
     migration::remove_legacy_link(home, &old_dirs)?;
 
@@ -597,7 +606,10 @@ fn validate_install(
         "ProgramArguments".to_string(),
         json!([service.to_string_lossy().into_owned()]),
     );
-    data.insert("EnvironmentVariables".to_string(), environment_value(written));
+    data.insert(
+        "EnvironmentVariables".to_string(),
+        environment_value(written),
+    );
     data.insert("RunAtLoad".to_string(), Value::Bool(true));
     data.insert("KeepAlive".to_string(), Value::Bool(true));
     data.entry("StandardOutPath".to_string())

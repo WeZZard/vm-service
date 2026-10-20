@@ -686,8 +686,11 @@ impl LegacyFixture {
 
         let pack = home.join(".config/vm-credentials/default");
         std::fs::create_dir_all(&pack).expect("pack");
-        std::fs::write(pack.join("env.extra"), "export MACHINE_SERVICE_TEST_ONLY=1\n")
-            .expect("env.extra");
+        std::fs::write(
+            pack.join("env.extra"),
+            "export MACHINE_SERVICE_TEST_ONLY=1\n",
+        )
+        .expect("env.extra");
 
         for (image, conf) in [
             (

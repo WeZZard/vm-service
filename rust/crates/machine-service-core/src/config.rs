@@ -106,7 +106,8 @@ impl Config {
             .ok()
             .and_then(|value| value.parse::<u16>().ok())
             .unwrap_or(6240);
-        let host = std::env::var("MACHINE_SERVICE_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+        let host =
+            std::env::var("MACHINE_SERVICE_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
         Self {
             environment: None,
             tart_executable: "tart".to_string(),
