@@ -730,22 +730,22 @@ mod tests {
     #[test]
     fn mm5_unavailable_without_the_gui_session() {
         let other = json!({"console_user": "root", "gui_session": false, "screen_locked": null});
-        let mine = json!({"console_user": "wezzard", "gui_session": true, "screen_locked": false});
+        let mine = json!({"console_user": "alice", "gui_session": true, "screen_locked": false});
         let unread = json!({"console_user": null, "gui_session": null, "screen_locked": null});
-        let (state, reason) = durable_state(None, &other, "wezzard");
+        let (state, reason) = durable_state(None, &other, "alice");
         assert_eq!(state, "unavailable");
         assert_eq!(
             reason.unwrap(),
-            "no logged-in GUI session for wezzard (the console belongs to root)"
+            "no logged-in GUI session for alice (the console belongs to root)"
         );
-        assert_eq!(durable_state(None, &mine, "wezzard"), ("available", None));
-        assert_eq!(durable_state(None, &unread, "wezzard"), ("available", None));
+        assert_eq!(durable_state(None, &mine, "alice"), ("available", None));
+        assert_eq!(durable_state(None, &unread, "alice"), ("available", None));
         assert_eq!(
-            durable_state(Some("leased"), &other, "wezzard"),
+            durable_state(Some("leased"), &other, "alice"),
             ("leased", None)
         );
         assert_eq!(
-            durable_state(Some("releasing"), &mine, "wezzard"),
+            durable_state(Some("releasing"), &mine, "alice"),
             ("releasing", None)
         );
     }

@@ -1,5 +1,5 @@
 //! Live durable-machine leases on this Mac (`docs/arch/test-layers.md`,
-//! TL-6; AC-18, AC-20, AC-21, AC-23 to AC-26, AC-30, AC-31, AC-33).
+//! TL-6; AC-18, AC-20, AC-21, AC-23 to AC-26, AC-28, AC-30 to AC-33).
 //!
 //! Each test starts second instances of this worktree's `machine-service`
 //! on their own ports, with their own state and configuration folders under
@@ -10,9 +10,12 @@
 //!
 //! The configuration folder holds fake agent keys and a placeholder
 //! endpoint; no real key is ever written. Commands are harmless: `id`,
-//! `env` names, `sleep` stand-ins the test starts itself, and one uniquely
-//! named folder in `~/Library/Application Support` that the test removes.
-//! Every lease is released.
+//! `env` names, `sleep` stand-ins the test starts itself, one uniquely
+//! named folder in `~/Library/Application Support` that the test removes,
+//! a small folder pushed into and pulled out of the lease's workspace, and
+//! `open -a TextEdit`, which is quit at release only when the lease
+//! launched it. `machctl` runs with Consul at a closed port and its own
+//! state folder. Every lease is released.
 //!
 //! ```sh
 //! cargo test -p machine-service --test live_durable -- --ignored --test-threads=1
@@ -478,7 +481,11 @@ fn live_ac30_ac31_sweep_and_inventory() {
     )
     .unwrap();
     let runner = live.root.join("Runner.Worker");
+    // The system's own toolchain: a `DEVELOPER_DIR` chosen for the Rust
+    // build may name an Xcode older than the running macOS.
     let built = Command::new("/usr/bin/cc")
+        .env_remove("DEVELOPER_DIR")
+        .env_remove("SDKROOT")
         .arg("-o")
         .arg(&runner)
         .arg(&source)
@@ -558,7 +565,174 @@ fn live_ac30_ac31_sweep_and_inventory() {
     assert!(hygiene["changes"]["parts"]
         .get("homebrew_formulae")
         .is_some());
+    // HY-5, AC-32: the stand-in job ran at release, so an interval is
+    // recorded, closed at the release.
+    let intervals = hygiene["ci_busy_intervals"].as_array().unwrap();
+    assert!(!intervals.is_empty(), "{hygiene}");
+    assert!(intervals.iter().all(|interval| interval["to"].is_number()));
     drop(guards);
+}
+
+/// The PIDs of processes named exactly `name` of this user.
+fn pids_named(name: &str) -> Vec<i32> {
+    let output = Command::new("/usr/bin/pgrep")
+        .args(["-x", "-u", &user(), name])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .filter_map(|pid| pid.parse().ok())
+        .collect()
+}
+
+/// AC-30, HY-3 (DC-73): `open -a TextEdit` from a lease is quit at release
+/// under the `application` rule. When TextEdit was already running before
+/// the lease, `open` only activates the owner's TextEdit, which must
+/// survive: the sweep never ends an application it did not launch.
+#[test]
+#[ignore = "live TL-6: opens TextEdit through a second instance with exposure on and quits it at release unless it was already running; see the module documentation"]
+fn live_ac30_open_a_textedit() {
+    let live = Live::new();
+    let evidence = evidence("textedit");
+    let before = pids_named("TextEdit");
+    let instance = live.start("state");
+    let (name, lease, _) = instance.acquire("live-textedit", "none");
+    let opened = instance.exec(&name, &lease, "/usr/bin/open -g -a TextEdit && echo opened");
+    assert_eq!(opened["output"].as_str().unwrap().trim(), "opened");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let launched = loop {
+        let now: Vec<i32> = pids_named("TextEdit")
+            .into_iter()
+            .filter(|pid| !before.contains(pid))
+            .collect();
+        if !now.is_empty() || !before.is_empty() || Instant::now() >= deadline {
+            break now;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    let _guards: Vec<Leftover> = launched.iter().map(|pid| Leftover(*pid)).collect();
+    let released = instance.release(&name, &lease);
+    record(&evidence, "released", &released);
+    let swept = released["hygiene"]["swept"].as_array().unwrap().clone();
+    if before.is_empty() {
+        assert_eq!(launched.len(), 1, "TextEdit did not start: {launched:?}");
+        let pid = launched[0];
+        assert!(wait_dead(pid), "TextEdit survived the release");
+        let entry = swept
+            .iter()
+            .find(|entry| entry["pid"] == pid)
+            .unwrap_or_else(|| panic!("TextEdit is not in the hygiene record: {swept:?}"));
+        assert_eq!(entry["rule"], "application");
+        assert_eq!(entry["ended"], true);
+    } else {
+        eprintln!("TextEdit was running before the lease; checking that it survives");
+        for pid in &before {
+            assert!(alive(*pid), "the owner's TextEdit was ended");
+            assert!(swept.iter().all(|entry| entry["pid"] != *pid));
+        }
+    }
+}
+
+/// CL-2, CL-3, FD-4 (AC-28): the real `machctl` against a second instance
+/// acquires by capability and by name, remembers the lease, moves bytes
+/// both ways with `--bytes`, and releases by the remembered lease. Consul
+/// is a closed port, so no other Mac is ever asked or leased.
+#[test]
+#[ignore = "live TL-6: acquires this Mac through machctl and a second instance with exposure on; see the module documentation"]
+fn live_cl2_fd4_machctl_against_a_second_instance() {
+    let live = Live::new();
+    let evidence = evidence("machctl");
+    let instance = live.start("state");
+    let name = instance.name();
+    let cli_state = live.root.join("cli-state");
+    let cli_home = live.root.join("cli-home");
+    std::fs::create_dir_all(&cli_home).unwrap();
+    let env = vec![
+        (
+            "MACHINE_SERVICE_PORT".to_string(),
+            instance.port.to_string(),
+        ),
+        (
+            "MACHINE_SERVICE_STATE".to_string(),
+            cli_state.display().to_string(),
+        ),
+        ("HOME".to_string(), cli_home.display().to_string()),
+    ];
+    let machctl = |arguments: &[&str]| {
+        let output = common::run_machctl(arguments, &env);
+        let text = format!(
+            "machctl {arguments:?}\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        (output, text)
+    };
+
+    let (output, text) = machctl(&[
+        "acquire",
+        "--purpose",
+        "live-cli",
+        "--require",
+        "durable",
+        "--env",
+        "none",
+        "--ttl-hours",
+        "1",
+    ]);
+    std::fs::write(evidence.join("acquire-require.txt"), &text).unwrap();
+    assert!(output.status.success(), "{text}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains(&format!("chose {name} (durable")),
+        "{text}"
+    );
+    let lease: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let lease_id = lease["lease_id"].as_str().unwrap().to_string();
+    let remembered = std::fs::read_to_string(cli_state.join("cli-leases.json")).unwrap();
+    assert!(remembered.contains(&lease_id), "{remembered}");
+
+    let (output, text) = machctl(&["exec", &name, "--", "/bin/echo", "remembered"]);
+    assert!(output.status.success(), "{text}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "remembered\n");
+
+    let source = live.root.join("payload");
+    std::fs::create_dir_all(source.join("inner")).unwrap();
+    std::fs::write(source.join("inner/data.txt"), "live bytes").unwrap();
+    let (output, text) = machctl(&["push", "--bytes", &name, source.to_str().unwrap(), "."]);
+    assert!(output.status.success(), "{text}");
+    let back = live.root.join("back");
+    std::fs::create_dir_all(&back).unwrap();
+    let (output, text) = machctl(&["pull", "--bytes", &name, "payload", back.to_str().unwrap()]);
+    assert!(output.status.success(), "{text}");
+    assert_eq!(
+        std::fs::read_to_string(back.join("payload/inner/data.txt")).unwrap(),
+        "live bytes"
+    );
+
+    let (output, text) = machctl(&["release", &name]);
+    std::fs::write(evidence.join("release.txt"), &text).unwrap();
+    assert!(output.status.success(), "{text}");
+    assert!(instance.current().is_none());
+
+    let (output, text) = machctl(&[
+        "acquire",
+        "--purpose",
+        "live-cli-named",
+        "--machine",
+        &name,
+        "--env",
+        "none",
+        "--ttl-hours",
+        "1",
+    ]);
+    assert!(output.status.success(), "{text}");
+    let (output, text) = machctl(&["release", &name]);
+    assert!(output.status.success(), "{text}");
+    let remembered = std::fs::read_to_string(cli_state.join("cli-leases.json")).unwrap();
+    assert!(!remembered.contains(&lease_id), "{remembered}");
+    assert!(
+        remembered.contains("\"leases\": []"),
+        "every lease was forgotten: {remembered}"
+    );
 }
 
 /// AC-33 and DM-7: a restart keeps the lease and its process; a release

@@ -225,7 +225,7 @@ mod tests {
         ));
         assert!(capacity_refusal(
             409,
-            "durable machine unavailable: mac-b (no logged-in GUI session for wezzard (the console belongs to root))"
+            "durable machine unavailable: mac-b (no logged-in GUI session for alice (the console belongs to root))"
         ));
         assert!(capacity_refusal(
             409,
