@@ -6,12 +6,14 @@
 //! Agents should prefer the HTTP API (localhost:6240); this CLI exists for
 //! humans and for shell-based agents.
 
+mod acquire;
 mod argparse_error;
 mod argparse_help;
 mod capability;
 mod consul;
 mod federation;
 mod http;
+mod leases;
 mod listing;
 mod textwrap;
 
@@ -54,7 +56,7 @@ enum Cmd {
         json: bool,
     },
     /// clone + boot a fresh VM and lease it
-    Acquire(AcquireArgs),
+    Acquire(Box<AcquireArgs>),
     /// block until a lease is running (useful after --no-wait)
     Wait(WaitArgs),
     /// list every machine from every instance
@@ -96,21 +98,35 @@ enum Cmd {
         vm: String,
         local: String,
         remote: String,
+        /// the lease to act under (default: the one machctl remembered)
+        #[arg(long)]
+        lease_id: Option<String>,
     },
     /// copy guest -> host
     Pull {
         vm: String,
         remote: String,
         local: String,
+        /// the lease to act under (default: the one machctl remembered)
+        #[arg(long)]
+        lease_id: Option<String>,
     },
     /// reset TTL; keeps a leased VM alive
     Heartbeat {
         vm: String,
         #[arg(long)]
         ttl_hours: Option<f64>,
+        /// the lease to act under (default: the one machctl remembered)
+        #[arg(long)]
+        lease_id: Option<String>,
     },
     /// stop + delete + unregister
-    Release { vm: String },
+    Release {
+        vm: String,
+        /// the lease to act under (default: the one machctl remembered)
+        #[arg(long)]
+        lease_id: Option<String>,
+    },
     /// show supported and unavailable network capabilities
     Capabilities,
     /// describe acquisition and console prerequisites without allocating a VM
@@ -134,8 +150,17 @@ struct AcquireArgs {
     #[arg(long)]
     purpose: String,
     /// image to clone (see: machctl images; default: macos26)
-    #[arg(long, default_value = "macos26", alias = "line")]
-    image: String,
+    #[arg(long, alias = "line")]
+    image: Option<String>,
+    /// durable machine to lease, by name
+    #[arg(long)]
+    machine: Option<String>,
+    /// lease any machine with this capability (repeatable)
+    #[arg(long)]
+    require: Vec<String>,
+    /// instance to acquire the image from, or to choose among (ID or address)
+    #[arg(long)]
+    instance: Option<String>,
     /// default | none | <env-pack-name> (credential env vars)
     #[arg(long, default_value = "default", alias = "pack")]
     env: String,
@@ -183,6 +208,9 @@ struct ExecArgs {
     /// guest command timeout in seconds; transport allows an additional 30 seconds
     #[arg(long, default_value_t = 600)]
     timeout: i64,
+    /// the lease to act under (default: the one machctl remembered)
+    #[arg(long)]
+    lease_id: Option<String>,
     /// command to run (use -- to separate)
     #[arg(value_name = "ARGV", num_args = 0..)]
     argv: Vec<String>,
@@ -403,6 +431,12 @@ fn main() {
     }
 
     let client = Client::new(base.clone(), environment.as_ref());
+    // The lease a lease command acts under: `--lease-id`, or the one this
+    // CLI remembered for the machine on its owner (CL-3, DC-72).
+    let lease_id = lease_argument(&cli.cmd).map(|(vm, given)| {
+        given.or_else(|| leases::path().and_then(|path| leases::find(&path, &vm, &base)))
+    });
+    let lease_id: Option<String> = lease_id.flatten();
 
     match cli.cmd {
         Cmd::Environment { .. } => match &environment {
@@ -456,77 +490,98 @@ fn main() {
         }
 
         Cmd::Acquire(args) => {
-            if args.network == "control-only" && args.env != "none" {
-                usage_error("control-only requires --env none");
-            }
-            let mut body = Map::new();
-            body.insert("purpose".to_string(), Value::String(args.purpose));
-            body.insert("image".to_string(), Value::String(args.image));
-            body.insert("env".to_string(), Value::String(args.env.clone()));
-            body.insert("ttl_hours".to_string(), acquire_ttl_hours(args.ttl_hours));
-            body.insert("network".to_string(), Value::String(args.network));
-            if args.vnc {
-                body.insert("vnc".to_string(), Value::Bool(true));
-            }
-            if args.source != "base" {
-                if args.env != "none" {
-                    usage_error("--source work requires --env none");
+            let flags = acquire::VirtualFlags {
+                network: &args.network,
+                profile: args.profile.is_some(),
+                cpu: args.cpu.is_some(),
+                memory_mb: args.memory_mb.is_some(),
+                disk_gb: args.disk_gb.is_some(),
+                no_wait: args.no_wait,
+                vnc: args.vnc,
+                source: &args.source,
+                expected_source_fingerprint: args
+                    .expected_source_fingerprint
+                    .as_deref()
+                    .is_some_and(|path| !path.is_empty()),
+            };
+            let target = match acquire::target(
+                args.image.clone(),
+                args.machine.clone(),
+                args.require.clone(),
+                args.instance.clone(),
+                &flags,
+            ) {
+                Ok(target) => target,
+                Err(error) => usage_error(&error),
+            };
+            let settings = federation_settings(true);
+            let pinned = environment.is_some();
+            let (status, resp, owner) = match target {
+                acquire::Target::Image { image, instance } => {
+                    let body = virtual_body(&args, &image);
+                    let base = match instance {
+                        None => base.clone(),
+                        Some(_) if pinned => usage_error(
+                            "a selected environment pins its own instance; --instance cannot be used",
+                        ),
+                        Some(wanted) => instance_base(&settings, &wanted),
+                    };
+                    let client = Client::new(base, environment.as_ref());
+                    let (status, resp) = client.call(
+                        "POST",
+                        "/acquire",
+                        Some(&Value::Object(body)),
+                        DEFAULT_TIMEOUT_S,
+                    );
+                    (status, resp, client.base)
                 }
-                body.insert("source".to_string(), Value::String(args.source));
-            }
-            if let Some(path) = args
-                .expected_source_fingerprint
-                .as_deref()
-                .filter(|path| !path.is_empty())
-            {
-                if !body
-                    .get("source")
-                    .and_then(Value::as_str)
-                    .map(|source| source == "work")
-                    .unwrap_or(false)
-                {
-                    usage_error("--expected-source-fingerprint requires --source work");
+                acquire::Target::Machine(name) => {
+                    let (machine, base) = if pinned {
+                        if federation::split_name(&name).1.is_some() {
+                            usage_error(
+                                "a selected environment pins its own instance; name the machine without @<instance>",
+                            );
+                        }
+                        (name.clone(), base.clone())
+                    } else {
+                        match federation::route(&settings, &name) {
+                            Ok(route) => (route.machine, route.base),
+                            Err(error) => {
+                                eprintln!("machctl: {error}");
+                                std::process::exit(1);
+                            }
+                        }
+                    };
+                    let client = Client::new(base, environment.as_ref());
+                    let body = durable_body(&args, &machine);
+                    let (status, resp) = client.call(
+                        "POST",
+                        "/acquire",
+                        Some(&Value::Object(body)),
+                        DEFAULT_TIMEOUT_S,
+                    );
+                    (status, resp, client.base)
                 }
-                let text = match fs::read_to_string(path) {
-                    Ok(text) => text,
-                    Err(error) => {
-                        eprintln!("machctl: {error}");
-                        std::process::exit(1);
+                acquire::Target::Require { names, instance } => {
+                    if pinned && instance.is_some() {
+                        usage_error(
+                            "a selected environment pins its own instance; --instance cannot be used",
+                        );
                     }
-                };
-                let fingerprint = match serde_json::from_str::<Value>(&text) {
-                    Ok(fingerprint) => fingerprint,
-                    Err(error) => {
-                        eprintln!("machctl: {error}");
-                        std::process::exit(1);
-                    }
-                };
-                body.insert("expected_source_fingerprint".to_string(), fingerprint);
-            }
-            if let Some(profile) = args.profile {
-                body.insert("profile".to_string(), Value::String(profile));
-            }
-            for (key, value) in [
-                ("cpu", args.cpu),
-                ("memory_mb", args.memory_mb),
-                ("disk_gb", args.disk_gb),
-            ] {
-                if let Some(value) = value {
-                    body.insert(key.to_string(), json_int(value));
+                    acquire_by_capability(
+                        &args,
+                        &names,
+                        instance.as_deref(),
+                        &settings,
+                        &consul_address,
+                        environment.as_ref(),
+                    )
                 }
-            }
-            if args.no_wait {
-                body.insert("wait".to_string(), Value::Bool(false));
-            }
-            let (status, resp) = client.call(
-                "POST",
-                "/acquire",
-                Some(&Value::Object(body)),
-                DEFAULT_TIMEOUT_S,
-            );
+            };
             if status != 200 {
                 die_from(status, &resp, None);
             }
+            remember_lease(&resp, &owner);
             println!("{}", pretty(&resp));
         }
 
@@ -697,6 +752,7 @@ fn main() {
                 usage_error("--timeout must be positive");
             }
             body.insert("timeout".to_string(), json_int(args.timeout));
+            insert_lease(&mut body, &lease_id);
             let transport_timeout = if args.timeout > 0 {
                 (args.timeout + 30) as u64
             } else {
@@ -720,8 +776,11 @@ fn main() {
             std::process::exit(rc as i32);
         }
 
-        Cmd::Push { vm, local, remote } => {
+        Cmd::Push {
+            vm, local, remote, ..
+        } => {
             let mut body = Map::new();
+            insert_lease(&mut body, &lease_id);
             body.insert("local_path".to_string(), Value::String(local.clone()));
             body.insert("remote_path".to_string(), Value::String(remote.clone()));
             let (status, resp) = client.call(
@@ -736,8 +795,11 @@ fn main() {
             println!("pushed {local} -> {vm}:{remote}");
         }
 
-        Cmd::Pull { vm, remote, local } => {
+        Cmd::Pull {
+            vm, remote, local, ..
+        } => {
             let mut body = Map::new();
+            insert_lease(&mut body, &lease_id);
             body.insert("remote_path".to_string(), Value::String(remote.clone()));
             body.insert("local_path".to_string(), Value::String(local.clone()));
             let (status, resp) = client.call(
@@ -752,8 +814,9 @@ fn main() {
             println!("pulled {vm}:{remote} -> {local}");
         }
 
-        Cmd::Heartbeat { vm, ttl_hours } => {
+        Cmd::Heartbeat { vm, ttl_hours, .. } => {
             let mut body = Map::new();
+            insert_lease(&mut body, &lease_id);
             if let Some(ttl_hours) = ttl_hours {
                 if ttl_hours != 0.0 {
                     body.insert("ttl_hours".to_string(), json_float(ttl_hours));
@@ -774,15 +837,22 @@ fn main() {
             );
         }
 
-        Cmd::Release { vm } => {
+        Cmd::Release { vm, .. } => {
+            let mut body = Map::new();
+            insert_lease(&mut body, &lease_id);
             let (status, resp) = client.call(
                 "POST",
                 &format!("/machines/{vm}/release"),
-                Some(&Value::Object(Map::new())),
+                Some(&Value::Object(body)),
                 DEFAULT_TIMEOUT_S,
             );
             if status != 200 {
                 die_from(status, &resp, Some(&vm));
+            }
+            if let (Some(path), Some(lease_id)) = (leases::path(), lease_id.as_deref()) {
+                if let Err(error) = leases::forget(&path, lease_id) {
+                    eprintln!("machctl: warning: could not forget lease {lease_id}: {error}");
+                }
             }
             println!("released {vm}");
         }
@@ -802,6 +872,188 @@ fn main() {
     }
 }
 
+/// The `POST /acquire` body for a virtual machine of `image`: the flags
+/// `vmctl acquire` had, checked as it checked them.
+fn virtual_body(args: &AcquireArgs, image: &str) -> Map<String, Value> {
+    if args.network == "control-only" && args.env != "none" {
+        usage_error("control-only requires --env none");
+    }
+    let mut body = Map::new();
+    body.insert("purpose".to_string(), Value::String(args.purpose.clone()));
+    body.insert("image".to_string(), Value::String(image.to_string()));
+    body.insert("env".to_string(), Value::String(args.env.clone()));
+    body.insert("ttl_hours".to_string(), acquire_ttl_hours(args.ttl_hours));
+    body.insert("network".to_string(), Value::String(args.network.clone()));
+    if args.vnc {
+        body.insert("vnc".to_string(), Value::Bool(true));
+    }
+    if args.source != "base" {
+        if args.env != "none" {
+            usage_error("--source work requires --env none");
+        }
+        body.insert("source".to_string(), Value::String(args.source.clone()));
+    }
+    if let Some(path) = args
+        .expected_source_fingerprint
+        .as_deref()
+        .filter(|path| !path.is_empty())
+    {
+        if !body
+            .get("source")
+            .and_then(Value::as_str)
+            .map(|source| source == "work")
+            .unwrap_or(false)
+        {
+            usage_error("--expected-source-fingerprint requires --source work");
+        }
+        let text = match fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(error) => {
+                eprintln!("machctl: {error}");
+                std::process::exit(1);
+            }
+        };
+        let fingerprint = match serde_json::from_str::<Value>(&text) {
+            Ok(fingerprint) => fingerprint,
+            Err(error) => {
+                eprintln!("machctl: {error}");
+                std::process::exit(1);
+            }
+        };
+        body.insert("expected_source_fingerprint".to_string(), fingerprint);
+    }
+    if let Some(profile) = &args.profile {
+        body.insert("profile".to_string(), Value::String(profile.clone()));
+    }
+    for (key, value) in [
+        ("cpu", args.cpu),
+        ("memory_mb", args.memory_mb),
+        ("disk_gb", args.disk_gb),
+    ] {
+        if let Some(value) = value {
+            body.insert(key.to_string(), json_int(value));
+        }
+    }
+    if args.no_wait {
+        body.insert("wait".to_string(), Value::Bool(false));
+    }
+    body
+}
+
+/// The `POST /acquire` body for the durable machine `machine` (DM-2): no
+/// image and none of a virtual machine's shaping fields.
+fn durable_body(args: &AcquireArgs, machine: &str) -> Map<String, Value> {
+    let mut body = Map::new();
+    body.insert("purpose".to_string(), Value::String(args.purpose.clone()));
+    body.insert("machine".to_string(), Value::String(machine.to_string()));
+    body.insert("env".to_string(), Value::String(args.env.clone()));
+    body.insert("ttl_hours".to_string(), acquire_ttl_hours(args.ttl_hours));
+    body
+}
+
+/// The base URL of the instance `wanted` names (`--instance`, FD-2).
+fn instance_base(settings: &federation::Settings, wanted: &str) -> String {
+    let mut merged = federation::discover(settings);
+    if let Err(error) = federation::select(&mut merged, wanted) {
+        eprintln!("machctl: {error}");
+        std::process::exit(1);
+    }
+    let owner = &merged.instances[0];
+    if let Some(reason) = &owner.unaskable {
+        eprintln!(
+            "machctl: instance {} cannot be reached: {reason}",
+            owner.label
+        );
+        std::process::exit(1);
+    }
+    owner.address.clone()
+}
+
+/// `machctl acquire --require` (CL-2, DC-69): list every instance, keep the
+/// machines and offers with every capability, and lease the best one. The
+/// choice is printed on standard error before the lease, and a candidate
+/// refused for capacity passes to the next.
+fn acquire_by_capability(
+    args: &AcquireArgs,
+    names: &[String],
+    instance: Option<&str>,
+    settings: &federation::Settings,
+    consul_address: &str,
+    environment: Option<&Value>,
+) -> (u16, Value, String) {
+    let merged = match federation::gather(settings, instance) {
+        Ok(merged) => merged,
+        Err(error) => {
+            eprintln!("machctl: {error}");
+            std::process::exit(1);
+        }
+    };
+    if let Some(error) = &merged.consul_error {
+        eprintln!(
+            "machctl: warning: Consul at {consul_address} did not answer ({error}); choosing among the local instance only"
+        );
+    }
+    let listing: Vec<(String, Vec<Value>)> = merged
+        .instances
+        .iter()
+        .filter(|instance| instance.reachable)
+        .map(|instance| (instance.label.clone(), instance.machines()))
+        .collect();
+    let candidates = capability::choose(&listing, names);
+    if candidates.is_empty() {
+        if merged.none_reachable() {
+            eprintln!("machctl: no machine-service instance answered");
+            std::process::exit(2);
+        }
+        eprintln!(
+            "machctl: no machine is available with {} (see: machctl list --require ...)",
+            names.join(", ")
+        );
+        std::process::exit(1);
+    }
+    let mut refusals = Vec::new();
+    for candidate in &candidates {
+        let Some(owner) = merged
+            .instances
+            .iter()
+            .find(|instance| instance.label == candidate.instance)
+        else {
+            continue;
+        };
+        eprintln!("{}", candidate.reason);
+        let body = if candidate.tier == 2 {
+            virtual_body(args, &candidate.name)
+        } else {
+            durable_body(args, &candidate.name)
+        };
+        let client = Client::new(owner.address.clone(), environment);
+        let (status, resp) = client.call(
+            "POST",
+            "/acquire",
+            Some(&Value::Object(body)),
+            DEFAULT_TIMEOUT_S,
+        );
+        if status == 200 {
+            return (status, resp, owner.address.clone());
+        }
+        let error = error_message_text(&resp);
+        if !acquire::capacity_refusal(status, &error) {
+            return (status, resp, owner.address.clone());
+        }
+        eprintln!(
+            "machctl: {} refused: {error}; trying the next candidate",
+            candidate.name
+        );
+        refusals.push(format!("{}: {error}", candidate.name));
+    }
+    eprintln!(
+        "machctl: every machine with {} refused for capacity ({})",
+        names.join(", "),
+        refusals.join("; ")
+    );
+    std::process::exit(1);
+}
+
 fn run_console(client: &Client<'_>, vm: &str, action: &str, body: Map<String, Value>) -> ! {
     let (status, resp) = client.call(
         "POST",
@@ -816,12 +1068,57 @@ fn run_console(client: &Client<'_>, vm: &str, action: &str, body: Map<String, Va
     std::process::exit(0);
 }
 
+/// The machine a command acting under a lease names, with its
+/// `--lease-id` (CL-3).
+fn lease_argument(cmd: &Cmd) -> Option<(String, Option<String>)> {
+    match cmd {
+        Cmd::Exec(args) => Some((args.vm.clone(), args.lease_id.clone())),
+        Cmd::Push { vm, lease_id, .. }
+        | Cmd::Pull { vm, lease_id, .. }
+        | Cmd::Heartbeat { vm, lease_id, .. }
+        | Cmd::Release { vm, lease_id } => Some((vm.clone(), lease_id.clone())),
+        _ => None,
+    }
+}
+
+/// Add `lease_id` to a request body when one is known. A virtual machine
+/// accepts it and does not require it; a durable machine requires it (MM-2).
+fn insert_lease(body: &mut Map<String, Value>, lease_id: &Option<String>) {
+    if let Some(lease_id) = lease_id {
+        body.insert("lease_id".to_string(), Value::String(lease_id.clone()));
+    }
+}
+
+/// Remember the lease an acquisition answered, for the commands that
+/// follow (CL-3). A file that cannot be written is a warning: the lease
+/// exists and `--lease-id` still reaches it.
+fn remember_lease(resp: &Value, owner: &str) {
+    let machine = resp
+        .get("name")
+        .or_else(|| resp.get("vm"))
+        .and_then(Value::as_str);
+    let lease_id = resp.get("lease_id").and_then(Value::as_str);
+    let (Some(machine), Some(lease_id), Some(path)) = (machine, lease_id, leases::path()) else {
+        return;
+    };
+    let lease = leases::Lease {
+        machine: machine.to_string(),
+        instance: owner.to_string(),
+        lease_id: lease_id.to_string(),
+    };
+    if let Err(error) = leases::remember(&path, lease) {
+        eprintln!("machctl: warning: could not remember lease {lease_id}: {error}");
+    }
+}
+
 /// The machine a lease command names, and whether the command moves files
 /// by host path (CL-3). Console commands stay with the local instance: their
 /// viewer runs on the service host.
 fn machine_argument(cmd: &mut Cmd) -> Option<(&mut String, bool)> {
     match cmd {
-        Cmd::Status { vm } | Cmd::Heartbeat { vm, .. } | Cmd::Release { vm } => Some((vm, false)),
+        Cmd::Status { vm } | Cmd::Heartbeat { vm, .. } | Cmd::Release { vm, .. } => {
+            Some((vm, false))
+        }
         Cmd::Wait(args) => Some((&mut args.vm, false)),
         Cmd::Exec(args) => Some((&mut args.vm, false)),
         Cmd::Push { vm, .. } | Cmd::Pull { vm, .. } => Some((vm, true)),
@@ -1212,7 +1509,9 @@ mod tests {
         match cli.cmd {
             Cmd::Acquire(args) => {
                 assert_eq!(args.purpose, "demo");
-                assert_eq!(args.image, "macos26");
+                assert_eq!(args.image, None);
+                assert_eq!(args.machine, None);
+                assert!(args.require.is_empty());
                 assert_eq!(args.env, "default");
                 assert_eq!(args.network, "nat");
                 assert_eq!(args.profile, None);
@@ -1240,7 +1539,7 @@ mod tests {
         .unwrap();
         match cli.cmd {
             Cmd::Acquire(args) => {
-                assert_eq!(args.image, "ubuntu2404");
+                assert_eq!(args.image.as_deref(), Some("ubuntu2404"));
                 assert_eq!(args.env, "none");
             }
             other => panic!("unexpected command: {other:?}"),

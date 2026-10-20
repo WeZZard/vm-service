@@ -121,7 +121,8 @@ impl Legacy {
         };
         let state_move = if !selected && state_is_default {
             migrated.remove(STATE_KEY);
-            (legacy_state.is_dir() && !exists(&new_state)).then_some((legacy_state, new_state))
+            (legacy_state.is_dir() && (!exists(&new_state) || holds_only_cli_files(&new_state)))
+                .then_some((legacy_state, new_state))
         } else {
             None
         };
@@ -215,13 +216,33 @@ impl Legacy {
             if let Some(parent) = to.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            std::fs::rename(from, to).map_err(|error| {
-                InstallError::Refused(format!(
+            // A new folder that holds only the CLI's remembered leases
+            // (CL-3) steps aside, and its files join the moved folder.
+            let aside = to.with_file_name(format!(".machine-service-cli-{}", std::process::id()));
+            let set_aside = exists(to);
+            if set_aside {
+                std::fs::rename(to, &aside)?;
+            }
+            if let Err(error) = std::fs::rename(from, to) {
+                if set_aside {
+                    let _ = std::fs::rename(&aside, to);
+                }
+                return Err(InstallError::Refused(format!(
                     "cannot move {} to {}: {error}; the old agent is stopped and its plist kept",
                     from.display(),
                     to.display()
-                ))
-            })?;
+                )));
+            }
+            if set_aside {
+                for entry in std::fs::read_dir(&aside)? {
+                    let entry = entry?;
+                    let target = to.join(entry.file_name());
+                    if !exists(&target) {
+                        std::fs::rename(entry.path(), target)?;
+                    }
+                }
+                std::fs::remove_dir_all(&aside)?;
+            }
         }
         if let Some((from, to)) = &self.console_copy {
             if let Some(parent) = to.parent() {
@@ -325,6 +346,28 @@ fn link_target(path: &Path) -> Result<Option<PathBuf>, InstallError> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error.into()),
     }
+}
+
+/// The files `machctl` keeps in the state folder (CL-3, DC-72): its
+/// remembered leases, their lock, and a write in progress.
+fn is_cli_file(name: &str) -> bool {
+    name == "cli-leases.json"
+        || name == ".cli-leases.json.lock"
+        || name.starts_with(".cli-leases.json.")
+}
+
+/// Whether `folder` is a folder holding nothing but the CLI's files, which
+/// `machctl` may create before the service is installed.
+fn holds_only_cli_files(folder: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(folder) else {
+        return false;
+    };
+    entries.into_iter().all(|entry| {
+        entry.is_ok_and(|entry| {
+            entry.file_type().is_ok_and(|kind| kind.is_file())
+                && entry.file_name().to_str().is_some_and(is_cli_file)
+        })
+    })
 }
 
 fn exists(path: &Path) -> bool {

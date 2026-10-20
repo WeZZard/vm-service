@@ -1,6 +1,9 @@
 usage: machctl acquire [-h]
                        --purpose PURPOSE
                        [--image IMAGE]
+                       [--machine MACHINE]
+                       [--require REQUIRE]
+                       [--instance INSTANCE]
                        [--env ENV]
                        [--network {nat,internet,control-only}]
                        [--profile PROFILE]
@@ -22,6 +25,18 @@ options:
   --image IMAGE   image to clone (see:
                   machctl images;
                   default: macos26)
+  --machine MACHINE
+                  durable machine to
+                  lease, by name
+  --require REQUIRE
+                  lease any machine
+                  with this capability
+                  (repeatable)
+  --instance INSTANCE
+                  instance to acquire
+                  the image from, or
+                  to choose among (ID
+                  or address)
   --env ENV       default | none |
                   <env-pack-name>
                   (credential env

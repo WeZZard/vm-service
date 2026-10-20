@@ -1,5 +1,7 @@
 usage: machctl release
-       [-h] vm
+       [-h]
+       [--lease-id LEASE_ID]
+       vm
 
 positional arguments:
   vm
@@ -8,3 +10,8 @@ options:
   -h, --help
         show this help
         message and exit
+  --lease-id LEASE_ID
+        the lease to act
+        under (default: the
+        one machctl
+        remembered)

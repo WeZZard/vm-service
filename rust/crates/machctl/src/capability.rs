@@ -131,7 +131,6 @@ pub fn has_all(record: &Value, names: &[String]) -> bool {
 }
 
 /// One machine `machctl acquire --require` could lease, with why.
-#[allow(dead_code)] // CL-2 seam, see `choose`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Candidate {
     /// The instance that owns it.
@@ -149,11 +148,8 @@ pub struct Candidate {
 /// any available durable machine, then an acquirable virtual machine
 /// offer. Ties keep the listing's order: the local instance first.
 ///
-/// This is the selection half of `machctl acquire --require`. The acquiring
-/// half needs the durable branch's `POST /acquire` with `machine` and the
-/// virtual machine offers in `/machines` (MM-3), so the command is not
-/// wired yet and only the tests call this.
-#[allow(dead_code)] // CL-2 seam: wired into `acquire --require` with the durable lease.
+/// `machctl acquire --require` leases the first candidate and passes to the
+/// next on a capacity refusal (DC-69).
 pub fn choose(instances: &[(String, Vec<Value>)], names: &[String]) -> Vec<Candidate> {
     let mut candidates = Vec::new();
     for (instance, records) in instances {
