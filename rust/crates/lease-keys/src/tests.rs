@@ -1,8 +1,8 @@
 //! Port of the pure `bin/lease_keys.py` unit tests.
 //!
 //! `tests/unit/test_key_lifecycle.py` and `tests/unit/test_key_commands.py`
-//! drive the `vm-service` daemon (`_ssh`/`_scp`/`verify_transfer`, lease
-//! lifecycle) and belong to the `vm-service-core` crate, not to `lease-keys`.
+//! drive the `machine-service` daemon (`_ssh`/`_scp`/`verify_transfer`, lease
+//! lifecycle) and belong to the `machine-service-core` crate, not to `lease-keys`.
 //! The `e2e/test_lease_keys_live.py` runner is an opt-in live harness; it has no
 //! pure lease-keys assertions, so it is represented by an `#[ignore]` marker.
 

@@ -1,6 +1,6 @@
 //! Python-semantics helpers for the guest agent.
 //!
-//! The agent is a separate binary that cannot depend on `vm-service-core`, so
+//! The agent is a separate binary that cannot depend on `machine-service-core`, so
 //! the few CPython behaviours it needs are reproduced here. The expectations in
 //! the tests come from CPython 3.14.7.
 

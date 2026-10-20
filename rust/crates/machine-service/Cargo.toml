@@ -1,0 +1,22 @@
+[package]
+name = "machine-service"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "machine-service"
+path = "src/main.rs"
+
+[dependencies]
+machine-service-core = { path = "../machine-service-core" }
+tiny_http.workspace = true
+serde_json.workspace = true
+libc.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+environment = { path = "../environment" }

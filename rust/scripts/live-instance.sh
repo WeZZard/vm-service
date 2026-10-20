@@ -1,5 +1,5 @@
 #!/bin/sh
-# Run a second vm-service instance for live tests (docs/arch/test-layers.md,
+# Run a second machine-service instance for live tests (docs/arch/test-layers.md,
 # TL-4), beside the installed daemon and without touching it.
 #
 # The instance runs detached in its own session, so stopping the shell or
@@ -9,7 +9,7 @@
 #
 # Usage: scripts/live-instance.sh start <guest-link> | stop | status
 # Environment: LIVE_PORT (default 6250); LIVE_BIN (default target/live), the
-# directory holding `vm-service` and the agents from build-guest-agents.sh.
+# directory holding `machine-service` and the agents from build-guest-agents.sh.
 # Each port keeps its state, logs and PID under LIVE_BIN/<port>, so two
 # instances, one per guest link, can run at once.
 set -eu
@@ -36,7 +36,7 @@ start)
     VM_SERVICE_PORT="$port" VM_SERVICE_HOST=127.0.0.1 \
         VM_SERVICE_STATE="$dir/state" VM_SERVICE_GUEST_LINK="$link" \
         nohup perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV or die "exec: $!"' \
-        "$bin/vm-service" >>"$dir/daemon.out" 2>>"$dir/daemon.err" </dev/null &
+        "$bin/machine-service" >>"$dir/daemon.out" 2>>"$dir/daemon.err" </dev/null &
     echo $! >"$pidfile"
     tries=0
     until curl -fsS -m 2 "http://127.0.0.1:$port/health" >/dev/null 2>&1; do

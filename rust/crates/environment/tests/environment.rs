@@ -1,7 +1,7 @@
 //! Ported tests from `tests/unit/test_environment_config.py`.
 //!
 //! Daemon-level cases (`load_daemon`, `discover_lines`, HTTP routing) belong to
-//! `vm-service-core` / `vm-service` and are exercised there. This file covers
+//! `machine-service-core` / `machine-service` and are exercised there. This file covers
 //! the resolver and ownership behaviour the `environment` crate owns.
 
 use std::collections::{BTreeMap, HashMap};
@@ -94,10 +94,10 @@ impl Fixture {
         // fitted with a synthetic `tart` for the same reason. The Python
         // `bin/vmctl` this fixture used to point at was removed together with
         // the rest of the Python implementation.
-        let fake_vmctl = root.join("fake-vmctl");
-        fs::write(&fake_vmctl, "#!/bin/sh\nexit 0\n").expect("write fake vmctl");
-        fs::set_permissions(&fake_vmctl, fs::Permissions::from_mode(0o755))
-            .expect("chmod fake vmctl");
+        let fake_machctl = root.join("fake-machctl");
+        fs::write(&fake_machctl, "#!/bin/sh\nexit 0\n").expect("write fake machctl");
+        fs::set_permissions(&fake_machctl, fs::Permissions::from_mode(0o755))
+            .expect("chmod fake machctl");
 
         let mut profile = Map::new();
         profile.insert("schemaVersion".to_string(), json!(1));
@@ -111,7 +111,7 @@ impl Fixture {
             string(root.join("images-state")),
         );
         profile.insert("relayStateDir".to_string(), string(root.join("relay")));
-        profile.insert("vmctlPath".to_string(), string(&fake_vmctl));
+        profile.insert("vmctlPath".to_string(), string(&fake_machctl));
         profile.insert("tartPath".to_string(), string(&fake));
 
         let file = root.join("environment.json");

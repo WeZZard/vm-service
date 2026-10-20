@@ -1,0 +1,11 @@
+usage: machctl release
+       [-h] vm
+
+positional arguments:
+  vm
+
+options:
+  -h, --help
+    show this help
+    message and
+    exit

@@ -1,6 +1,6 @@
 # Rust translation conventions
 
-This document fixes the rules for the Python-to-Rust translation of `vm-service`.
+This document fixes the rules for the Python-to-Rust translation of `machine-service`.
 Every crate in this workspace follows it. Where this document and a Python source
 file disagree, the Python source file is the behavioral specification and this
 document is wrong; raise the conflict instead of guessing.
@@ -26,29 +26,29 @@ document is wrong; raise the conflict instead of guessing.
 | `bin/control_only.py` | `crates/control-only` (lib `control_only`) |
 | `bin/application_catalog.py` | `crates/application-catalog` (lib `application_catalog`) |
 | `bin/console_config.py`, `bin/guest_console.py`, `bin/console_sessions.py` | `crates/console` (lib `console`) |
-| `bin/vm-service` (state, tart, ssh, packs, operations) | `crates/vm-service-core` (lib `vm_service_core`) |
+| `bin/vm-service` (state, tart, ssh, packs, operations) | `crates/machine-service-core` (lib `machine_service_core`) |
 | `bin/vm-service` (HTTP server, main) | `crates/vm-service` (binary `vm-service`) |
-| `bin/vmctl` | `crates/vmctl` (binary `vmctl`) |
+| `bin/vmctl` | `crates/machctl` (binary `machctl`) |
 | `bin/console_worker.py` | `crates/console-worker` (binary `console-worker`) |
 | `bin/guest-console-agent.py` | `crates/guest-console-agent` (binary `guest-console-agent`) |
 
 Dependency direction is acyclic and points downward:
 
 ```
-guest-console-agent  console-worker  vmctl
+guest-console-agent  console-worker  machctl
         |                               |
         v                               v
    lease-keys <--- console         environment
         ^             ^
         |             |
-        +--- vm-service-core ---+
+        +--- machine-service-core ---+
                   |             |
    acquisition-options  control-only  application-catalog
                   |
-              vm-service
+              machine-service
 ```
 
-`crates/console` must not depend on `vm-service-core`. `crates/lease-keys` must
+`crates/console` must not depend on `machine-service-core`. `crates/lease-keys` must
 not depend on any other workspace crate.
 
 ## Errors
