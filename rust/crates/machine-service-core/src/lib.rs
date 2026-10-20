@@ -4,6 +4,7 @@
 pub mod catalog;
 pub mod config;
 pub mod console_api;
+pub mod durable;
 pub mod error;
 pub mod guest_link;
 pub mod host;
