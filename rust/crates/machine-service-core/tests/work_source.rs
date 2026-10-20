@@ -21,9 +21,9 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Map, Value};
 
+use machine_service_core::catalog::CatalogSource;
 use machine_service_core::error::OpResult;
 use machine_service_core::host::{BootProcess, Host, TartOutput};
-use machine_service_core::lines::LineCache;
 use machine_service_core::service::Service;
 
 /// The configured work VM used by the Python suite.
@@ -31,15 +31,14 @@ const WORK: &str = "pilot-ubuntu-work";
 
 // ------------------------------------------------------------------- TestHost
 
-/// A `Host` decorator over [`common::FakeHost`] that owns a mutable line map
-/// and an optional one-shot hook after `tart clone`.
+/// A `Host` decorator over [`common::FakeHost`] with an optional one-shot
+/// hook after `tart clone`.
 ///
-/// `FakeHost.lines` is a plain field shared through an `Arc`, so tests cannot
-/// mutate it in place. Every non-Tart method delegates to the fake.
+/// Every non-Tart method delegates to the fake, the image catalog included:
+/// a line change goes through the fake's `lines_override`, which the catalog
+/// sees as a changed input on its next read.
 struct TestHost {
     inner: Arc<common::FakeHost>,
-    lines: Mutex<Map<String, Value>>,
-    bases: Mutex<Map<String, Value>>,
     after_clone: Mutex<Option<Box<dyn FnOnce() + Send + Sync>>>,
 }
 
@@ -47,15 +46,14 @@ impl TestHost {
     fn new(inner: Arc<common::FakeHost>) -> Self {
         Self {
             inner,
-            lines: Mutex::new(common::default_lines()),
-            bases: Mutex::new(common::default_bases()),
             after_clone: Mutex::new(None),
         }
     }
 
     /// Set `ubuntu2404`'s `work_vm`, mirroring `lines['ubuntu2404']['work_vm'] = work`.
     fn set_work(&self, work: Value) {
-        let mut lines = self.lines.lock().expect("lines");
+        let mut slot = self.inner.lines_override.lock().expect("lines_override");
+        let lines = slot.get_or_insert_with(common::default_lines);
         lines
             .get_mut("ubuntu2404")
             .expect("ubuntu2404 line")
@@ -165,15 +163,8 @@ impl Host for TestHost {
         self.inner.host_macos_guests()
     }
 
-    fn discover_lines(
-        &self,
-        _cache: &mut LineCache,
-        _force: bool,
-    ) -> OpResult<(Map<String, Value>, Map<String, Value>)> {
-        Ok((
-            self.lines.lock().expect("lines").clone(),
-            self.bases.lock().expect("bases").clone(),
-        ))
+    fn catalog_source(&self) -> Option<Arc<dyn CatalogSource>> {
+        self.inner.catalog_source()
     }
 
     fn home_dir(&self) -> Option<PathBuf> {
@@ -236,6 +227,9 @@ impl WorkService {
             None,
             Arc::clone(&host) as Arc<dyn Host>,
         ));
+        service
+            .initialize_image_catalog()
+            .expect("in-memory image catalog");
         Self {
             fixture,
             host,

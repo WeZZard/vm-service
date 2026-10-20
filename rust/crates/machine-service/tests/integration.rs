@@ -196,10 +196,17 @@ fn test_health() {
     let live = Live::new();
     let response = live.request("GET", "/health", None);
     assert_eq!(response.status, 200);
-    assert_eq!(
-        response.body,
-        json!({"ok": true, "service": "machine-service"})
-    );
+    let mut body = response.body;
+    // The catalog status is the one moving part of the answer (IC-5).
+    let catalog = body
+        .as_object_mut()
+        .expect("health object")
+        .remove("catalog")
+        .expect("health carries the catalog status");
+    assert_eq!(body, json!({"ok": true, "service": "machine-service"}));
+    assert_eq!(catalog["status"], "current");
+    assert_eq!(catalog["generation"], 1);
+    assert!(catalog["built_at"].as_f64().is_some());
 }
 
 #[test]

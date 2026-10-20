@@ -12,15 +12,16 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Child;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use acquisition_options::GuestNetwork;
-use serde_json::{Map, Value};
+use serde_json::Value;
 
+use crate::catalog::CatalogSource;
 use crate::config::Config;
 use crate::error::{OpError, OpResult};
 use crate::guest_link::GuestChannel;
-use crate::lines::LineCache;
 
 /// A booting guest process, observed while the hypervisor settles.
 ///
@@ -205,12 +206,12 @@ pub trait Host: Send + Sync {
     /// gauge is unavailable; never fails.
     fn host_macos_guests(&self) -> Option<usize>;
 
-    /// Discover image lines, caching on the images directory mtime.
-    fn discover_lines(
-        &self,
-        cache: &mut LineCache,
-        force: bool,
-    ) -> OpResult<(Map<String, Value>, Map<String, Value>)>;
+    /// The image catalog's inputs and strict builder (IC-2, IC-4), or `None`
+    /// for the `images/*/line.conf` files of the configured pilot-images
+    /// checkout.
+    fn catalog_source(&self) -> Option<Arc<dyn CatalogSource>> {
+        None
+    }
 
     /// The caller's home directory, used for credential packs and the Tart
     /// store. Defaults to `$HOME`.
@@ -451,14 +452,6 @@ impl Host for RealHost {
 
     fn host_macos_guests(&self) -> Option<usize> {
         crate::tart::host_macos_guests()
-    }
-
-    fn discover_lines(
-        &self,
-        cache: &mut LineCache,
-        force: bool,
-    ) -> OpResult<(Map<String, Value>, Map<String, Value>)> {
-        crate::lines::discover_lines(&self.config, cache, force)
     }
 
     fn tart_store_root(&self) -> PathBuf {
