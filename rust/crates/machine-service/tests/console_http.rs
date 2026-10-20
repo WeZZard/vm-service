@@ -110,11 +110,11 @@ fn test_legacy_console_request_fails_without_retrofit() {
         .expect("lease_id")
         .to_string();
     let response = live.call(
-        &format!("/vms/{vm}/console/resolve"),
+        &format!("/machines/{vm}/console/resolve"),
         Some(&json!({"lease_id": lease_id})),
     );
     assert_eq!(response.status, 409, "{}", response.body);
-    let record = live.fixture.request("GET", &format!("/vms/{vm}"), None);
+    let record = live.fixture.request("GET", &format!("/machines/{vm}"), None);
     assert!(
         record.body.get("console").is_none(),
         "console was retrofitted: {}",

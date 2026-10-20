@@ -60,7 +60,7 @@ impl Drop for Lease {
         let _ = common::try_http_timeout(
             self.port,
             "POST",
-            &format!("/vms/{}/release", self.vm),
+            &format!("/machines/{}/release", self.vm),
             Some(&json!({"reason": "e2e-teardown"})),
             None,
             RELEASE_TIMEOUT,
@@ -97,12 +97,12 @@ fn acquire(port: u16, purpose: &str, env: &str) -> (Value, Lease) {
     (response.body, lease)
 }
 
-/// Python `api("POST", f"/vms/{rec['vm']}/exec", body, timeout=...)`.
+/// Python `api("POST", f"/machines/{rec['vm']}/exec", body, timeout=...)`.
 fn exec(port: u16, vm: &str, body: &Value, timeout: Duration) -> common::Response {
     common::http_timeout(
         port,
         "POST",
-        &format!("/vms/{vm}/exec"),
+        &format!("/machines/{vm}/exec"),
         Some(body),
         None,
         timeout,

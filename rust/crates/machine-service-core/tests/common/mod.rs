@@ -784,7 +784,7 @@ impl Fixture {
         lease_keys::create(&self.service.config.state_dir, vm).expect("lease keys")
     }
 
-    /// Snapshot the `GET /vms` body.
+    /// Snapshot the `GET /machines` body.
     pub fn snapshot(&self) -> Value {
         machine_service_core::snapshot::snapshot(&self.service).expect("snapshot")
     }

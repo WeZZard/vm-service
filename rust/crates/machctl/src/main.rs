@@ -468,7 +468,7 @@ fn main() {
                 });
             loop {
                 let (status, resp) =
-                    client.call("GET", &format!("/vms/{}", args.vm), None, DEFAULT_TIMEOUT_S);
+                    client.call("GET", &format!("/machines/{}", args.vm), None, DEFAULT_TIMEOUT_S);
                 if status == 200 && resp.get("state").and_then(Value::as_str) == Some("running") {
                     println!("{}", pretty(&resp));
                     return;
@@ -521,7 +521,7 @@ fn main() {
         }
 
         Cmd::List { json } => {
-            let (_status, resp) = client.call("GET", "/vms", None, DEFAULT_TIMEOUT_S);
+            let (_status, resp) = client.call("GET", "/machines", None, DEFAULT_TIMEOUT_S);
             if json {
                 println!("{}", pretty(&resp));
             } else {
@@ -530,7 +530,7 @@ fn main() {
         }
 
         Cmd::Status { vm } => {
-            let (status, resp) = client.call("GET", &format!("/vms/{vm}"), None, DEFAULT_TIMEOUT_S);
+            let (status, resp) = client.call("GET", &format!("/machines/{vm}"), None, DEFAULT_TIMEOUT_S);
             if status != 200 {
                 die_from(status, &resp, Some(&vm));
             }
@@ -567,7 +567,7 @@ fn main() {
             };
             let (status, resp) = client.call(
                 "POST",
-                &format!("/vms/{}/exec", args.vm),
+                &format!("/machines/{}/exec", args.vm),
                 Some(&Value::Object(body)),
                 transport_timeout,
             );
@@ -589,7 +589,7 @@ fn main() {
             body.insert("remote_path".to_string(), Value::String(remote.clone()));
             let (status, resp) = client.call(
                 "POST",
-                &format!("/vms/{vm}/push"),
+                &format!("/machines/{vm}/push"),
                 Some(&Value::Object(body)),
                 DEFAULT_TIMEOUT_S,
             );
@@ -605,7 +605,7 @@ fn main() {
             body.insert("local_path".to_string(), Value::String(local.clone()));
             let (status, resp) = client.call(
                 "POST",
-                &format!("/vms/{vm}/pull"),
+                &format!("/machines/{vm}/pull"),
                 Some(&Value::Object(body)),
                 DEFAULT_TIMEOUT_S,
             );
@@ -624,7 +624,7 @@ fn main() {
             }
             let (status, resp) = client.call(
                 "POST",
-                &format!("/vms/{vm}/heartbeat"),
+                &format!("/machines/{vm}/heartbeat"),
                 Some(&Value::Object(body)),
                 DEFAULT_TIMEOUT_S,
             );
@@ -640,7 +640,7 @@ fn main() {
         Cmd::Release { vm } => {
             let (status, resp) = client.call(
                 "POST",
-                &format!("/vms/{vm}/release"),
+                &format!("/machines/{vm}/release"),
                 Some(&Value::Object(Map::new())),
                 DEFAULT_TIMEOUT_S,
             );
@@ -668,7 +668,7 @@ fn main() {
 fn run_console(client: &Client<'_>, vm: &str, action: &str, body: Map<String, Value>) -> ! {
     let (status, resp) = client.call(
         "POST",
-        &format!("/vms/{vm}/console/{action}"),
+        &format!("/machines/{vm}/console/{action}"),
         Some(&Value::Object(body)),
         DEFAULT_TIMEOUT_S,
     );
@@ -923,7 +923,7 @@ fn format_images(resp: &Value) -> String {
 
 /// Human-readable `machctl list` table, or `no active leases` when empty.
 fn format_leases(resp: &Value) -> String {
-    let Some(vms) = resp.get("vms").and_then(Value::as_object) else {
+    let Some(vms) = resp.get("machines").and_then(Value::as_object) else {
         return "no active leases\n".to_string();
     };
     if vms.is_empty() {
@@ -1201,9 +1201,9 @@ mod tests {
 
     #[test]
     fn leases_table_empty_and_rows() {
-        assert_eq!(format_leases(&json!({"vms": {}})), "no active leases\n");
+        assert_eq!(format_leases(&json!({"machines": {}})), "no active leases\n");
         let resp = json!({
-            "vms": {
+            "machines": {
                 "vm-a": {
                     "state": "running",
                     "image": "ubuntu2404",
@@ -1224,7 +1224,7 @@ mod tests {
     #[test]
     fn leases_fall_back_to_legacy_fields() {
         let resp = json!({
-            "vms": {
+            "machines": {
                 "vm-b": {
                     "state": "stopped",
                     "line": "macos26",

@@ -309,7 +309,7 @@ pub fn descriptor(
 
     json!({
         "schemaVersion": 1,
-        "service": "vm-service",
+        "service": "machine-service",
         "options": Value::Object(options),
         "image_configuration": image_configuration,
         "runtime_readiness": "unverified",
@@ -613,7 +613,7 @@ mod tests {
         let backends = json!({"tart": "unmodified"});
         let descriptor = descriptor(&backends, None, &InternetAvailability::Available);
         assert_eq!(descriptor["schemaVersion"], json!(1));
-        assert_eq!(descriptor["service"], json!("vm-service"));
+        assert_eq!(descriptor["service"], json!("machine-service"));
         assert_eq!(descriptor["options"]["vnc"]["backends"], backends);
         assert_eq!(
             descriptor["options"]["vnc"]["viewer_location"],

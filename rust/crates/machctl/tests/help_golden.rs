@@ -37,8 +37,9 @@ const WIDTHS: &[&str] = &[
     "20", "24", "25", "30", "33", "40", "80", "120", "160", "240", "300",
 ];
 
+/// AC-35: `machctl --help` and every subcommand's help match the golden files.
 #[test]
-fn help_matches_argparse_golden_corpus() {
+fn ac35_help_matches_argparse_golden_corpus() {
     for width in WIDTHS {
         let directory = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/golden/help")

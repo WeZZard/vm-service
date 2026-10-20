@@ -158,6 +158,10 @@ fn serve(config: Config) -> Result<(), String> {
 fn handle(service: &Service, mut request: Request) {
     let method = request.method().clone();
     let url = request.url().to_string();
+    if let Some(body) = removed_route(&url) {
+        let _ = send(request, 410, &body);
+        return;
+    }
     let response = match method {
         Method::Get => handle_get(service, &mut request, &url),
         Method::Post => handle_post(service, &mut request, &url),
@@ -184,6 +188,25 @@ fn handle(service: &Service, mut request: Request) {
             let _ = send(request, 409, &body);
         }
     }
+}
+
+/// The answer to a request on a removed `/vms` path: HTTP 410 Gone, naming
+/// the `/machines` path that replaces it (AC-35, DC-37, MG-2).
+///
+/// There is no alias: a missed caller fails at once with its fix in the
+/// error, and the request reaches no handler, so no operation runs. Any
+/// method and any query string is answered the same way.
+fn removed_route(url: &str) -> Option<Value> {
+    let path = url.split_once('?').map_or(url, |(path, _)| path);
+    let rest = path.strip_prefix("/vms")?;
+    if !(rest.is_empty() || rest.starts_with('/')) {
+        return None;
+    }
+    let replacement = format!("/machines{rest}");
+    Some(json!({
+        "error": format!("{path} was removed; use {replacement}"),
+        "replacement": replacement,
+    }))
 }
 
 /// Release a lease whose successful acquisition response could not be
@@ -239,13 +262,13 @@ fn handle_get(service: &Service, request: &mut Request, url: &str) -> OpResult<(
         return Ok((
             200,
             json!({
-                "service": "vm-service",
-                "endpoints": ["/health", "/images", "/applications", "/vms", "/vms/{name}"],
+                "service": "machine-service",
+                "endpoints": ["/health", "/images", "/applications", "/machines", "/machines/{name}"],
             }),
         ));
     }
     if path == "/health" {
-        let mut body = json!({"ok": true, "service": "vm-service"});
+        let mut body = json!({"ok": true, "service": "machine-service"});
         if let Some(environment) = service
             .config
             .environment
@@ -303,13 +326,13 @@ fn handle_get(service: &Service, request: &mut Request, url: &str) -> OpResult<(
             Err(error) => return Ok((503, json!({"error": error.to_string()}))),
         }
     }
-    if path == "/vms" {
+    if path == "/machines" {
         return Ok((200, snapshot::snapshot(service)?));
     }
-    if let Some(name) = path.strip_prefix("/vms/") {
+    if let Some(name) = path.strip_prefix("/machines/") {
         if !name.is_empty() && !name.contains('/') {
-            let vms = snapshot::snapshot(service)?;
-            if let Some(record) = vms.get("vms").and_then(|vms| vms.get(name)) {
+            let machines = snapshot::snapshot(service)?;
+            if let Some(record) = machines.get("machines").and_then(|machines| machines.get(name)) {
                 return Ok((200, record.clone()));
             }
             return Ok((404, json!({"error": "unknown VM"})));
@@ -364,7 +387,7 @@ fn handle_post(service: &Service, request: &mut Request, url: &str) -> OpResult<
         return Ok((200, record));
     }
 
-    if let Some(rest) = path.strip_prefix("/vms/") {
+    if let Some(rest) = path.strip_prefix("/machines/") {
         let mut segments = rest.split('/');
         let vm = segments.next().unwrap_or_default().to_string();
         let action = segments.next().unwrap_or_default().to_string();

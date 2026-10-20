@@ -113,7 +113,7 @@ impl Live {
     }
 
     fn release(&self, vm: &str) {
-        let response = self.request("POST", &format!("/vms/{vm}/release"), Some(&json!({})));
+        let response = self.request("POST", &format!("/machines/{vm}/release"), Some(&json!({})));
         assert_eq!(response.status, 200, "{}", response.body);
     }
 }
@@ -168,15 +168,15 @@ fn internet_boots_on_softnet_and_is_reported() {
     );
     assert_eq!(table_addresses(&live), vec!["192.168.64.99".to_string()]);
 
-    let one = live.request("GET", &format!("/vms/{vm}"), None);
+    let one = live.request("GET", &format!("/machines/{vm}"), None);
     assert_eq!(one.body["network"], "internet");
-    let all = live.request("GET", "/vms", None);
-    assert_eq!(all.body["vms"][&vm]["network"], "internet");
+    let all = live.request("GET", "/machines", None);
+    assert_eq!(all.body["machines"][&vm]["network"], "internet");
 
     // The host still reaches the guest over the lease's SSH key.
     let exec = live.request(
         "POST",
-        &format!("/vms/{vm}/exec"),
+        &format!("/machines/{vm}/exec"),
         Some(&json!({"argv": ["uname", "-a"]})),
     );
     assert_eq!(exec.status, 200, "{}", exec.body);

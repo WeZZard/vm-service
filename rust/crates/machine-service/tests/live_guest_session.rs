@@ -197,7 +197,7 @@ impl Lease {
         let response = common::http_timeout(
             self.port,
             "POST",
-            &format!("/vms/{}/{route}", self.vm),
+            &format!("/machines/{}/{route}", self.vm),
             Some(body),
             None,
             REQUEST_TIMEOUT,
@@ -219,7 +219,7 @@ impl Lease {
         common::http_timeout(
             self.port,
             "POST",
-            &format!("/vms/{}/release", self.vm),
+            &format!("/machines/{}/release", self.vm),
             Some(&json!({"reason": "live-test"})),
             None,
             REQUEST_TIMEOUT,
@@ -608,7 +608,7 @@ fn live_release_cancels_a_running_command_and_closes_the_session() {
         let response = common::http_timeout(
             running_port,
             "POST",
-            &format!("/vms/{vm}/exec"),
+            &format!("/machines/{vm}/exec"),
             Some(&json!({"argv": ["sleep", "600"], "timeout": 900})),
             None,
             REQUEST_TIMEOUT,
