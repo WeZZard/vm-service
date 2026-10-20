@@ -21,6 +21,13 @@ pub const CONFIG_DIR_VARIABLE: &str = "MACHINE_SERVICE_CONFIG_DIR";
 /// with one another or with an installed instance. A release build refuses
 /// to start while it is set, because the lock must be host-wide (DM-2).
 pub const LOCK_DIR_VARIABLE: &str = "MACHINE_SERVICE_DURABLE_LOCK_DIR";
+/// The free-disk warning level in GiB (HY-6, DC-76). Unset means
+/// [`DEFAULT_DISK_WARN_GIB`]; `0` turns the warning off; anything that is
+/// not a number stops the daemon, so a typo never silences the warning.
+pub const DISK_WARN_VARIABLE: &str = "MACHINE_SERVICE_DISK_WARN_GB";
+/// The default free-disk warning level: 30 GiB, about the space one engine
+/// install takes on a 228 GiB system volume (HY-6, DC-76).
+pub const DEFAULT_DISK_WARN_GIB: f64 = 30.0;
 /// The folder of the host-wide lease lock that every instance on the Mac
 /// shares, whatever its state directory (DM-2).
 pub const HOST_LOCK_DIR: &str = "/var/tmp/com.wezzard.machine-service";
@@ -79,6 +86,9 @@ pub struct DurableConfig {
     pub probe: Option<Vec<String>>,
     /// The CI runner's folder, which hygiene never touches (HY-5).
     pub ci_root: PathBuf,
+    /// Free bytes below which the machine record warns `low free disk`, or
+    /// `None` when the warning is off (HY-6).
+    pub disk_warn_bytes: Option<u64>,
 }
 
 impl DurableConfig {
@@ -103,6 +113,7 @@ impl DurableConfig {
             .map(PathBuf::from)
             .unwrap_or_else(|| home.join(".config/machine-service"));
         let lock_dir = lock_dir_from(std::env::var_os(LOCK_DIR_VARIABLE).map(PathBuf::from))?;
+        let disk_warn_bytes = parse_disk_warn(std::env::var(DISK_WARN_VARIABLE).ok().as_deref())?;
         Ok(Self {
             exposed,
             instance: instance_id(),
@@ -121,6 +132,7 @@ impl DurableConfig {
             inventory_timeout: INVENTORY_TIMEOUT,
             fact_timeout: FACT_TIMEOUT,
             probe,
+            disk_warn_bytes,
         })
     }
 
@@ -152,6 +164,24 @@ pub fn parse_exposure(value: Option<&str>) -> Result<bool, String> {
             "{EXPOSE_VARIABLE} must be on or off; got {other:?}"
         )),
     }
+}
+
+/// Parse the free-disk warning level (HY-6, DC-76): unset or empty is the
+/// default, `0` is off, a positive number of GiB is that level, and
+/// anything else is refused.
+pub fn parse_disk_warn(value: Option<&str>) -> Result<Option<u64>, String> {
+    let gib = match value.map(str::trim) {
+        None | Some("") => DEFAULT_DISK_WARN_GIB,
+        Some(text) => match text.parse::<f64>() {
+            Ok(number) if number.is_finite() && number >= 0.0 => number,
+            _ => {
+                return Err(format!(
+                    "{DISK_WARN_VARIABLE} must be a number of GiB, or 0 to turn the warning off; got {text:?}"
+                ))
+            }
+        },
+    };
+    Ok((gib > 0.0).then_some((gib * 1024.0 * 1024.0 * 1024.0) as u64))
 }
 
 /// The lock folder: the host-wide one, or, in a debug build only, the
@@ -251,6 +281,19 @@ pub fn user_name(uid: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// HY-6 (TL-1): unset is 30 GiB, 0 is off, and a typo is refused.
+    #[test]
+    fn hy6_disk_warning_level() {
+        assert_eq!(parse_disk_warn(None), Ok(Some(30 * 1024 * 1024 * 1024)));
+        assert_eq!(parse_disk_warn(Some("")), Ok(Some(30 * 1024 * 1024 * 1024)));
+        assert_eq!(parse_disk_warn(Some("0")), Ok(None));
+        assert_eq!(parse_disk_warn(Some("1.5")), Ok(Some(1_610_612_736)));
+        for bad in ["thirty", "-1", "nan", "inf"] {
+            let error = parse_disk_warn(Some(bad)).unwrap_err();
+            assert!(error.contains(DISK_WARN_VARIABLE), "{error}");
+        }
+    }
 
     /// AC-43: exposure is off unless the operator turns it on, and a value
     /// that is neither on nor off is refused rather than guessed.

@@ -253,15 +253,49 @@ pub fn display(config: &DurableConfig, unknown: &mut Map<String, Value>) -> Valu
             json!("/dev/console could not be read"),
         );
     }
-    unknown.insert(
-        "display.screen_locked".to_string(),
-        json!("not observed by this version"),
-    );
+    let screen_locked = ioreg_root().and_then(|text| parse_screen_locked(&text, &config.user));
+    if screen_locked.is_none() {
+        unknown.insert(
+            "display.screen_locked".to_string(),
+            json!(format!(
+                "no console session of {} in IOConsoleUsers",
+                config.user
+            )),
+        );
+    }
     json!({
         "console_user": console_user,
         "gui_session": console_user.as_deref().map(|user| user == config.user),
-        "screen_locked": null,
+        "screen_locked": screen_locked,
     })
+}
+
+/// `ioreg -n Root -d1`, whose `IOConsoleUsers` lists the GUI sessions.
+fn ioreg_root() -> Option<String> {
+    let mut command = std::process::Command::new("/usr/sbin/ioreg");
+    command.args(["-n", "Root", "-d1"]);
+    let output =
+        crate::proc::run_capture(&mut command, None, std::time::Duration::from_secs(5)).ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Whether `user`'s GUI session has its screen locked, from `ioreg`'s
+/// `IOConsoleUsers` (MM-3, DC-77): the session carries
+/// `CGSSessionScreenIsLocked=Yes` while locked and drops the key when
+/// unlocked. `None` when the user has no session there.
+pub fn parse_screen_locked(text: &str, user: &str) -> Option<bool> {
+    let line = text
+        .lines()
+        .find(|line| line.contains("\"IOConsoleUsers\""))?;
+    let (_, sessions) = line.split_once("= (")?;
+    let name = format!("\"kCGSSessionUserNameKey\"=\"{user}\"");
+    sessions
+        .split('}')
+        .find(|session| session.contains(&name))
+        .map(|session| session.contains("\"CGSSessionScreenIsLocked\"=Yes"))
 }
 
 /// A durable machine's state and, when it is `unavailable`, why (MM-5,
@@ -293,6 +327,27 @@ pub fn durable_state(
         );
     }
     ("available", None)
+}
+
+/// The machine record's warnings (HY-6): `low free disk` below the
+/// configured level. A warning never makes the machine unavailable.
+pub fn warnings(report: &Value, warn_bytes: Option<u64>) -> Value {
+    let mut out = Vec::new();
+    let free = report["disk"]["free_bytes"].as_u64();
+    if let (Some(free), Some(level)) = (free, warn_bytes) {
+        if free < level {
+            let gib = |bytes: u64| bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+            out.push(json!({
+                "code": "low-free-disk",
+                "message": format!(
+                    "low free disk: {:.1} GiB free, below the warning level of {:.1} GiB",
+                    gib(free),
+                    gib(level)
+                ),
+            }));
+        }
+    }
+    Value::Array(out)
 }
 
 /// The total and free bytes of the volume holding `path`.
@@ -585,6 +640,7 @@ mod tests {
             fact_timeout: Duration::from_secs(10),
             probe,
             ci_root: root.path().join("actions-runner"),
+            disk_warn_bytes: None,
         };
         (root, config)
     }
@@ -691,6 +747,36 @@ mod tests {
         assert_eq!(
             durable_state(Some("releasing"), &mine, "wezzard"),
             ("releasing", None)
+        );
+    }
+
+    /// MM-3 (TL-1, DC-77): a locked session carries the lock key, an
+    /// unlocked one does not, and a user without a session is unknown.
+    #[test]
+    fn mm3_screen_locked_from_console_users() {
+        let locked = "  |   \"IOConsoleUsers\" = ({\"kCGSSessionOnConsoleKey\"=Yes,\"kCGSSessionUserNameKey\"=\"alice\",\"CGSSessionScreenIsLocked\"=Yes,\"kCGSSessionUserIDKey\"=501},{\"kCGSSessionOnConsoleKey\"=No,\"kCGSSessionUserNameKey\"=\"bob\",\"kCGSSessionUserIDKey\"=502})\n";
+        assert_eq!(parse_screen_locked(locked, "alice"), Some(true));
+        assert_eq!(parse_screen_locked(locked, "bob"), Some(false));
+        assert_eq!(parse_screen_locked(locked, "carol"), None);
+        assert_eq!(parse_screen_locked("no consoles\n", "alice"), None);
+    }
+
+    /// HY-6 (TL-1): below the level the record warns; above it, or with the
+    /// warning off, or without a reading, it does not.
+    #[test]
+    fn hy6_low_free_disk_warning() {
+        let report = json!({"disk": {"total_bytes": 228u64 << 30, "free_bytes": 20u64 << 30}});
+        let warned = warnings(&report, Some(30 << 30));
+        assert_eq!(warned[0]["code"], "low-free-disk");
+        assert_eq!(
+            warned[0]["message"],
+            "low free disk: 20.0 GiB free, below the warning level of 30.0 GiB"
+        );
+        assert_eq!(warnings(&report, Some(10 << 30)), json!([]));
+        assert_eq!(warnings(&report, None), json!([]));
+        assert_eq!(
+            warnings(&json!({"disk": {"free_bytes": null}}), Some(30 << 30)),
+            json!([])
         );
     }
 

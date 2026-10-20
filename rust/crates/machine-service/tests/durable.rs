@@ -141,8 +141,21 @@ exit 0
     }
 
     fn start(&self, state: &str, exposed: bool) -> Daemon {
+        self.try_start_with(state, exposed, &[])
+            .unwrap_or_else(|_| panic!("daemon did not start"))
+    }
+
+    /// Start a daemon with `extra` environment, or answer the last
+    /// attempt's standard-error file when none started.
+    fn try_start_with(
+        &self,
+        state: &str,
+        exposed: bool,
+        extra: &[(&str, &str)],
+    ) -> Result<Daemon, PathBuf> {
         let state_dir = self.state(state);
         std::fs::create_dir_all(&state_dir).unwrap();
+        let mut last_err = state_dir.join("daemon.err");
         for _ in 0..16 {
             let port = free_port();
             let err = state_dir.join(format!("daemon-{port}.err"));
@@ -167,6 +180,8 @@ exit 0
             if exposed {
                 command.env("MACHINE_SERVICE_EXPOSE_DURABLE", "on");
             }
+            command.envs(extra.iter().copied());
+            last_err = err.clone();
             let mut child = command.spawn().expect("spawn daemon");
             let deadline = Instant::now() + Duration::from_secs(30);
             loop {
@@ -175,12 +190,12 @@ exit 0
                 }
                 if let Ok(response) = try_http(port, "GET", "/health", None, None) {
                     if response.status == 200 {
-                        return Daemon {
+                        return Ok(Daemon {
                             child: Some(child),
                             port,
                             state: state_dir,
                             err,
-                        };
+                        });
                     }
                 }
                 if Instant::now() >= deadline {
@@ -191,7 +206,7 @@ exit 0
                 std::thread::sleep(Duration::from_millis(50));
             }
         }
-        panic!("daemon did not start");
+        Err(last_err)
     }
 }
 
@@ -1343,4 +1358,276 @@ fn ac28_byte_transfers_to_and_from_a_durable_machine() {
         .unwrap_or_default();
     assert!(left.is_empty(), "{left:?}");
     assert_eq!(daemon.release(&name, &lease).status, 200);
+}
+
+/// Whether this process runs in a logged-in GUI (Aqua) session, where
+/// Launch Services can open an application.
+fn in_gui_session() -> bool {
+    Command::new("/bin/launchctl")
+        .arg("managername")
+        .output()
+        .is_ok_and(|output| String::from_utf8_lossy(&output.stdout).trim() == "Aqua")
+}
+
+/// Build a minimal regular application, signed ad hoc, that quits when
+/// asked as any application does. Answers its bundle and executable.
+fn stand_in_app(root: &Path, name: &str, bundle_id: &str) -> (PathBuf, PathBuf) {
+    let app = root.join(format!("{name}.app"));
+    let macos = app.join("Contents/MacOS");
+    std::fs::create_dir_all(&macos).unwrap();
+    let source = root.join(format!("{name}.m"));
+    std::fs::write(
+        &source,
+        "#import <Cocoa/Cocoa.h>\nint main(void) { @autoreleasepool { [NSApplication sharedApplication]; [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular]; [NSApp run]; } return 0; }\n",
+    )
+    .unwrap();
+    let executable = macos.join(name);
+    // The system's own toolchain and SDK: a `DEVELOPER_DIR` chosen for the
+    // Rust build may name an Xcode older than the running macOS.
+    let built = Command::new("/usr/bin/clang")
+        .env_remove("DEVELOPER_DIR")
+        .env_remove("SDKROOT")
+        .args(["-fobjc-arc", "-framework", "Cocoa", "-o"])
+        .arg(&executable)
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    std::fs::write(
+        app.join("Contents/Info.plist"),
+        format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\
+<key>CFBundleIdentifier</key><string>{bundle_id}</string>\
+<key>CFBundleExecutable</key><string>{name}</string>\
+<key>CFBundleName</key><string>{name}</string>\
+<key>CFBundlePackageType</key><string>APPL</string>\
+<key>CFBundleVersion</key><string>1</string>\
+</dict></plist>\n"
+        ),
+    )
+    .unwrap();
+    let signed = Command::new("/usr/bin/codesign")
+        .args(["--force", "--sign", "-"])
+        .arg(&app)
+        .output()
+        .unwrap();
+    assert!(
+        signed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&signed.stderr)
+    );
+    (app, executable)
+}
+
+/// The PIDs running `executable`.
+fn pids_of(executable: &Path) -> Vec<i32> {
+    let output = Command::new("/usr/bin/pgrep")
+        .arg("-f")
+        .arg(executable)
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .filter_map(|pid| pid.parse().ok())
+        .collect()
+}
+
+fn wait_for_pid(executable: &Path) -> i32 {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        if let Some(pid) = pids_of(executable).first() {
+            return *pid;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{} never started",
+            executable.display()
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// Removes a stand-in application's Launch Services registration.
+struct Registered(PathBuf);
+
+impl Drop for Registered {
+    fn drop(&mut self) {
+        let _ = Command::new(
+            "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister",
+        )
+        .arg("-u")
+        .arg(&self.0)
+        .output();
+    }
+}
+
+/// AC-30, HY-3 (DC-73): an application the lease opened with `open` is
+/// asked to quit at release and recorded with the `application` rule; an
+/// application the owner opened during the lease, which no rule may
+/// touch, keeps running.
+#[test]
+fn ac30_release_quits_the_applications_the_lease_opened_and_only_those() {
+    if !in_gui_session() {
+        eprintln!("skipped: no logged-in GUI session to open applications in");
+        return;
+    }
+    let fixture = Fixture::new();
+    let tag = &uuid_like();
+    let (lease_app, lease_exe) = stand_in_app(
+        &fixture.root,
+        "LeaseStandIn",
+        &format!("dev.machine-service.test.lease.{tag}"),
+    );
+    let (owner_app, owner_exe) = stand_in_app(
+        &fixture.root,
+        "OwnerStandIn",
+        &format!("dev.machine-service.test.owner.{tag}"),
+    );
+    let _registrations = (Registered(lease_app.clone()), Registered(owner_app.clone()));
+    let daemon = fixture.start("state", true);
+    let (name, lease) = daemon.acquired("apps", "none");
+
+    // The owner opens an application during the lease, outside it.
+    let opened = Command::new("/usr/bin/open")
+        .args(["-g", "-n"])
+        .arg(&owner_app)
+        .env_remove("MACHINE_SERVICE_LEASE_ID")
+        .status()
+        .unwrap();
+    assert!(opened.success());
+    let owner_pid = wait_for_pid(&owner_exe);
+    let _owner_guard = Leftover(owner_pid);
+    // The lease opens one through Launch Services.
+    let output = daemon.output(
+        &name,
+        &lease,
+        &format!(
+            "/usr/bin/open -g -n '{}' && echo opened",
+            lease_app.display()
+        ),
+    );
+    assert_eq!(output.trim(), "opened");
+    let lease_pid = wait_for_pid(&lease_exe);
+    let _lease_guard = Leftover(lease_pid);
+
+    let released = daemon.release(&name, &lease);
+    assert_eq!(released.status, 200, "{}", released.body);
+    let swept = released.body["hygiene"]["swept"]
+        .as_array()
+        .unwrap()
+        .clone();
+    let entry = swept
+        .iter()
+        .find(|entry| entry["pid"] == lease_pid)
+        .unwrap_or_else(|| panic!("the lease's application was not swept: {swept:?}"));
+    assert_eq!(entry["rule"], "application");
+    assert_eq!(entry["ended"], true);
+    assert_eq!(entry["signal"], "QUIT", "asked to quit first: {entry}");
+    assert!(!alive(lease_pid));
+    assert!(alive(owner_pid), "the owner's application was ended");
+    assert!(swept.iter().all(|entry| entry["pid"] != owner_pid));
+}
+
+/// A short random tag for bundle identifiers.
+fn uuid_like() -> String {
+    format!(
+        "{:x}{:x}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .subsec_nanos()
+    )
+}
+
+/// HY-6 (DC-76): below `MACHINE_SERVICE_DISK_WARN_GB` the machine record
+/// warns `low free disk` and stays available; `0` turns the warning off;
+/// a value that is not a number stops the daemon, naming the variable.
+#[test]
+fn hy6_low_free_disk_warning() {
+    let fixture = Fixture::new();
+    let daemon = fixture
+        .try_start_with(
+            "warned",
+            true,
+            &[("MACHINE_SERVICE_DISK_WARN_GB", "1000000")],
+        )
+        .unwrap_or_else(|err| panic!("{}", std::fs::read_to_string(err).unwrap_or_default()));
+    let name = daemon.instance();
+    let record = daemon.machine(&name);
+    assert_eq!(record["warnings"][0]["code"], "low-free-disk", "{record}");
+    assert!(record["warnings"][0]["message"]
+        .as_str()
+        .unwrap()
+        .starts_with("low free disk: "));
+    assert_eq!(record["state"], "available");
+    drop(daemon);
+    let quiet = fixture
+        .try_start_with("quiet", true, &[("MACHINE_SERVICE_DISK_WARN_GB", "0")])
+        .unwrap_or_else(|err| panic!("{}", std::fs::read_to_string(err).unwrap_or_default()));
+    assert_eq!(quiet.machine(&name)["warnings"], json!([]));
+    drop(quiet);
+    let err =
+        match fixture.try_start_with("typo", true, &[("MACHINE_SERVICE_DISK_WARN_GB", "thirty")]) {
+            Ok(_) => panic!("a daemon started with a malformed warning level"),
+            Err(err) => std::fs::read_to_string(err).unwrap_or_default(),
+        };
+    assert!(err.contains("MACHINE_SERVICE_DISK_WARN_GB"), "{err}");
+}
+
+/// HY-5, AC-32 (DC-75): the CI runner is sampled at acquisition, on every
+/// GC pass and at release; the hygiene record carries the intervals during
+/// which a job ran. The stand-in runner is the test's own and survives.
+#[test]
+fn hy5_ci_busy_intervals_are_recorded() {
+    let fixture = Fixture::new();
+    let source = fixture.root.join("worker.c");
+    std::fs::write(
+        &source,
+        "#include <unistd.h>\nint main(void) { sleep(3600); return 0; }\n",
+    )
+    .unwrap();
+    // A copied platform binary is refused at launch, so it is compiled.
+    let worker = fixture.root.join("Runner.Worker");
+    let built = Command::new("/usr/bin/cc")
+        .env_remove("DEVELOPER_DIR")
+        .env_remove("SDKROOT")
+        .arg("-o")
+        .arg(&worker)
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    let daemon = fixture.start("state", true);
+    let (name, lease) = daemon.acquired("ci-coexist", "none");
+    let job = StandIn::spawn(worker.to_str().unwrap(), &[]);
+    let gc = daemon.request("POST", "/gc", Some(&json!({})));
+    assert_eq!(gc.status, 200, "{}", gc.body);
+    assert_eq!(
+        daemon.machine(&name)["capabilities"]["ci_runner"]["busy"],
+        true
+    );
+    drop(job);
+    let gc = daemon.request("POST", "/gc", Some(&json!({})));
+    assert_eq!(gc.status, 200, "{}", gc.body);
+    let released = daemon.release(&name, &lease);
+    assert_eq!(released.status, 200, "{}", released.body);
+    let hygiene = &released.body["hygiene"];
+    let intervals = hygiene["ci_busy_intervals"].as_array().unwrap();
+    assert_eq!(intervals.len(), 1, "{hygiene}");
+    let (from, to) = (
+        intervals[0]["from"].as_f64().unwrap(),
+        intervals[0]["to"].as_f64().unwrap(),
+    );
+    assert!(from <= to, "{hygiene}");
+    assert!(hygiene["ci_sampling"]["samples"].as_u64().unwrap() >= 4);
+    assert_eq!(hygiene["ci_sampling"]["interval_s"], 60);
 }
