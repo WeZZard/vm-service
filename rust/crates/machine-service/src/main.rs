@@ -283,7 +283,8 @@ fn handle_get(service: &Service, request: &mut Request, url: &str) -> OpResult<(
         let mut body = json!({"ok": true, "service": "machine-service"});
         // A health check never waits for a rebuild; a changed file reads as
         // `stale` until the rebuild this read starts has finished (IC-5).
-        body["catalog"] = service.catalog.peek().status.to_json();
+        let catalog = service.catalog.peek();
+        body["catalog"] = catalog.status.to_json();
         if let Some(environment) = service
             .config
             .environment
@@ -294,8 +295,7 @@ fn handle_get(service: &Service, request: &mut Request, url: &str) -> OpResult<(
         }
         durable_routes::health(
             &mut body,
-            service.catalog.peek().status.freshness
-                != machine_service_core::catalog::Freshness::Unavailable,
+            catalog.status.freshness != machine_service_core::catalog::Freshness::Unavailable,
         );
         return Ok((200, body));
     }

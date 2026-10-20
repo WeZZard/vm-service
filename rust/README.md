@@ -47,7 +47,9 @@ with `--environment <absolute-path>`.
 
 ## Companion binaries
 
-- `machine-service` — the daemon.
+- `machine-service` — the daemon. `machine-service --probe-host` prints the
+  GPU and privacy-permission facts as one JSON line; the daemon runs it as its
+  own child for the durable machine's capability report.
 - `machctl` — the CLI client.
 - `console-worker` — launched by the console controller; not run directly.
 - `guest-console-agent` — uploaded to the guest by the console controller; not
