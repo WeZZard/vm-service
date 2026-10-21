@@ -57,3 +57,7 @@ are present.
   `machctl` when `list` became the federated machine list (CL-1): its
   description changed from "list leases" and it gained `--local`,
   `--instance`, `--kind` and `--require`. No other file changed.
+- `top.txt` at every width was regenerated from the Rust `machctl` when the
+  top-level description and the `acquire`, `heartbeat` and `release`
+  summaries stopped describing only Tart VMs, since a lease can also be of a
+  durable Mac (MM-1). No other file changed.

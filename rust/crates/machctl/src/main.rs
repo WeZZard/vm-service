@@ -37,7 +37,7 @@ const DEFAULT_TIMEOUT_S: u64 = 3600;
 #[derive(Parser, Debug)]
 #[command(
     name = "machctl",
-    about = "client for machine-service (Tart VM leases)",
+    about = "client for machine-service (leases of Tart VMs and durable Macs)",
     disable_help_subcommand = true,
     infer_long_args = true
 )]
@@ -56,7 +56,7 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// clone + boot a fresh VM and lease it
+    /// lease a machine: a fresh VM clone, or a durable Mac
     Acquire(Box<AcquireArgs>),
     /// block until a lease is running (useful after --no-wait)
     Wait(WaitArgs),
@@ -118,7 +118,7 @@ enum Cmd {
         #[arg(long)]
         lease_id: Option<String>,
     },
-    /// reset TTL; keeps a leased VM alive
+    /// reset TTL; keeps a leased machine alive
     Heartbeat {
         vm: String,
         #[arg(long)]
@@ -127,7 +127,7 @@ enum Cmd {
         #[arg(long)]
         lease_id: Option<String>,
     },
-    /// stop + delete + unregister
+    /// end a lease; a VM is stopped, deleted and unregistered
     Release {
         vm: String,
         /// the lease to act under (default: the one machctl remembered)
