@@ -14,6 +14,7 @@ name = "vm-service-guest-firewall"
 path = "src/main.rs"
 
 [dependencies]
+service-layout = { path = "../service-layout" }
 clap.workspace = true
 libc.workspace = true
 tempfile.workspace = true

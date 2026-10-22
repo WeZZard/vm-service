@@ -28,8 +28,8 @@ pub const ANCHOR_FILE_VARIABLE: &str = "MACHINE_SERVICE_GUEST_FIREWALL_ANCHOR";
 pub const TABLE_FILE_VARIABLE: &str = "MACHINE_SERVICE_GUEST_FIREWALL_TABLE";
 /// The environment variable that overrides the macOS DNS-over-TLS forwarder.
 pub const FORWARDER_VARIABLE: &str = "MACHINE_SERVICE_DOT_FORWARDER";
-/// The forwarder's executable name beside `machine-service`.
-pub const FORWARDER: &str = "vm-service-dot-forwarder";
+/// The forwarder's executable name beside `machine-service` (IN-1).
+pub const FORWARDER: &str = service_layout::Executable::DotForwarder.name();
 /// A marker in the probe command, so a fake guest can recognise it.
 pub const PROBE_MARKER: &str = "vm-service isolation probe";
 /// A marker in the egress check, so a fake guest can recognise it.
@@ -259,15 +259,12 @@ pub fn forwarder_path(value: Option<&str>) -> PathBuf {
     if let Some(path) = value.filter(|path| !path.is_empty()) {
         return PathBuf::from(path);
     }
-    let directory = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(Path::to_path_buf))
-        .unwrap_or_default();
-    let qualified = directory.join(format!("{FORWARDER}-macos"));
-    if qualified.is_file() {
-        return qualified;
-    }
-    directory.join(FORWARDER)
+    let directory = service_layout::daemon_directory().unwrap_or_default();
+    service_layout::guest_build_in(
+        &directory,
+        service_layout::Executable::DotForwarder,
+        "macos",
+    )
 }
 
 /// Wrap a root `script` for the guest account: `sudo -S` reads `password`
@@ -363,14 +360,9 @@ fn writable(path: &Path) -> bool {
     unsafe { libc::access(c_path.as_ptr(), libc::W_OK) == 0 }
 }
 
-/// The installer executable, staged beside the running daemon.
+/// The installer executable, installed beside the running daemon (IN-1).
 pub fn installer_path() -> String {
-    std::env::current_exe()
-        .ok()
-        .and_then(|exe| {
-            exe.parent()
-                .map(|directory| directory.join(guest_firewall::INSTALLER))
-        })
+    service_layout::beside_daemon(service_layout::Executable::GuestFirewall)
         .map(|path| path.display().to_string())
         .unwrap_or_else(|| guest_firewall::INSTALLER.to_string())
 }

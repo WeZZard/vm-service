@@ -15,6 +15,7 @@ path = "src/lib.rs"
 
 [dependencies]
 environment = { path = "../environment" }
+service-layout = { path = "../service-layout" }
 console = { path = "../console" }
 machine-service-core = { path = "../machine-service-core" }
 serde.workspace = true

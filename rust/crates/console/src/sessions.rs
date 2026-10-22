@@ -278,12 +278,9 @@ fn worker_path() -> PathBuf {
     if let Some(path) = std::env::var_os("VM_CONSOLE_WORKER") {
         return PathBuf::from(path);
     }
-    if let Ok(executable) = std::env::current_exe() {
-        if let Some(directory) = executable.parent() {
-            return directory.join("console-worker");
-        }
-    }
-    PathBuf::from("console-worker")
+    // The installer puts the worker beside the daemon (IN-1).
+    let worker = service_layout::Executable::ConsoleWorker;
+    service_layout::beside_daemon(worker).unwrap_or_else(|| PathBuf::from(worker.name()))
 }
 
 /// A simple set-once event with a bounded wait, mirroring `threading.Event`.

@@ -105,14 +105,13 @@ impl Harness {
         fs::copy(env!("CARGO_BIN_EXE_machine-service-install"), &installer).unwrap();
         fs::set_permissions(&installer, fs::Permissions::from_mode(0o755)).unwrap();
 
-        for name in [
-            "machine-service",
-            "console-worker",
-            "guest-console-agent",
-            "guest-console-agent-linux",
-            "machctl",
-        ] {
-            write_exec(&bin.join(name), "#!/bin/sh\nexit 0\n");
+        // Every executable of the installation layout, each with its own
+        // content so a copy can be told from its neighbours (IN-1).
+        for name in service_layout::required(true) {
+            if bin.join(&name).exists() {
+                continue;
+            }
+            write_exec(&bin.join(&name), &format!("#!/bin/sh\n# {name}\nexit 0\n"));
         }
         let viewer = bin.join("vncviewer");
         write_exec(&viewer, "#!/bin/sh\nexit 99\n");
@@ -161,12 +160,11 @@ impl Harness {
 
     /// Remove the virtual-machine helpers from the staging folder.
     pub fn remove_vm_helpers(&self) {
-        for name in [
-            "console-worker",
-            "guest-console-agent",
-            "guest-console-agent-linux",
-        ] {
-            fs::remove_file(self.bin.join(name)).unwrap();
+        let core = service_layout::required(false);
+        for name in service_layout::required(true) {
+            if !core.contains(&name) {
+                fs::remove_file(self.bin.join(name)).unwrap();
+            }
         }
     }
 
