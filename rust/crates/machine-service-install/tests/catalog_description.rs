@@ -116,6 +116,12 @@ fn ac37_tart_mac_is_tagged_vm_and_tart_without_durable() {
     assert!(stderr.contains("durable exposure: off"), "{stderr}");
     assert!(stderr.contains("pilot-base"), "{stderr}");
     assert!(!stderr.contains("loopback_only"), "{stderr}");
+    // AC-47, DC-80: the description states the instance ID that /health
+    // reports, the daemon's own derivation, whatever Consul names the node.
+    assert_eq!(
+        description["meta"],
+        json!({"instance": machine_service_core::durable::config::instance_id()})
+    );
 }
 
 /// AC-37: a Mac without Tart whose installed agent turns durable exposure

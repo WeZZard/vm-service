@@ -83,6 +83,10 @@ pub struct Merged {
     pub consul_asked: bool,
     /// Why Consul did not answer, when it did not.
     pub consul_error: Option<String>,
+    /// What the CLI assumed to name an instance, for standard error: one
+    /// line per registration that states no instance ID and was named by
+    /// its Consul node name instead (FD-2, DC-80).
+    pub notes: Vec<String>,
 }
 
 impl Merged {
@@ -227,7 +231,8 @@ fn authority_of(base: &str) -> &str {
 }
 
 /// This Mac's local host name, which is its instance ID (MM-2), for when
-/// neither the local instance nor Consul names it.
+/// the local instance does not name itself. Consul's node name never stands
+/// in for it: the node name need not be the Mac's name (DC-80).
 fn local_host_name() -> Option<String> {
     let output = std::process::Command::new("/usr/sbin/scutil")
         .args(["--get", "LocalHostName"])
@@ -239,43 +244,48 @@ fn local_host_name() -> Option<String> {
     (output.status.success() && !name.is_empty()).then_some(name)
 }
 
+/// Who a registration says it is: the instance ID it states in its
+/// metadata, and whether it stated one. A registration whose description
+/// predates the field states none, and is taken to be the instance its
+/// Consul node name names, the rule before DC-80, which holds only where a
+/// Mac's node name is its local host name.
+fn identity(registration: &Registration) -> (String, bool) {
+    match &registration.instance {
+        Some(id) => (id.clone(), true),
+        None => (registration.node.clone(), false),
+    }
+}
+
 /// Discover the instances without asking any but the local one for
 /// machines (FD-2).
 ///
 /// The local instance and a Consul registration are the same instance when
-/// their instance IDs and ports match (DC-61). The local instance's ID is
-/// what its `/health` says, else the Consul agent's node name, else this
-/// Mac's local host name.
+/// the ID the registration states and the local ID match, and so do their
+/// ports (DC-61, DC-80). The local ID is what its `/health` says, else this
+/// Mac's local host name. A registration that states no ID is matched by its
+/// node name instead, and a note says so.
 pub fn discover(settings: &Settings) -> Merged {
     let consul_settings = settings.consul.clone();
     let consul_timeout = settings.consul_timeout;
     let (probe, consul) = thread::scope(|scope| {
-        let consul = consul_settings.map(|base| {
-            scope.spawn(move || {
-                let registrations = consul::instances(&base, SERVICE, consul_timeout);
-                let node = match &registrations {
-                    Ok(_) => consul::node_name(&base, consul_timeout).ok(),
-                    Err(_) => None,
-                };
-                (registrations, node)
-            })
-        });
+        let consul = consul_settings
+            .map(|base| scope.spawn(move || consul::instances(&base, SERVICE, consul_timeout)));
         let probe = probe_local(settings);
         let consul = consul.map(|handle| {
             handle
                 .join()
-                .unwrap_or_else(|_| (Err("the Consul query panicked".to_string()), None))
+                .unwrap_or_else(|_| Err("the Consul query panicked".to_string()))
         });
         (probe, consul)
     });
 
     let consul_asked = consul.is_some();
-    let (registrations, node, consul_error) = match consul {
-        None => (Vec::new(), None, None),
-        Some((Ok(registrations), node)) => (registrations, node, None),
-        Some((Err(error), _)) => (Vec::new(), None, Some(error)),
+    let (registrations, consul_error) = match consul {
+        None => (Vec::new(), None),
+        Some(Ok(registrations)) => (registrations, None),
+        Some(Err(error)) => (Vec::new(), Some(error)),
     };
-    let local_id = probe.id.clone().or(node).or_else(local_host_name);
+    let local_id = probe.id.clone().or_else(local_host_name);
     let local_port = port_of(&settings.local_base);
 
     let mut local = Instance {
@@ -290,15 +300,24 @@ pub fn discover(settings: &Settings) -> Merged {
         body: probe.body,
     };
     let mut others: Vec<Instance> = Vec::new();
+    let mut notes = Vec::new();
     for registration in registrations {
+        let (id, stated) = identity(&registration);
+        if !stated {
+            notes.push(format!(
+                "the registration on Consul node {node} (port {port}) states no instance ID, so it is named {node} after its node, which need not be its Mac's name; place the description that `machine-service-install catalog-description` prints on that Mac (DC-80)",
+                node = registration.node,
+                port = registration.port
+            ));
+        }
         let same = local.consul.is_none()
-            && local_id.as_deref() == Some(registration.node.as_str())
+            && local_id.as_deref() == Some(id.as_str())
             && local_port.is_none_or(|port| port == registration.port);
         if same {
             local.consul = Some(registration.status);
             continue;
         }
-        others.push(remote(registration));
+        others.push(remote(registration, id));
     }
     others.sort_by(|a, b| {
         a.label
@@ -312,17 +331,19 @@ pub fn discover(settings: &Settings) -> Merged {
         instances,
         consul_asked,
         consul_error,
+        notes,
     }
 }
 
-/// An instance Consul lists on another Mac, or on this Mac at another port.
-fn remote(registration: Registration) -> Instance {
+/// An instance Consul lists on another Mac, or on this Mac at another port,
+/// named `id` (DC-80).
+fn remote(registration: Registration, id: String) -> Instance {
     let unaskable = registration
         .loopback_only
         .then(|| format!("bound to loopback on {}", registration.node));
     Instance {
-        label: registration.node.clone(),
-        id: Some(registration.node.clone()),
+        label: id.clone(),
+        id: Some(id),
         address: registration.base_url(),
         local: false,
         consul: Some(registration.status),
@@ -573,6 +594,14 @@ mod tests {
         })
     }
 
+    /// A registration whose description states its instance ID (FD-1,
+    /// DC-80), under a Consul node that may be named otherwise.
+    fn stated(node: &str, instance: &str, port: u16, status: &str) -> Value {
+        let mut row = registration(node, port, status, false);
+        row["Service"]["Meta"]["instance"] = json!(instance);
+        row
+    }
+
     fn settings(local: &str, consul: Option<&str>, timeout: Duration) -> Settings {
         Settings {
             local_base: local.to_string(),
@@ -627,21 +656,14 @@ mod tests {
             ("/health", 200, json!({"ok": true, "instance": "mac-a"})),
             ("/machines", 200, json!({"machines": {}})),
         ]);
-        let consul = fake(vec![
-            (
-                "/v1/health/service/machine-service",
-                200,
-                json!([
-                    registration("mac-b", remote_port, "passing", false),
-                    registration("mac-c", hung_port, "passing", false)
-                ]),
-            ),
-            (
-                "/v1/agent/self",
-                200,
-                json!({"Config": {"NodeName": "mac-a"}}),
-            ),
-        ]);
+        let consul = fake(vec![(
+            "/v1/health/service/machine-service",
+            200,
+            json!([
+                stated("mac-b", "mac-b", remote_port, "passing"),
+                stated("mac-c", "mac-c", hung_port, "passing")
+            ]),
+        )]);
         let started = Instant::now();
         let merged = gather(
             &settings(&local.base, Some(&consul.base), Duration::from_millis(400)),
@@ -670,32 +692,24 @@ mod tests {
     }
 
     /// FD-2, DC-61: the local instance is matched to its registration by
-    /// ID and port, and the Consul agent's node name stands in for an
-    /// instance that does not report its ID; another port is another
-    /// instance, and both are then named with their ports.
+    /// the ID the registration states and the port; another port is
+    /// another instance, and both are then named with their ports.
     #[test]
     fn local_identity_and_second_instances() {
         let local = fake(vec![
-            ("/health", 200, json!({"ok": true})),
+            ("/health", 200, json!({"ok": true, "instance": "mac-a"})),
             ("/machines", 200, json!({"machines": {}})),
         ]);
         let local_port = port_of(&local.base).unwrap();
         let other_port = refused_port();
-        let consul = fake(vec![
-            (
-                "/v1/health/service/machine-service",
-                200,
-                json!([
-                    registration("mac-a", local_port, "warning", false),
-                    registration("mac-a", other_port, "critical", false)
-                ]),
-            ),
-            (
-                "/v1/agent/self",
-                200,
-                json!({"Config": {"NodeName": "mac-a"}}),
-            ),
-        ]);
+        let consul = fake(vec![(
+            "/v1/health/service/machine-service",
+            200,
+            json!([
+                stated("mac-a", "mac-a", local_port, "warning"),
+                stated("mac-a", "mac-a", other_port, "critical")
+            ]),
+        )]);
         let merged = discover(&settings(
             &local.base,
             Some(&consul.base),
@@ -706,6 +720,136 @@ mod tests {
         assert_eq!(merged.instances[0].consul.as_deref(), Some("warning"));
         assert_eq!(merged.instances[0].label, format!("mac-a:{local_port}"));
         assert_eq!(merged.instances[1].label, format!("mac-a:{other_port}"));
+        assert!(merged.notes.is_empty(), "{:?}", merged.notes);
+    }
+
+    /// AC-47, DC-80: a Mac whose Consul node name differs from its own name
+    /// (192.168.50.3: node `mac-mini-m4-pro`, LocalHostName `Mac-mini`) is
+    /// one instance, named by its own name, because its registration states
+    /// the ID its `/health` reports.
+    #[test]
+    fn ac47_node_name_differing_from_the_machine_name_is_one_instance() {
+        let local = fake(vec![
+            ("/health", 200, json!({"ok": true, "instance": "Mac-mini"})),
+            ("/machines", 200, json!({"machines": {}})),
+        ]);
+        let local_port = port_of(&local.base).unwrap();
+        let consul = fake(vec![
+            (
+                "/v1/health/service/machine-service",
+                200,
+                json!([stated("mac-mini-m4-pro", "Mac-mini", local_port, "passing")]),
+            ),
+            (
+                "/v1/agent/self",
+                200,
+                json!({"Config": {"NodeName": "mac-mini-m4-pro"}}),
+            ),
+        ]);
+        let merged = discover(&settings(
+            &local.base,
+            Some(&consul.base),
+            Duration::from_secs(2),
+        ));
+        let labels: Vec<&str> = merged.instances.iter().map(|i| i.label.as_str()).collect();
+        assert_eq!(labels, ["Mac-mini"]);
+        assert!(merged.instances[0].local);
+        assert_eq!(merged.instances[0].consul.as_deref(), Some("passing"));
+        assert!(merged.notes.is_empty(), "{:?}", merged.notes);
+    }
+
+    /// AC-47, DC-80: another Mac is named by the ID its registration
+    /// states, never by its node, and `--instance` finds it by that name.
+    #[test]
+    fn ac47_another_mac_is_named_by_its_stated_id() {
+        let local = fake(vec![
+            ("/health", 200, json!({"instance": "mac-a"})),
+            ("/machines", 200, json!({"machines": {}})),
+        ]);
+        let consul = fake(vec![(
+            "/v1/health/service/machine-service",
+            200,
+            json!([stated("consul-node-b", "Mac-B", 6299, "passing")]),
+        )]);
+        let base = settings(&local.base, Some(&consul.base), Duration::from_secs(2));
+        let merged = discover(&base);
+        assert_eq!(merged.instances[1].label, "Mac-B");
+        assert_eq!(merged.instances[1].id.as_deref(), Some("Mac-B"));
+        let mut merged = discover(&base);
+        select(&mut merged, "Mac-B").unwrap();
+        assert_eq!(merged.instances[0].address, "http://127.0.0.1:6299");
+    }
+
+    /// AC-47, DC-80: without a `/health` ID the local ID is this Mac's local
+    /// host name, never the Consul agent's node name, so a registration
+    /// that states that name is still the local instance.
+    #[test]
+    fn ac47_local_id_falls_back_to_the_local_host_name_not_the_node() {
+        let Some(host_name) = local_host_name() else {
+            return;
+        };
+        let local = fake(vec![
+            ("/health", 200, json!({"ok": true})),
+            ("/machines", 200, json!({"machines": {}})),
+        ]);
+        let local_port = port_of(&local.base).unwrap();
+        let consul = fake(vec![
+            (
+                "/v1/health/service/machine-service",
+                200,
+                json!([stated("some-node", &host_name, local_port, "passing")]),
+            ),
+            (
+                "/v1/agent/self",
+                200,
+                json!({"Config": {"NodeName": "some-node"}}),
+            ),
+        ]);
+        let merged = discover(&settings(
+            &local.base,
+            Some(&consul.base),
+            Duration::from_secs(2),
+        ));
+        assert_eq!(merged.instances.len(), 1);
+        assert_eq!(merged.instances[0].label, host_name);
+        assert_eq!(merged.instances[0].consul.as_deref(), Some("passing"));
+    }
+
+    /// AC-47, DC-80: a registration that states no ID (a description older
+    /// than the field) falls back to the old rule, its node name, and a
+    /// note says so for each one; where the node name is the Mac's name it
+    /// is still one instance.
+    #[test]
+    fn ac47_registration_without_metadata_falls_back_to_the_node_name() {
+        let local = fake(vec![
+            ("/health", 200, json!({"instance": "mac-a"})),
+            ("/machines", 200, json!({"machines": {}})),
+        ]);
+        let local_port = port_of(&local.base).unwrap();
+        let consul = fake(vec![(
+            "/v1/health/service/machine-service",
+            200,
+            json!([
+                registration("mac-a", local_port, "passing", false),
+                registration("mac-b", 6299, "passing", false)
+            ]),
+        )]);
+        let merged = discover(&settings(
+            &local.base,
+            Some(&consul.base),
+            Duration::from_secs(2),
+        ));
+        let labels: Vec<&str> = merged.instances.iter().map(|i| i.label.as_str()).collect();
+        assert_eq!(labels, ["mac-a", "mac-b"]);
+        assert_eq!(merged.instances[0].consul.as_deref(), Some("passing"));
+        assert_eq!(merged.notes.len(), 2, "{:?}", merged.notes);
+        assert!(
+            merged.notes[0].contains("Consul node mac-a")
+                && merged.notes[0].contains("states no instance ID")
+                && merged.notes[0].contains("DC-80"),
+            "{:?}",
+            merged.notes
+        );
     }
 
     /// FD-1: a registration published loopback-only on another Mac is

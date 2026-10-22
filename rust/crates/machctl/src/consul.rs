@@ -30,11 +30,19 @@ pub fn base_address(variable: Option<&str>) -> String {
     with_scheme.trim_end_matches('/').to_string()
 }
 
+/// The service metadata key under which an instance states its ID (FD-1,
+/// DC-80).
+pub const INSTANCE_META: &str = "instance";
+
 /// One instance as Consul lists it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Registration {
-    /// The Consul node, which is the instance ID (MM-2).
+    /// The Consul node it is registered under. This is where it is, not who
+    /// it is: a Mac's node name need not be its instance ID (MM-2, DC-80).
     pub node: String,
+    /// The instance ID it states in its service metadata, `instance` (FD-1).
+    /// `None` for a registration whose description predates the field.
+    pub instance: Option<String>,
     /// The Consul service ID.
     pub service_id: String,
     /// The address to reach it at: the service's own, else the node's.
@@ -77,21 +85,6 @@ pub fn instances(
     parse_health(&body)
 }
 
-/// The agent's own node name, from `GET /v1/agent/self`: the instance ID of
-/// the Mac the CLI runs on (MM-2).
-pub fn node_name(base: &str, timeout: Duration) -> Result<String, String> {
-    let (status, body) = http::get_json(&format!("{base}/v1/agent/self"), timeout, &[])?;
-    if status != 200 {
-        return Err(format!("HTTP {status}"));
-    }
-    body.get("Config")
-        .and_then(|config| config.get("NodeName"))
-        .and_then(Value::as_str)
-        .filter(|name| !name.is_empty())
-        .map(str::to_string)
-        .ok_or_else(|| "the agent did not name its node".to_string())
-}
-
 /// Parse a `/v1/health/service` answer.
 pub fn parse_health(body: &Value) -> Result<Vec<Registration>, String> {
     let rows = body
@@ -127,11 +120,17 @@ pub fn parse_health(body: &Value) -> Result<Vec<Registration>, String> {
                     .collect()
             })
             .unwrap_or_default();
-        let loopback_only = service
-            .and_then(|service| service.get("Meta"))
-            .and_then(|meta| meta.get("loopback_only"))
-            .and_then(Value::as_str)
-            == Some("true");
+        let meta = |key: &str| {
+            service
+                .and_then(|service| service.get("Meta"))
+                .and_then(|meta| meta.get(key))
+                .and_then(Value::as_str)
+        };
+        let loopback_only = meta("loopback_only") == Some("true");
+        let instance = meta(INSTANCE_META)
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_string);
         // Node checks (no service ID) count too: a Mac that left the
         // cluster makes every service on it unusable.
         let status = worst_status(
@@ -147,6 +146,7 @@ pub fn parse_health(body: &Value) -> Result<Vec<Registration>, String> {
         );
         out.push(Registration {
             node: node_name,
+            instance,
             service_id,
             host,
             port,
@@ -206,7 +206,7 @@ mod tests {
                     "ID": "catalog-machine-service", "Service": "machine-service",
                     "Tags": ["machines", "agents", "vm", "tart"],
                     "Address": "192.0.2.10", "Port": 6240,
-                    "Meta": {"loopback_only": "false"}
+                    "Meta": {"loopback_only": "false", "instance": "Mac-A"}
                 },
                 "Checks": [
                     {"ServiceID": "", "Status": "passing"},
@@ -225,6 +225,10 @@ mod tests {
         let rows = parse_health(&body).unwrap();
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].node, "mac-a");
+        // DC-80: the stated instance ID is read as it is, and a
+        // registration without one states none.
+        assert_eq!(rows[0].instance.as_deref(), Some("Mac-A"));
+        assert_eq!(rows[1].instance, None);
         assert_eq!(rows[0].status, "critical");
         assert_eq!(rows[0].base_url(), "http://192.0.2.10:6240");
         assert!(!rows[0].loopback_only);
@@ -240,6 +244,7 @@ mod tests {
     fn ipv6_hosts_are_bracketed() {
         let registration = Registration {
             node: "n".into(),
+            instance: None,
             service_id: "s".into(),
             host: "2001:db8::1".into(),
             port: 6240,
@@ -259,8 +264,6 @@ mod tests {
     #[ignore = "reads the real local Consul agent at 127.0.0.1:8500 (TL-6, read-only)"]
     fn live_local_agent_answers_and_parses() {
         let base = base_address(std::env::var("CONSUL_HTTP_ADDR").ok().as_deref());
-        let node = node_name(&base, Duration::from_secs(5)).expect("agent self");
-        assert!(!node.is_empty());
         for service in ["machine-service", "vm-service"] {
             let rows = instances(&base, service, Duration::from_secs(5)).expect("health answer");
             for row in rows {

@@ -408,6 +408,7 @@ mod tests {
             instances,
             consul_asked: true,
             consul_error: None,
+            notes: Vec::new(),
         }
     }
 
