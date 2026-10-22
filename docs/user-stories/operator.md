@@ -114,3 +114,10 @@ The human operator (WeZZard) who installs the service, keeps it healthy, trouble
 - See [MM-1](../arch/machines.md#mm-1-two-kinds-of-machine).
 
 **Tests:** AC-43 in [operator.acceptance](../acceptance/operator.acceptance).
+
+## US34 — An installation holds every executable the service needs
+
+- As the operator, I want one installation step to put every executable the daemon looks up beside it, and to refuse when the build lacks one, so that no operation fails later on a helper that was never installed (DC-79).
+- See [IN](../arch/installation.md).
+
+**Tests:** AC-46 in [operator.acceptance](../acceptance/operator.acceptance).

@@ -67,3 +67,4 @@ Each scenario names the [test layer](../arch/test-layers.md) that runs it. Stori
 13. AC-41: A broken line keeps the last good list and is reported loudly (US32, TL-1, TL-2).
 14. AC-42: No partial catalog is ever published (US32, TL-1).
 15. AC-43: Durable exposure is off unless the operator turns it on (US33, TL-2, TL-6).
+16. AC-46: An installation holds exactly the executables the daemon resolves (US34, TL-1).
