@@ -20,7 +20,7 @@
 - **Second instance:** a vm-service built from a worktree and run on another port with its own state directory, so live tests leave the installed service alone.
 - **machine-service:** the new name of vm-service (DC-19). It is also the name of its daemon executable (DC-36).
 - **machctl:** the machine-service CLI, which replaces `vmctl` (DC-35).
-- **Instance:** one running machine-service on one Mac. Its instance ID is the Mac's local host name, which is also its Consul node name.
+- **Instance:** one running machine-service on one Mac. Its instance ID is the Mac's local host name, which need not be its Consul node name; the instance states the ID in its Consul registration (DC-80).
 - **Machine:** anything an instance leases. A machine is a durable machine or a virtual machine.
 - **Durable machine:** the Mac that an instance runs on, leased as an exclusive session. It is called durable because it outlives every lease. It is never called "bare metal" or a "physical machine" (DC-22).
 - **Durable exposure:** an instance's local setting that decides whether it offers its Mac as a durable machine. It is off unless the operator turns it on (DC-39).

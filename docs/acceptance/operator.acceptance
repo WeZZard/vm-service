@@ -151,3 +151,14 @@ Feature: Federation, rename and installation
     When the operator installs with durable exposure on
     Then DIR holds machine-service, machctl and machine-service-install only
 
+  @AC-47 @TL-2 @TL-6
+  Scenario: A Mac whose Consul node name is not its own name is listed once, by its own name
+    Given a Mac whose LocalHostName is "Mac-mini" and whose Consul node is "mac-mini-m4-pro"
+    And the description printed by "machine-service-install catalog-description" is placed there
+    Then Consul lists "machine-service" on "mac-mini-m4-pro" with the metadata instance "Mac-mini"
+    When the operator runs "machctl list"
+    Then the Mac's instance appears once, as "Mac-mini", with its Consul health status
+    Given a registration that states no instance
+    When the operator runs "machctl list"
+    Then that registration is named by its Consul node name
+    And standard error says that it states no instance ID and names the command that fixes it
