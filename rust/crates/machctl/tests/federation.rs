@@ -64,7 +64,16 @@ fn closed_port() -> u16 {
     port
 }
 
+/// A registration that states its instance ID, `node`, as every current
+/// description does (FD-1, DC-80).
 fn registration(node: &str, port: u16, status: &str) -> Value {
+    let mut row = unstated(node, port, status);
+    row["Service"]["Meta"]["instance"] = json!(node);
+    row
+}
+
+/// A registration whose description predates the `instance` metadata.
+fn unstated(node: &str, port: u16, status: &str) -> Value {
     json!({
         "Node": {"Node": node, "Address": "127.0.0.1"},
         "Service": {"ID": "catalog-machine-service", "Service": "machine-service",
@@ -126,17 +135,14 @@ impl Intranet {
                 json!({"name": "shared", "state": "running", "where": "remote"}),
             ),
         ]);
-        let consul = Fake::new(vec![
-            (
-                "/v1/health/service/machine-service",
-                json!([
-                    registration("mac-c", closed_port(), "critical"),
-                    registration("mac-a", local.port, "passing"),
-                    registration("mac-b", remote.port, "passing")
-                ]),
-            ),
-            ("/v1/agent/self", json!({"Config": {"NodeName": "mac-a"}})),
-        ]);
+        let consul = Fake::new(vec![(
+            "/v1/health/service/machine-service",
+            json!([
+                registration("mac-c", closed_port(), "critical"),
+                registration("mac-a", local.port, "passing"),
+                registration("mac-b", remote.port, "passing")
+            ]),
+        )]);
         Intranet {
             local,
             remote,
@@ -150,16 +156,40 @@ impl Intranet {
     }
 
     fn run_with_consul(&self, args: &[&str], consul: &str) -> Output {
-        Command::new(MACHCTL)
-            .args(args)
-            .env_clear()
-            .env("HOME", self.home.path())
-            .env("PATH", "/usr/bin:/bin")
-            .env("MACHINE_SERVICE_PORT", self.local.port.to_string())
-            .env("CONSUL_HTTP_ADDR", consul)
-            .output()
-            .unwrap()
+        run_machctl(args, self.home.path(), self.local.port, consul)
     }
+}
+
+fn run_machctl(args: &[&str], home: &std::path::Path, local_port: u16, consul: &str) -> Output {
+    Command::new(MACHCTL)
+        .args(args)
+        .env_clear()
+        .env("HOME", home)
+        .env("PATH", "/usr/bin:/bin")
+        .env("MACHINE_SERVICE_PORT", local_port.to_string())
+        .env("CONSUL_HTTP_ADDR", consul)
+        .output()
+        .unwrap()
+}
+
+/// The local instance named `instance` by its `/health`, offering one
+/// image, and a Consul agent listing `rows` built for the instance's port.
+fn this_mac(instance: &str, rows: impl Fn(u16) -> Vec<Value>) -> (Fake, Fake) {
+    let local = Fake::new(vec![
+        (
+            "/health",
+            json!({"ok": true, "service": "machine-service", "instance": instance}),
+        ),
+        (
+            "/machines",
+            json!({"machines": {}, "offers": [{"name": "macos26", "kind": "virtual"}]}),
+        ),
+    ]);
+    let consul = Fake::new(vec![(
+        "/v1/health/service/machine-service",
+        Value::Array(rows(local.port)),
+    )]);
+    (local, consul)
 }
 
 fn stdout(output: &Output) -> String {
@@ -383,4 +413,79 @@ fn cl3_lease_commands_go_to_the_owner() {
         .unwrap()
         .iter()
         .any(|seen| seen.starts_with("/machines/pilot-remote-3c4d/files?path=/tmp/b")));
+}
+
+/// AC-47, DC-80: 192.168.50.3's Consul node is `mac-mini-m4-pro` and its
+/// own name `Mac-mini`. Its registration states `Mac-mini`, so the list
+/// shows it once, under its own name, with its Consul health, and says
+/// nothing about a fallback.
+#[test]
+fn ac47_a_mac_whose_node_name_differs_is_listed_once_by_its_own_name() {
+    let (local, consul) = this_mac("Mac-mini", |port| {
+        let mut row = unstated("mac-mini-m4-pro", port, "passing");
+        row["Service"]["Meta"]["instance"] = json!("Mac-mini");
+        vec![row]
+    });
+    let home = tempfile::tempdir().unwrap();
+
+    let output = run_machctl(&["list"], home.path(), local.port, &consul.base());
+    let table = stdout(&output);
+    assert_eq!(output.status.code(), Some(0), "{table}{}", stderr(&output));
+    let rows: Vec<&str> = table.lines().skip(1).collect();
+    assert_eq!(rows.len(), 1, "{table}");
+    assert!(
+        rows[0].starts_with("Mac-mini ") && rows[0].contains("macos26"),
+        "{table}"
+    );
+    assert!(!table.contains("mac-mini-m4-pro"), "{table}");
+    assert!(!stderr(&output).contains("note:"), "{}", stderr(&output));
+
+    let output = run_machctl(&["list", "--json"], home.path(), local.port, &consul.base());
+    let list: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let list = list.as_array().unwrap();
+    assert_eq!(list.len(), 1, "{list:?}");
+    assert_eq!(list[0]["instance"], "Mac-mini");
+    assert_eq!(list[0]["local"], true);
+    assert_eq!(list[0]["consul"], "passing");
+}
+
+/// AC-47, DC-80: a registration that states no instance ID falls back to
+/// its node name, and the CLI says so on standard error. Where the node
+/// name is the Mac's name it is still listed once; where it is not, the
+/// fallback cannot tell, and the note is what explains the second row.
+#[test]
+fn ac47_a_registration_without_metadata_falls_back_to_the_node_name_and_says_so() {
+    let home = tempfile::tempdir().unwrap();
+
+    let (local, consul) = this_mac("mac-a", |port| vec![unstated("mac-a", port, "passing")]);
+    let output = run_machctl(&["list", "--json"], home.path(), local.port, &consul.base());
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let list: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let names: Vec<&str> = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|instance| instance["instance"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["mac-a"]);
+    assert_eq!(list[0]["consul"], "passing");
+    let errors = stderr(&output);
+    assert!(
+        errors.contains("machctl: note: the registration on Consul node mac-a")
+            && errors.contains("states no instance ID")
+            && errors.contains("catalog-description"),
+        "{errors}"
+    );
+
+    let (local, consul) = this_mac("Mac-mini", |port| {
+        vec![unstated("mac-mini-m4-pro", port, "passing")]
+    });
+    let output = run_machctl(&["list", "--json"], home.path(), local.port, &consul.base());
+    let list: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(list.as_array().unwrap().len(), 2, "{list:?}");
+    assert!(
+        stderr(&output).contains("Consul node mac-mini-m4-pro"),
+        "{}",
+        stderr(&output)
+    );
 }

@@ -280,8 +280,16 @@ machine-service-install catalog-description > \
 - The registrar keeps service `machine-service` in Consul with the file's tags,
   this Mac's LAN address and port 6240 (`loopback_only: false` when the
   instance binds `0.0.0.0`), and an HTTP check on `GET /health` every 30 s.
+- The file also carries `"meta": {"instance": "<LocalHostName>"}`, which the
+  registrar publishes as the registration's service metadata. The Consul node
+  name comes from the Consul agent's configuration and need not be the Mac's
+  name (192.168.50.3 is node `mac-mini-m4-pro` and `Mac-mini`), so this is how
+  a client knows which instance a registration is. It needs a registrar that
+  publishes a description's `meta`.
 - `machctl list` reads the registrations from the local agent
-  (`GET /v1/health/service/machine-service`); see [CLI](#cli).
+  (`GET /v1/health/service/machine-service`) and matches each to an instance
+  by its `instance` metadata and port. A registration without it is named by
+  its node name, and `machctl` says so on stderr; see [CLI](#cli).
 
 The API itself has no authentication — LAN exposure assumes the household
 trust model (same as the LLM gateway). Keep the loopback-only bind where that

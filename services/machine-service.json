@@ -20,5 +20,8 @@
     "http_path": "/health",
     "interval": "30s"
   },
-  "port": 6240
+  "port": 6240,
+  "meta": {
+    "instance": "Mac-mini"
+  }
 }

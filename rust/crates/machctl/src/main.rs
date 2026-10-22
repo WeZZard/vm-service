@@ -707,6 +707,9 @@ fn main() {
                     "machctl: warning: Consul at {consul_address} did not answer ({error}); listing only the local instance"
                 );
             }
+            for note in &merged.notes {
+                eprintln!("machctl: note: {note}");
+            }
             let filters = listing::Filters { kind, require };
             if json {
                 println!("{}", pretty(&listing::to_json(&merged, &filters)));
@@ -1038,6 +1041,9 @@ fn acquire_by_capability(
         eprintln!(
             "machctl: warning: Consul at {consul_address} did not answer ({error}); choosing among the local instance only"
         );
+    }
+    for note in &merged.notes {
+        eprintln!("machctl: note: {note}");
     }
     let listing: Vec<(String, Vec<Value>)> = merged
         .instances
