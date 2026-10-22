@@ -28,14 +28,17 @@ flowchart LR
   - The capability check reads the installed LaunchAgent's environment: Tart is found as the installer finds it, the image catalog is built with the daemon's own strict builder ([IC-4](image-catalog.md)), and at least one line's base VM must be listed by `tart list` in the selected store.
   - The command explains each tag on standard error and warns when the instance binds loopback. `services/machine-service.json` in this repository is the command's output for a Mac with Tart and images and exposure off.
 - The instance must bind all interfaces, `MACHINE_SERVICE_HOST=0.0.0.0`, to be reachable from the other Macs. The registrar then publishes `loopback_only: false`. An instance bound to loopback is registered, but the CLI on another Mac reports it as not reachable.
+- The description also carries `meta`, `{"instance": "<instance ID>"}`, which the registrar publishes in the registration's service metadata. It is the only way a client can tell which instance a registration is, because the Consul node it sits under is named by Consul's configuration, not by the Mac ([MM-2](machines.md#mm-2-identity), DC-80). `catalog-description` writes the ID with the daemon's own derivation, so the published ID and `/health` agree. The registrar's own metadata keys win over the description's (DC-81).
 - `GET /health` answers `{"ok": true, "service": "machine-service", "instance": "<instance ID>", "kinds": [...]}`. `kinds` holds `"durable"` when exposure is on and `"virtual"` when the instance can create virtual machines.
 
 ## FD-2: Discovery
 
 - The CLI always asks the local instance first, at the configured address, which defaults to `http://127.0.0.1:6240`. This works with no Consul agent.
 - The CLI then asks the local Consul agent for every registered instance, healthy or not, with `GET /v1/health/service/machine-service`. The agent's address is `CONSUL_HTTP_ADDR`, Consul's standard variable, and defaults to `http://127.0.0.1:8500`.
-- The local instance and its Consul registration are the same instance when their instance IDs match. The CLI lists it once. The ports must match too, so that a second instance on the same Mac stays a separate instance, and the CLI then names both `<instance ID>:<port>` (DC-61).
-- The local instance's ID is the `instance` of its `/health`. Before an instance reports it, the CLI uses the local Consul agent's node name from `GET /v1/agent/self`, and without Consul the Mac's local host name (DC-61).
+- A registration's instance ID is the `instance` its service metadata states (FD-1), and the CLI names the instance by it, never by the Consul node (DC-80).
+- A registration that states no `instance`, because its description predates the field, falls back to the rule before DC-80: its Consul node name stands for its instance ID. The CLI says so on standard error for each such registration, naming the node and the fix, because the fallback is wrong wherever the node name is not the Mac's name, and the instance is then listed twice (DC-80).
+- The local instance and its Consul registration are the same instance when the registration's instance ID and the local ID match. The CLI lists it once. The ports must match too, so that a second instance on the same Mac stays a separate instance, and the CLI then names both `<instance ID>:<port>` (DC-61).
+- The local instance's ID is the `instance` of its `/health`. Before an instance reports it, the CLI uses the Mac's local host name. The Consul agent's node name never stands for it (DC-80).
 - `--local` limits the CLI to the local instance. `--instance <ID or address>` limits it to one instance.
 
 ## FD-3: Aggregation

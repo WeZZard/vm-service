@@ -36,7 +36,7 @@ Consolidated, test-linked user stories for the lease-based VM service. Each stor
 | US20 | Agent | A client on a distant network survives link breaks; no operation runs twice | AC-6 to AC-11; [remote session](../arch/remote-session.md) |
 | US21 | Operator | Choose the guest link from one conformance suite run on real VMs | AC-15 to AC-18; [test layers](../arch/test-layers.md) |
 | US22 | Orchestrator | Release and destroy close guest sessions; a restart is reported uncertain | AC-12 to AC-14 |
-| US23 | Operator | See every machine on the intranet in one list | AC-34, AC-37; [federation](../arch/federation.md) |
+| US23 | Operator | See every machine on the intranet in one list | AC-34, AC-37, AC-47; [federation](../arch/federation.md) |
 | US24 | Agent | Acquire a durable machine by capability | AC-20 to AC-22, AC-29; [machine model](../arch/machines.md) |
 | US25 | Agent | Work in a durable-machine session as `wezzard` | AC-23; [durable machine leases](../arch/durable-machine.md) |
 | US26 | Agent | Claude Code and Codex reach the gateway with the machine's keys | AC-24 to AC-27, AC-44; [agent keys](../arch/agent-keys.md) |
