@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
   "crates/lease-keys",
+  "crates/service-layout",
   "crates/byte-transfer",
   "crates/environment",
   "crates/acquisition-options",

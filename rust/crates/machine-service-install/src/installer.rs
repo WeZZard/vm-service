@@ -32,29 +32,12 @@ pub const LABEL: &str = "com.wezzard.machine-service";
 const DEFAULT_PATH: &str =
     "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
 
-/// Sibling executables every installation needs: the daemon itself and the
-/// CLI the installer links into `~/.local/bin`.
-const CORE_HELPERS: [&str; 2] = ["machine-service", "machctl"];
-
-/// Sibling executables only an instance that creates virtual machines needs.
-/// The Python installer parsed the matching Python sources; the native
-/// service ships binaries.
-///
-/// `guest-console-agent-linux` is required in addition to the host-native
-/// `guest-console-agent`, because the agent is delivered into the guest as
-/// machine code: a Linux guest cannot execute the macOS build. Without the
-/// kind-qualified artifact, `--vnc` on a Linux image fails at the probe and
-/// rolls the lease back. `console::guest::agent_path_for` prefers the
-/// kind-qualified name and falls back to the host-native one, which still
-/// serves guests whose OS matches the host.
-///
-/// A Mac without Tart creates no virtual machine, so its installation does
-/// not require them (MG-4 step 5, AC-38, DC-65).
-const VM_HELPERS: [&str; 3] = [
-    "console-worker",
-    "guest-console-agent",
-    "guest-console-agent-linux",
-];
+// The executables an installation needs come from `service_layout`, the
+// list the daemon resolves its helpers from, so the installer can neither
+// miss one the daemon looks up nor require one it never uses (IN-1, DC-79).
+// The Python installer parsed the matching Python sources; the native
+// service ships binaries. A Mac without Tart creates no virtual machine, so
+// its installation needs only the core (MG-4 step 5, AC-38, DC-65).
 
 /// Caller variables that select a service location and must survive into the
 /// installed environment.
@@ -134,6 +117,12 @@ pub struct Cli {
     /// the installed one.
     #[arg(long, value_enum, value_name = "on|off")]
     pub expose_durable: Option<Exposure>,
+    /// Install into this folder (IN-2): copy every executable the
+    /// installation needs from beside the installer into it, and point the
+    /// LaunchAgent and the `machctl` link there. Without it, the folder
+    /// beside the installer is the install folder.
+    #[arg(long, value_name = "DIR")]
+    pub prefix: Option<PathBuf>,
 }
 
 /// The durable-exposure setting (DC-39).
@@ -200,6 +189,13 @@ pub fn run(cli: &Cli, source: &Path, home: &Path) -> Result<(), InstallError> {
     }
     let readonly = cli.check || cli.dry_run;
     let plist = migration::agent_plist(home, LABEL);
+    let deployed = match &cli.prefix {
+        Some(_) if action != Action::Install => {
+            return Err(InstallError::refused("--prefix applies to install only"));
+        }
+        Some(prefix) => std::path::absolute(prefix)?,
+        None => source.to_path_buf(),
+    };
 
     // A caller still exporting an old name would have it silently dropped;
     // it fails here with the fix instead (DC-37).
@@ -323,7 +319,7 @@ pub fn run(cli: &Cli, source: &Path, home: &Path) -> Result<(), InstallError> {
             }
         }
         Some(validate_install(
-            cli, &base, &previous, &checked, &env, home, source,
+            cli, &base, &previous, &checked, &env, source, &deployed,
         )?)
     } else {
         None
@@ -411,7 +407,10 @@ pub fn run(cli: &Cli, source: &Path, home: &Path) -> Result<(), InstallError> {
     }
     migration::remove_legacy_link(home, &old_dirs)?;
 
-    let payload = payload.expect("install payload is computed for the install action");
+    let (payload, executables) =
+        payload.expect("install payload is computed for the install action");
+    // The old daemon is stopped, so no executable is replaced under it.
+    install_executables(source, &deployed, &executables)?;
     let parent = plist
         .parent()
         .ok_or_else(|| InstallError::refused("invalid LaunchAgent path"))?;
@@ -426,7 +425,7 @@ pub fn run(cli: &Cli, source: &Path, home: &Path) -> Result<(), InstallError> {
     temporary
         .persist(&plist)
         .map_err(|error| InstallError::Io(error.error))?;
-    migration::install_link(home, source)?;
+    migration::install_link(home, &deployed)?;
     // The old job and daemon were both confirmed stopped before the replace.
     launchctl(&["load"], &plist)?;
 
@@ -563,10 +562,11 @@ fn validate_install(
     previous: &BTreeMap<String, String>,
     env: &BTreeMap<String, String>,
     written: &BTreeMap<String, String>,
-    _home: &Path,
     source: &Path,
-) -> Result<Vec<u8>, InstallError> {
-    let service = source.join("machine-service");
+    deployed: &Path,
+) -> Result<(Vec<u8>, Vec<String>), InstallError> {
+    let service_name = service_layout::Executable::Service.name();
+    let service = source.join(service_name);
     if !service.is_file() || !is_executable(&service) {
         return Err(InstallError::refused(format!(
             "missing executable service: {}",
@@ -602,16 +602,10 @@ so it cannot create virtual machines, and durable exposure is off ({EXPOSE_KEY})
 install stock Tart, or install with --expose-durable on"
         )));
     }
-    let helpers: Vec<&str> = if tart.is_some() {
-        CORE_HELPERS
-            .iter()
-            .chain(VM_HELPERS.iter())
-            .copied()
-            .collect()
-    } else {
-        CORE_HELPERS.to_vec()
-    };
-    for name in helpers {
+    // Every executable is checked before anything is written, so an
+    // installation is complete or does not happen (IN-2).
+    let helpers = service_layout::required(tart.is_some());
+    for name in &helpers {
         let helper = source.join(name);
         if !helper.is_file() {
             return Err(InstallError::refused(format!(
@@ -684,7 +678,7 @@ install stock Tart, or install with --expose-durable on"
     data.insert("Label".to_string(), Value::String(LABEL.to_string()));
     data.insert(
         "ProgramArguments".to_string(),
-        json!([service.to_string_lossy().into_owned()]),
+        json!([deployed.join(service_name).to_string_lossy().into_owned()]),
     );
     data.insert(
         "EnvironmentVariables".to_string(),
@@ -703,7 +697,41 @@ install stock Tart, or install with --expose-durable on"
              and viewing remain unverified."
         );
     }
-    Ok(plist::dumps(&Value::Object(data)))
+    Ok((plist::dumps(&Value::Object(data)), helpers))
+}
+
+/// Copy `executables` from `source` into `deployed`, each through a
+/// temporary sibling and a rename with mode `0755`, so a reader never sees a
+/// partial executable (IN-2). Nothing is copied when the two are one folder.
+fn install_executables(
+    source: &Path,
+    deployed: &Path,
+    executables: &[String],
+) -> Result<(), InstallError> {
+    std::fs::create_dir_all(deployed)?;
+    if std::fs::canonicalize(source)? == std::fs::canonicalize(deployed)? {
+        return Ok(());
+    }
+    for name in executables {
+        let mut input = File::open(source.join(name))?;
+        let mut temporary = tempfile::Builder::new()
+            .prefix(&format!(".{name}."))
+            .tempfile_in(deployed)?;
+        std::io::copy(&mut input, temporary.as_file_mut())?;
+        temporary
+            .as_file()
+            .set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o755))?;
+        temporary.as_file().sync_all()?;
+        temporary
+            .persist(deployed.join(name))
+            .map_err(|error| InstallError::Io(error.error))?;
+    }
+    println!(
+        "installed {} executables into {}",
+        executables.len(),
+        deployed.display()
+    );
+    Ok(())
 }
 
 fn stop_existing(

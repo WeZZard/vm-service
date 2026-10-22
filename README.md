@@ -78,49 +78,44 @@ Without a profile, the legacy defaults below remain unchanged.
 ## Build and install
 
 The daemon is a native executable, so it is launched directly instead of
-through an interpreter. The installer installs the executables that sit beside
-it, which makes the staging directory the deployed location.
+through an interpreter. It finds its helpers beside its own executable, and
+the installer installs exactly those executables: both read one list, the
+`service-layout` crate ([IN](docs/arch/installation.md), DC-79).
 
 ```zsh
-# 1. Build the daemon, the client, and one guest agent per guest OS.
+# 1. Build every executable of the installation, each under its installed
+#    name, into target/machine-service/ (the Linux guest agents need
+#    `rustup target add aarch64-unknown-linux-musl` and aarch64-linux-musl-gcc).
 cd ~/Artifacts/Repositories/com.github/WeZZard/vm-service/rust
-cargo build --release
-cargo build --release -p guest-console-agent
-CC_aarch64_unknown_linux_musl=aarch64-linux-musl-gcc \
-CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-musl-gcc \
-  cargo build --release -p guest-console-agent --target aarch64-unknown-linux-musl
+scripts/build-release.sh
 
-# 2. Stage every executable the installer requires as a sibling.
-install -d ~/.local/libexec/machine-service
-install -m 0755 target/release/machine-service         ~/.local/libexec/machine-service/machine-service
-install -m 0755 target/release/machctl                 ~/.local/libexec/machine-service/machctl
-install -m 0755 target/release/console-worker          ~/.local/libexec/machine-service/console-worker
-install -m 0755 target/release/machine-service-install ~/.local/libexec/machine-service/machine-service-install
-install -m 0755 target/release/vm-service-guest-firewall ~/.local/libexec/machine-service/vm-service-guest-firewall
-install -m 0755 target/release/vm-service-dot-forwarder ~/.local/libexec/machine-service/vm-service-dot-forwarder
-install -m 0755 target/release/guest-console-agent ~/.local/libexec/machine-service/guest-console-agent
-install -m 0755 target/aarch64-unknown-linux-musl/release/guest-console-agent \
-  ~/.local/libexec/machine-service/guest-console-agent-linux
-
-# 3. Validate, then install. Loopback only is the fresh-install default.
-~/.local/libexec/machine-service/machine-service-install --check
-~/.local/libexec/machine-service/machine-service-install install
+# 2. Validate, then install into the install folder. Loopback only is the
+#    fresh-install default.
+target/machine-service/machine-service-install install --check --prefix ~/.local/libexec/machine-service
+target/machine-service/machine-service-install install --prefix ~/.local/libexec/machine-service
 
 # LAN-reachable (binds 0.0.0.0; required for Consul-discovered consumers on
 # other hosts). A repeated install preserves the bind address it finds.
-MACHINE_SERVICE_HOST=0.0.0.0 ~/.local/libexec/machine-service/machine-service-install install
+MACHINE_SERVICE_HOST=0.0.0.0 target/machine-service/machine-service-install install --prefix ~/.local/libexec/machine-service
 
 # Expose this Mac as a durable machine (off by default; kept by later installs).
-~/.local/libexec/machine-service/machine-service-install install --expose-durable on
+target/machine-service/machine-service-install install --prefix ~/.local/libexec/machine-service --expose-durable on
 
 launchctl list | grep machine-service     # health check
 curl -s localhost:6240/health
 ```
 
-- The installer requires `machine-service`, `machctl`, `console-worker`,
-  `guest-console-agent`, and `guest-console-agent-linux` beside itself.
-  The daemon resolves its helpers relative to its own executable, and a Linux
-  guest cannot execute the macOS agent build.
+- With Tart, the installation is `machine-service`, `machctl`,
+  `machine-service-install`, `console-worker`, `guest-console-agent` and
+  `guest-console-agent-linux`, `guest-session-agent` and
+  `guest-session-agent-linux`, `vm-service-dot-forwarder` and
+  `vm-service-guest-firewall`. A guest agent runs inside the guest as machine
+  code, so a Linux guest needs the `-linux` build.
+- `install --prefix DIR` checks that every one is beside the installer and
+  refuses by name, before anything changes, when one is missing. After the old
+  job has stopped it copies exactly those files into `DIR`, and the LaunchAgent
+  and the `machctl` link point there. Without `--prefix`, the folder beside the
+  installer is the install folder.
 - The installer refuses to install, restart, or remove while any lease record
   remains in the previous or the proposed state root, including retained failed
   or deleting records. Release the leases first.
@@ -131,10 +126,10 @@ curl -s localhost:6240/health
   `--console-config PATH` argument.
 - `--check` and `--dry-run` validate without writing a plist or calling
   `launchctl`.
-- `rust/scripts/build-guest-agents.sh` builds both guest agents into
-  `target/guest-agents`, but it builds them in the debug profile.
+- `rust/scripts/build-guest-agents.sh` builds only the guest agents, in the
+  release profile, into `target/guest-agents`; `build-release.sh` uses it.
 - `machine-service-install install` links `~/.local/bin/machctl` to the
-  `machctl` beside it. An existing link is replaced, and a file that is not a
+  installed `machctl`. An existing link is replaced, and a file that is not a
   link is left in place.
 - `machine-service-install remove` unloads the agent, deletes the plist, and
   removes the `machctl` link it made.

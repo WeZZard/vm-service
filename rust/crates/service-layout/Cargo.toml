@@ -1,0 +1,13 @@
+[package]
+name = "service-layout"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "service_layout"
+path = "src/lib.rs"
+
+[dev-dependencies]
+tempfile.workspace = true

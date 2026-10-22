@@ -10,6 +10,7 @@ path = "src/lib.rs"
 
 [dependencies]
 lease-keys = { path = "../lease-keys" }
+service-layout = { path = "../service-layout" }
 environment = { path = "../environment" }
 acquisition-options = { path = "../acquisition-options" }
 control-only = { path = "../control-only" }

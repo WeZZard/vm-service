@@ -201,14 +201,13 @@ pub fn parse_probe(stdout: &[u8]) -> Result<Map<String, Value>, GuestError> {
 /// The absolute path of the native guest agent binary.
 ///
 /// `VM_GUEST_CONSOLE_AGENT` wins; otherwise `guest-console-agent` next to the
-/// running executable.
+/// running executable, where the installer puts it (IN-1).
 pub fn agent_path() -> Result<PathBuf, GuestError> {
     if let Some(path) = std::env::var_os("VM_GUEST_CONSOLE_AGENT") {
         return Ok(PathBuf::from(path));
     }
-    let executable = std::env::current_exe().map_err(|_| GuestError::AgentUnavailable)?;
-    let directory = executable.parent().ok_or(GuestError::AgentUnavailable)?;
-    Ok(directory.join("guest-console-agent"))
+    service_layout::beside_daemon(service_layout::Executable::GuestConsoleAgent)
+        .ok_or(GuestError::AgentUnavailable)
 }
 
 /// The absolute path of the guest agent binary for a guest of `kind`.
@@ -231,20 +230,20 @@ pub fn agent_path_for(kind: &str) -> Result<PathBuf, GuestError> {
     if let Some(path) = std::env::var_os("VM_GUEST_CONSOLE_AGENT") {
         return Ok(PathBuf::from(path));
     }
-    let executable = std::env::current_exe().map_err(|_| GuestError::AgentUnavailable)?;
-    let directory = executable.parent().ok_or(GuestError::AgentUnavailable)?;
-    Ok(resolve_agent_for(directory, kind))
+    let directory = service_layout::daemon_directory().ok_or(GuestError::AgentUnavailable)?;
+    Ok(resolve_agent_for(&directory, kind))
 }
 
 /// The kind-qualified sibling wins when it exists; otherwise the host-native
 /// name is used. Split out from `agent_path_for` so the choice can be exercised
 /// without touching the process environment or the test binary's directory.
+/// The installation layout owns the names and the order (IN-1).
 fn resolve_agent_for(directory: &Path, kind: &str) -> PathBuf {
-    let qualified = directory.join(format!("guest-console-agent-{kind}"));
-    if qualified.is_file() {
-        return qualified;
-    }
-    directory.join("guest-console-agent")
+    service_layout::guest_build_in(
+        directory,
+        service_layout::Executable::GuestConsoleAgent,
+        kind,
+    )
 }
 
 /// Read the native guest agent binary that `prepare` streams to the guest.

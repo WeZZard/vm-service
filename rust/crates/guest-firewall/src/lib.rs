@@ -30,8 +30,9 @@ pub const LABEL: &str = "com.wezzard.vm-service.guest-firewall";
 pub const DAEMON_PLIST: &str = "/Library/LaunchDaemons/com.wezzard.vm-service.guest-firewall.plist";
 /// The LaunchDaemon's log.
 pub const DAEMON_LOG: &str = "/var/log/com.wezzard.vm-service.guest-firewall.log";
-/// The installer executable's name; it is staged beside `machine-service`.
-pub const INSTALLER: &str = "vm-service-guest-firewall";
+/// The installer executable's name; it is installed beside `machine-service`
+/// (IN-1).
+pub const INSTALLER: &str = service_layout::Executable::GuestFirewall.name();
 /// How often, in seconds, the LaunchDaemon reloads the anchor without a
 /// change to the table, which also restores it after the system reloads
 /// `/etc/pf.conf` at boot.

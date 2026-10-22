@@ -118,21 +118,14 @@ pub enum GuestError {
 ///
 /// `VM_GUEST_SESSION_AGENT` wins; otherwise `guest-session-agent-<kind>`
 /// beside the running executable, then the host-native
-/// `guest-session-agent`, as the console agent is resolved.
+/// `guest-session-agent`, as the console agent is resolved. The installer
+/// installs both builds there from the same layout (IN-1, DC-79).
 pub fn agent_path_for(kind: &str) -> OpResult<PathBuf> {
     if let Some(path) = std::env::var_os("VM_GUEST_SESSION_AGENT") {
         return Ok(PathBuf::from(path));
     }
-    let executable = std::env::current_exe()
-        .map_err(|error| OpError::new(format!("guest session agent unavailable: {error}")))?;
-    let directory = executable
-        .parent()
-        .ok_or_else(|| OpError::new("guest session agent unavailable"))?;
-    let qualified = directory.join(format!("guest-session-agent-{kind}"));
-    if qualified.is_file() {
-        return Ok(qualified);
-    }
-    Ok(directory.join("guest-session-agent"))
+    service_layout::guest_build_beside_daemon(service_layout::Executable::GuestSessionAgent, kind)
+        .ok_or_else(|| OpError::new("guest session agent unavailable"))
 }
 
 /// Read the guest session agent for a guest of `kind`.
