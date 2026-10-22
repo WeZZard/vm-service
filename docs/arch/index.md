@@ -26,6 +26,7 @@ flowchart LR
 6. CN: [Consumers](consumers.md). What mcp-relay and the evaluation runner change to use durable machines.
 7. MG: [Rename and migration](rename.md). The names, the removal of `/vms`, and the one coordinated switch of the service and its callers.
 8. IC: [Image catalog hot reload](image-catalog.md). Image lines, bases and associations change the available virtual machines without a restart.
+9. IN: [Installation](installation.md). One layout lists every executable beside the daemon; the daemon resolves its helpers from it and the installer installs exactly it.
 
 ## Links
 

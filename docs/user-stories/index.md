@@ -47,6 +47,7 @@ Consolidated, test-linked user stories for the lease-based VM service. Each stor
 | US31 | Operator | Install on a Mac without Tart | AC-38; [rename](../arch/rename.md#mg-4-order-of-migration) |
 | US32 | Operator | The image list follows the images without a restart | AC-39 to AC-42; [image catalog](../arch/image-catalog.md) |
 | US33 | Operator | Choose which Macs are durable machines | AC-43; [machine model](../arch/machines.md#mm-1-two-kinds-of-machine) |
+| US34 | Operator | An installation holds every executable the service needs | AC-46; [installation](../arch/installation.md) |
 | US-N1 | Agent | Bounded resource consumption and predictable defaults | `TestAcquireValidation.test_ttl_bounds` (unit), `TestImagesSnapshot` (unit) |
 | US-N2 | Orchestrator | Failure at any provisioning step rolls back cleanly | `TestAcquireLifecycle.test_failure_rolls_back_clone_and_state`, `test_ssh_never_ready_rolls_back` (unit) |
 | US-N3 | Orchestrator | Concurrency correctness: races never oversubscribe or double-lease | `TestConcurrency` (unit) |

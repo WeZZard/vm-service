@@ -136,3 +136,18 @@ Feature: Federation, rename and installation
     And the catalog description it prints has no "durable" tag
     When the operator reinstalls it with --expose-durable on
     Then GET /machines lists the durable machine as "available"
+
+  @AC-46 @TL-1
+  Scenario: An installation holds exactly the executables the daemon resolves
+    Given a build folder with every executable of the installation layout and one stray file
+    When the operator runs "machine-service-install install --prefix DIR" from it into an empty folder
+    Then DIR holds exactly the executables of the layout, each byte-equal to its build with mode 0755
+    And DIR holds "guest-session-agent" and "guest-session-agent-linux"
+    And the LaunchAgent runs DIR's machine-service and ~/.local/bin/machctl links to DIR's machctl
+    Given a build folder that lacks any one executable of the layout
+    When the operator runs the same installation
+    Then it is refused naming that file, and nothing is copied, written or loaded
+    Given a Mac without Tart
+    When the operator installs with durable exposure on
+    Then DIR holds machine-service, machctl and machine-service-install only
+
