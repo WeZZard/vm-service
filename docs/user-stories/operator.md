@@ -81,11 +81,12 @@ The human operator (WeZZard) who installs the service, keeps it healthy, trouble
 
 ## US23 — See every machine on the intranet in one list
 
-- As the operator, I want `machctl list` on any Mac to show every machine from every instance that Consul knows, so that I know what is leased, what is free and what each machine can do.
+- As the operator, I want `machctl list` on any Mac to show every machine from every instance on the network, with nothing else to install or configure, so that I know what is leased, what is free and what each machine can do (DC-84).
+- As the operator who centralises discovery in Consul, I want one switch that makes every instance and client use Consul instead (DC-84).
 - An instance that does not answer stays in the list as unreachable, never silently missing. See [FD](../arch/federation.md) and [CL-1](../ux/cli/list.md#cl-1-the-machine-list).
 - Each Mac appears once, under its own name, even when Consul knows it by another node name (DC-80).
 
-**Tests:** AC-34, AC-37 and AC-47 in [operator.acceptance](../acceptance/operator.acceptance).
+**Tests:** AC-34, AC-37, AC-47, AC-48 and AC-49 in [operator.acceptance](../acceptance/operator.acceptance).
 
 ## US30 — Rename in one coordinated switch
 

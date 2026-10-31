@@ -12,7 +12,7 @@ vm-service becomes machine-service (DC-19). An instance leases the Mac it runs o
 
 ```mermaid
 flowchart LR
-    Client[CLI, mcp-relay, evaluation runner] -->|Consul discovery| Consul[Consul catalog: machine-service]
+    Client[CLI, mcp-relay, evaluation runner] -->|Bonjour browse, or Consul when chosen| Discovery[_machine-service._tcp on the network]
     Client -->|HTTP API| Instance[machine-service instance]
     Instance -->|exclusive session as wezzard| Durable[Durable machine: this Mac]
     Instance -->|Tart lifecycle and guest link| Virtual[Virtual machines]
@@ -22,7 +22,7 @@ flowchart LR
 2. DM: [Durable machine leases](durable-machine.md). A lease is an exclusive session with a scratch workspace; commands run as `wezzard` in the GUI session, not over SSH.
 3. AK: [Agent keys](agent-keys.md). Claude Code and Codex reach the LiteLLM gateway with a stable key per machine per agent, never printed.
 4. HY: [Hygiene and CI coexistence](hygiene.md). A workspace, a leftover-process sweep, and a recorded inventory before and after; the CI runner is never paused.
-5. FD: [Discovery and federation](federation.md). Consul registration, the CLI's merged list, remote work, and the household trust model.
+5. FD: [Discovery and federation](federation.md). Bonjour advertisement by default or Consul registration by choice, the CLI's merged list, remote work, and the household trust model.
 6. CN: [Consumers](consumers.md). What mcp-relay and the evaluation runner change to use durable machines.
 7. MG: [Rename and migration](rename.md). The names, the removal of `/vms`, and the one coordinated switch of the service and its callers.
 8. IC: [Image catalog hot reload](image-catalog.md). Image lines, bases and associations change the available virtual machines without a restart.

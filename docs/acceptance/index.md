@@ -69,3 +69,5 @@ Each scenario names the [test layer](../arch/test-layers.md) that runs it. Stori
 15. AC-43: Durable exposure is off unless the operator turns it on (US33, TL-2, TL-6).
 16. AC-46: An installation holds exactly the executables the daemon resolves (US34, TL-1).
 17. AC-47: A Mac whose Consul node name is not its own name is listed once, by its own name (US23, TL-2, TL-6).
+18. AC-48: A Mac with nothing but machctl lists every instance on the network (US23, TL-2, TL-6).
+19. AC-49: The consul mode stops the advertisement and asks only Consul (US23, TL-2).
