@@ -48,7 +48,8 @@ recoverable from this repository's history.
 | Path | Role |
 |------|------|
 | `rust/crates/machine-service` | Daemon binary: HTTP API on the configured bind address (loopback port 6240 by default), state in `~/.local/state/machine-service/state.json`, GC loop every 60s |
-| `rust/crates/machctl` | CLI client (same operations as the HTTP API), and the federated machine list across every instance Consul knows |
+| `rust/crates/machctl` | CLI client (same operations as the HTTP API), and the federated machine list across every instance on the network |
+| `rust/crates/discovery` | The discovery mode and the Mac's own DNS-SD service: the daemon's Bonjour advertisement and `machctl`'s browse (DC-84, DC-85) |
 | `rust/crates/machine-service-core` | Lease records, Tart lifecycle, SSH access, env packs, and operations |
 | `rust/crates/lease-keys` | Standard OpenSSH per-lease key generation, bootstrap, and safe cleanup |
 | `rust/crates/acquisition-options` | Pure option validation, configuration reporting, and discovery descriptions |
@@ -94,8 +95,8 @@ scripts/build-release.sh
 target/machine-service/machine-service-install install --check --prefix ~/.local/libexec/machine-service
 target/machine-service/machine-service-install install --prefix ~/.local/libexec/machine-service
 
-# LAN-reachable (binds 0.0.0.0; required for Consul-discovered consumers on
-# other hosts). A repeated install preserves the bind address it finds.
+# LAN-reachable (binds 0.0.0.0; required for consumers on other hosts, and
+# for the Bonjour advertisement). A repeated install preserves the bind address it finds.
 MACHINE_SERVICE_HOST=0.0.0.0 target/machine-service/machine-service-install install --prefix ~/.local/libexec/machine-service
 
 # Expose this Mac as a durable machine (off by default; kept by later installs).
@@ -256,7 +257,23 @@ sudo ~/.local/libexec/machine-service/vm-service-guest-firewall remove
   LaunchAgent, and later installs preserve it. Exposure is off unless the
   operator turns it on (DC-39).
 
-## Consul discovery
+## Discovery
+
+Every instance bound to all interfaces advertises itself with Bonjour, the
+network's own discovery: `_machine-service._tcp`, named by its instance ID, with
+`txtvers=1`, `instance` and `kinds` in its TXT record. `machctl` and other
+clients browse for it, so a Mac finds every instance with nothing else
+installed, and confirm each one by its `/health` before using it.
+`MACHINE_SERVICE_DISCOVERY` chooses the mode for the daemon and every client:
+`bonjour` (the default) or `consul`. With `consul`, the daemon advertises
+nothing and clients ask only the Consul agent, as described below (FD-1,
+FD-2, DC-84, DC-85). Any other value stops the daemon at startup.
+
+```bash
+dns-sd -B _machine-service._tcp local.   # the instances advertising on this network
+```
+
+### Consul mode
 
 Each Mac's service-catalog registrar publishes its instance in Consul from a
 description file in the registrar's own folder. The installer prints that file
@@ -662,7 +679,7 @@ machctl acquire --purpose bench --require metal3 --require unreal   # any matchi
 machctl acquire --purpose check --machine mac-b                     # a named durable machine
 machctl acquire --purpose x --image ubuntu2404 --instance mac-a
 machctl list                      # every machine from every instance
-machctl list --local              # only this Mac's instance; Consul is not asked
+machctl list --local              # only this Mac's instance; nothing is browsed or asked
 machctl list --kind durable --require metal3
 machctl exec pilot-mac-build-test-<id> -- swift --version
 machctl status <vm>@<instance>    # when two instances have a machine of that name
@@ -674,20 +691,27 @@ machctl heartbeat <vm>            # call periodically for long tasks
 machctl release <vm>
 ```
 
-`machctl list` asks the local instance, then the local Consul agent
+`machctl list` asks the local instance, then browses `_machine-service._tcp`
+for 2 seconds, or in Consul mode asks the local Consul agent
 (`CONSUL_HTTP_ADDR`, default `http://127.0.0.1:8500`) for every instance
-registered as `machine-service`, then every instance at once, and prints one
+registered as `machine-service`. It confirms each instance it found by its
+`/health`, asks every instance at once, and prints one
 table: grouped by instance, local first, the durable machine, then virtual
 machines, then offers. Each instance gets one 5-second budget, so a dead
 instance never hangs the list.
 
-- An instance that does not answer keeps one row with its error and its Consul
-  health, for example `unreachable  connection refused (Consul: critical)`. A
+- An instance that does not answer keeps one row with its error and, in Consul
+  mode, its Consul health, for example
+  `unreachable  connection refused (Consul: critical)`. An instance whose
+  `/health` answers another ID than it was found under is listed unreachable
+  with both IDs. A
   registration published loopback-only on another Mac is not asked.
-- A Consul agent that does not answer is named on stderr, and the local
-  instance is still listed.
+- A Consul agent that does not answer, or a browse that fails or finds no
+  other instance, is named on stderr with how many instances answered, and
+  the local instance is still listed.
 - `--json` prints one object per instance: `instance`, `address`, `local`,
-  `reachable`, `error`, `consul`, `catalog` and `machines`.
+  `reachable`, `error`, `found_by` (`local`, `bonjour`, `consul` or `address`),
+  `consul`, `catalog` and `machines`.
 - `--instance <ID or address>`, `--kind durable|virtual` and
   `--require <capability>` (repeatable; `metal3`, `durable`, `virtual`,
   `unity`, `unreal`, `xcode`, `cua-driver`, `claude-code`, `codex`,

@@ -39,7 +39,8 @@ fn kept(instance: &Instance, filters: &Filters) -> Vec<Value> {
 
 /// The merged list as JSON: one object per instance with its `instance`,
 /// `address`, `reachable`, `error` and `machines` (CL-1), plus whether it
-/// is the local instance, its Consul health, and its image catalog status.
+/// is the local instance, how it was found, its Consul health, and its image
+/// catalog status (DC-63, DC-84).
 pub fn to_json(merged: &Merged, filters: &Filters) -> Value {
     let mut out = Vec::new();
     for instance in &merged.instances {
@@ -53,6 +54,7 @@ pub fn to_json(merged: &Merged, filters: &Filters) -> Value {
         object.insert("local".into(), json!(instance.local));
         object.insert("reachable".into(), json!(instance.reachable));
         object.insert("error".into(), json!(instance.error));
+        object.insert("found_by".into(), json!(instance.found_by));
         object.insert("consul".into(), json!(instance.consul));
         object.insert(
             "catalog".into(),
@@ -381,6 +383,8 @@ mod tests {
             address: format!("http://192.0.2.1:6240/{label}"),
             local,
             consul: consul.map(str::to_string),
+            found_by: if local { "local" } else { "consul" },
+            expected_id: None,
             unaskable: None,
             reachable: body.is_some(),
             error: error.map(str::to_string),
@@ -408,6 +412,8 @@ mod tests {
             instances,
             consul_asked: true,
             consul_error: None,
+            browsed: false,
+            browse_error: None,
             notes: Vec::new(),
         }
     }

@@ -279,6 +279,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "discovery"
+version = "0.1.1"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "environment"
 version = "0.1.1"
 dependencies = [
@@ -525,6 +532,7 @@ version = "0.1.1"
 dependencies = [
  "byte-transfer",
  "clap",
+ "discovery",
  "environment",
  "libc",
  "serde_json",
@@ -538,6 +546,7 @@ name = "machine-service"
 version = "0.1.1"
 dependencies = [
  "byte-transfer",
+ "discovery",
  "environment",
  "libc",
  "machine-service-core",

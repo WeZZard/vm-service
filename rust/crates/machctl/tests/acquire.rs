@@ -128,6 +128,11 @@ impl Intranet {
         ]);
         let remote = Fake::new(vec![
             (
+                "/health",
+                200,
+                json!({"ok": true, "service": "machine-service", "instance": "mac-b"}),
+            ),
+            (
                 "/machines",
                 200,
                 json!({"machines": {"mac-b": {
@@ -175,6 +180,8 @@ impl Intranet {
             .env("MACHINE_SERVICE_PORT", self.local.port.to_string())
             .env("MACHINE_SERVICE_STATE", self.home.path().join("state"))
             .env("CONSUL_HTTP_ADDR", self.consul.base())
+            // These fixtures stand in for a Consul agent (DC-84).
+            .env("MACHINE_SERVICE_DISCOVERY", "consul")
             .output()
             .unwrap()
     }
