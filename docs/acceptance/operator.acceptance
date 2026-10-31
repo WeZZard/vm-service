@@ -162,3 +162,21 @@ Feature: Federation, rename and installation
     When the operator runs "machctl list"
     Then that registration is named by its Consul node name
     And standard error says that it states no instance ID and names the command that fixes it
+
+  @AC-48 @TL-2 @TL-6
+  Scenario: A Mac with nothing but machctl lists every instance on the network
+    Given two instances bound to all interfaces on other Macs, with the default discovery mode
+    And this Mac runs no Consul agent and no instance of its own
+    When the operator runs "machctl list"
+    Then both instances' machines are listed, each under its own instance ID
+    And each instance was confirmed by its "/health" before it was listed
+    And no request was sent to a Consul agent
+
+  @AC-49 @TL-2
+  Scenario: The consul mode stops the advertisement and asks only Consul
+    Given an instance started with MACHINE_SERVICE_DISCOVERY set to "consul"
+    Then it advertises no "_machine-service._tcp" record
+    When the operator runs "machctl list" with MACHINE_SERVICE_DISCOVERY set to "consul"
+    Then the CLI asks the Consul agent and browses nothing
+    And an advertised instance that Consul does not list is not listed
+
