@@ -4,6 +4,7 @@ members = [
   "crates/lease-keys",
   "crates/service-layout",
   "crates/byte-transfer",
+  "crates/discovery",
   "crates/environment",
   "crates/acquisition-options",
   "crates/control-only",

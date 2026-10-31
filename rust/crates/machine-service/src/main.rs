@@ -59,6 +59,8 @@ fn run(arguments: &[String]) -> Result<(), String> {
         None => Config::legacy(),
     };
     config.guest_link = GuestLink::from_environment()?;
+    // An unknown mode stops the daemon before it serves (FD-1, DC-84).
+    let discovery_mode = discovery::Mode::from_environment()?;
 
     if bundle.is_none() {
         // A selected startup binds a store/state; legacy startup must not
@@ -85,10 +87,10 @@ fn run(arguments: &[String]) -> Result<(), String> {
         None => None,
     };
 
-    serve(config)
+    serve(config, discovery_mode)
 }
 
-fn serve(config: Config) -> Result<(), String> {
+fn serve(config: Config, discovery_mode: discovery::Mode) -> Result<(), String> {
     let console_config = Service::load_console_config().map_err(|error| error.to_string())?;
     let selected = config.environment.is_some();
     let service = Arc::new(Service::new(config, console_config));
@@ -147,12 +149,15 @@ fn serve(config: Config) -> Result<(), String> {
     };
     let server = Server::http(&address).map_err(|error| error.to_string())?;
     service.log(&format!(
-        "machine-service starting on {}:{} (pilot repo: {}, guest link: {})",
+        "machine-service starting on {}:{} (pilot repo: {}, guest link: {}, discovery: {})",
         service.config.host,
         service.config.port,
         service.config.pilot.display(),
-        service.config.guest_link.name()
+        service.config.guest_link.name(),
+        discovery_mode.name()
     ));
+    // Held while the daemon serves; the system withdraws it on exit (FD-1).
+    let _advertisement = advertise(&service, discovery_mode);
 
     let gc_service = service.clone();
     std::thread::spawn(move || gc_service.gc_loop());
@@ -163,6 +168,55 @@ fn serve(config: Config) -> Result<(), String> {
     }
     service.consoles.shutdown();
     Ok(())
+}
+
+/// `virtual` needs Tart as well as a catalog: a Mac without Tart offers only
+/// its durable machine (MM-1, AC-38, DC-66).
+fn offers_virtual(service: &Service) -> bool {
+    service.catalog.peek().status.freshness != machine_service_core::catalog::Freshness::Unavailable
+        && service.host.tart_executable().is_ok()
+}
+
+/// Advertise `_machine-service._tcp` in Bonjour mode, named by the instance
+/// ID, with `instance` and `kinds` in its TXT record. An instance bound to
+/// loopback, or in Consul mode, advertises nothing and says why (FD-1, DC-85).
+fn advertise(service: &Service, mode: discovery::Mode) -> Option<discovery::dnssd::Advertisement> {
+    if mode == discovery::Mode::Consul {
+        service.log("discovery: consul mode; not advertising on the network");
+        return None;
+    }
+    if discovery::is_loopback_host(&service.config.host) {
+        service.log(&format!(
+            "discovery: bound to loopback ({}), so no other Mac could reach this instance; not advertising",
+            service.config.host
+        ));
+        return None;
+    }
+    let (instance, kinds) = durable_routes::identity(offers_virtual(service))?;
+    let txt = discovery::txt_entries(&instance, &kinds);
+    match discovery::dnssd::register(
+        &instance,
+        discovery::SERVICE_TYPE,
+        service.config.port,
+        &txt,
+        discovery::dnssd::Scope::Network,
+        std::time::Duration::from_secs(5),
+    ) {
+        Ok(advertisement) => {
+            service.log(&format!(
+                "discovery: advertising {} as {:?} on port {} (kinds: {})",
+                discovery::SERVICE_TYPE,
+                advertisement.name,
+                service.config.port,
+                kinds.join(",")
+            ));
+            Some(advertisement)
+        }
+        Err(error) => {
+            service.log(&format!("WARN: discovery: not advertising: {error}"));
+            None
+        }
+    }
 }
 
 fn handle(service: &Service, mut request: Request) {
@@ -300,13 +354,7 @@ fn handle_get(service: &Service, request: &mut Request, url: &str) -> OpResult<(
         {
             body["environment"] = environment.clone();
         }
-        // `virtual` needs Tart as well as a catalog: a Mac without Tart offers
-        // only its durable machine (MM-1, AC-38, DC-66).
-        durable_routes::health(
-            &mut body,
-            catalog.status.freshness != machine_service_core::catalog::Freshness::Unavailable
-                && service.host.tart_executable().is_ok(),
-        );
+        durable_routes::health(&mut body, offers_virtual(service));
         return Ok((200, body));
     }
     if path == "/capabilities" {

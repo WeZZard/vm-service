@@ -65,8 +65,17 @@ fn answer(reply_value: Reply) -> Option<(u16, Value)> {
 
 /// Add `instance` and `kinds` to the `/health` answer (FD-1).
 pub fn health(body: &mut Value, virtual_kind: bool) {
-    let Some(machine) = machine() else { return };
-    body["instance"] = json!(machine.name());
+    let Some((instance, kinds)) = identity(virtual_kind) else {
+        return;
+    };
+    body["instance"] = json!(instance);
+    body["kinds"] = json!(kinds);
+}
+
+/// The instance ID and the kinds it offers, as `/health` states them and the
+/// Bonjour advertisement carries them (FD-1, DC-85).
+pub fn identity(virtual_kind: bool) -> Option<(String, Vec<&'static str>)> {
+    let machine = machine()?;
     let mut kinds = Vec::new();
     if machine.exposed() {
         kinds.push("durable");
@@ -74,7 +83,7 @@ pub fn health(body: &mut Value, virtual_kind: bool) {
     if virtual_kind {
         kinds.push("virtual");
     }
-    body["kinds"] = json!(kinds);
+    Some((machine.name().to_string(), kinds))
 }
 
 /// Mark the virtual machines' records and list the durable machine in the

@@ -16,6 +16,7 @@ use serde_json::Value;
 use crate::capability;
 use crate::consul::{self, Registration};
 use crate::http;
+use discovery::Found;
 
 /// The Consul service every instance registers under (FD-1).
 pub const SERVICE: &str = "machine-service";
@@ -23,15 +24,36 @@ pub const SERVICE: &str = "machine-service";
 pub const INSTANCE_TIMEOUT: Duration = Duration::from_secs(5);
 /// The Consul agent's budget (FD-2).
 pub const CONSUL_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a Bonjour browse gathers advertisements (FD-2, DC-85).
+pub const BROWSE_WINDOW: Duration = Duration::from_secs(2);
+/// How long the instances a browse found may take to resolve.
+pub const RESOLVE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// A Bonjour browse: every `_machine-service._tcp` instance it finds within
+/// its window (FD-2). A plain function, so a test can stand in for the
+/// network.
+pub type Browser = fn(Duration) -> Result<Vec<Found>, String>;
+
+/// Browse the network through the Mac's own DNS-SD service (DC-85).
+pub fn bonjour(window: Duration) -> Result<Vec<Found>, String> {
+    discovery::dnssd::browse(
+        discovery::SERVICE_TYPE,
+        discovery::dnssd::Scope::Network,
+        window,
+        RESOLVE_TIMEOUT,
+    )
+}
 
 /// What one gathering asks of the network.
 #[derive(Debug, Clone)]
 pub struct Settings {
     /// The local instance's base URL, `http://127.0.0.1:6240` by default.
     pub local_base: String,
-    /// The Consul agent's base URL, or `None` to stay with the local
-    /// instance (`--local`, or a selected environment).
+    /// The Consul agent's base URL in Consul mode (DC-84).
     pub consul: Option<String>,
+    /// The browse in Bonjour mode (DC-84). With neither, the CLI stays with
+    /// the local instance (`--local`, or a selected environment).
+    pub browse: Option<Browser>,
     /// Headers for requests to the local instance: the selected
     /// environment's fingerprint, when one is selected.
     pub local_headers: Vec<(String, String)>,
@@ -55,6 +77,12 @@ pub struct Instance {
     pub local: bool,
     /// Its Consul health, when Consul lists it.
     pub consul: Option<String>,
+    /// How the CLI found it: `local`, `bonjour`, `consul` or `address`
+    /// (CL-1, DC-84).
+    pub found_by: &'static str,
+    /// The instance ID its advertisement or registration states, which its
+    /// `/health` must answer before it is used (FD-2, DC-85).
+    pub expected_id: Option<String>,
     /// Why it is not asked at all, such as a loopback-only registration on
     /// another Mac (FD-1).
     pub unaskable: Option<String>,
@@ -83,6 +111,10 @@ pub struct Merged {
     pub consul_asked: bool,
     /// Why Consul did not answer, when it did not.
     pub consul_error: Option<String>,
+    /// The network was browsed (Bonjour mode).
+    pub browsed: bool,
+    /// Why the browse failed, when it did.
+    pub browse_error: Option<String>,
     /// What the CLI assumed to name an instance, for standard error: one
     /// line per registration that states no instance ID and was named by
     /// its Consul node name instead (FD-2, DC-80).
@@ -267,17 +299,31 @@ fn identity(registration: &Registration) -> (String, bool) {
 pub fn discover(settings: &Settings) -> Merged {
     let consul_settings = settings.consul.clone();
     let consul_timeout = settings.consul_timeout;
-    let (probe, consul) = thread::scope(|scope| {
+    let (probe, consul, browsed) = thread::scope(|scope| {
         let consul = consul_settings
             .map(|base| scope.spawn(move || consul::instances(&base, SERVICE, consul_timeout)));
+        let browsed = settings
+            .browse
+            .map(|browse| scope.spawn(move || browse(BROWSE_WINDOW)));
         let probe = probe_local(settings);
         let consul = consul.map(|handle| {
             handle
                 .join()
                 .unwrap_or_else(|_| Err("the Consul query panicked".to_string()))
         });
-        (probe, consul)
+        let browsed = browsed.map(|handle| {
+            handle
+                .join()
+                .unwrap_or_else(|_| Err("the Bonjour browse panicked".to_string()))
+        });
+        (probe, consul, browsed)
     });
+    let browse_asked = browsed.is_some();
+    let (founds, browse_error) = match browsed {
+        None => (Vec::new(), None),
+        Some(Ok(founds)) => (founds, None),
+        Some(Err(error)) => (Vec::new(), Some(error)),
+    };
 
     let consul_asked = consul.is_some();
     let (registrations, consul_error) = match consul {
@@ -294,6 +340,8 @@ pub fn discover(settings: &Settings) -> Merged {
         address: settings.local_base.clone(),
         local: true,
         consul: None,
+        found_by: "local",
+        expected_id: None,
         unaskable: None,
         reachable: probe.reachable,
         error: probe.error,
@@ -317,7 +365,31 @@ pub fn discover(settings: &Settings) -> Merged {
             local.consul = Some(registration.status);
             continue;
         }
-        others.push(remote(registration, id));
+        others.push(remote(registration, id, stated));
+    }
+    let mut seen_local = false;
+    for found in founds {
+        let id = found.instance().to_string();
+        let same = !seen_local
+            && local_id.as_deref() == Some(id.as_str())
+            && local_port.is_none_or(|port| port == found.port);
+        if same {
+            seen_local = true;
+            continue;
+        }
+        others.push(Instance {
+            label: id.clone(),
+            id: Some(id.clone()),
+            address: found.base_url(),
+            local: false,
+            consul: None,
+            found_by: "bonjour",
+            expected_id: Some(id),
+            unaskable: None,
+            reachable: false,
+            error: None,
+            body: None,
+        });
     }
     others.sort_by(|a, b| {
         a.label
@@ -331,22 +403,28 @@ pub fn discover(settings: &Settings) -> Merged {
         instances,
         consul_asked,
         consul_error,
+        browsed: browse_asked,
+        browse_error,
         notes,
     }
 }
 
 /// An instance Consul lists on another Mac, or on this Mac at another port,
 /// named `id` (DC-80).
-fn remote(registration: Registration, id: String) -> Instance {
+fn remote(registration: Registration, id: String, stated: bool) -> Instance {
     let unaskable = registration
         .loopback_only
         .then(|| format!("bound to loopback on {}", registration.node));
     Instance {
         label: id.clone(),
-        id: Some(id),
+        id: Some(id.clone()),
         address: registration.base_url(),
         local: false,
         consul: Some(registration.status),
+        found_by: "consul",
+        // A registration named after its node is not confirmed by an ID it
+        // never stated (DC-80).
+        expected_id: stated.then_some(id),
         unaskable,
         reachable: false,
         error: None,
@@ -418,6 +496,8 @@ pub fn select(merged: &mut Merged, wanted: &str) -> Result<(), String> {
             address,
             local: false,
             consul: None,
+            found_by: "address",
+            expected_id: None,
             unaskable: None,
             reachable: false,
             error: None,
@@ -442,13 +522,47 @@ pub fn ask_all(merged: &mut Merged, timeout: Duration) {
                 continue;
             }
             scope.spawn(move || {
-                let (reachable, error, body) = ask_machines(&instance.address, timeout, &[]);
+                let deadline = Instant::now() + timeout;
+                if let Some(expected) = &instance.expected_id {
+                    if let Err(error) = confirm(&instance.address, expected, timeout) {
+                        instance.error = Some(error);
+                        return;
+                    }
+                }
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                let (reachable, error, body) = ask_machines(&instance.address, remaining, &[]);
                 instance.reachable = reachable;
                 instance.error = error;
                 instance.body = body;
             });
         }
     });
+}
+
+/// Ask an instance found by discovery who it is: it is used only when its
+/// `/health` answers machine-service with the ID it was found under, because
+/// finding an address proves nothing about who answers there (FD-2, DC-85).
+fn confirm(base: &str, expected: &str, timeout: Duration) -> Result<(), String> {
+    let (status, body) = http::get_json(&format!("{base}/health"), timeout, &[])?;
+    if status != 200 {
+        return Err(format!("its /health answered HTTP {status}"));
+    }
+    let service = body.get("service").and_then(Value::as_str);
+    if service.is_some_and(|service| service != SERVICE) {
+        return Err(format!(
+            "it was found as {expected}, but answers as {}, not {SERVICE}",
+            service.unwrap_or_default()
+        ));
+    }
+    match body.get("instance").and_then(Value::as_str) {
+        Some(answered) if answered == expected => Ok(()),
+        Some(answered) => Err(format!(
+            "it was found as {expected}, but its /health answers {answered}"
+        )),
+        None => Err(format!(
+            "it was found as {expected}, but its /health names no instance"
+        )),
+    }
 }
 
 /// Discover and ask every instance: the merged list of CL-1.
@@ -606,6 +720,7 @@ mod tests {
         Settings {
             local_base: local.to_string(),
             consul: consul.map(str::to_string),
+            browse: None,
             local_headers: Vec::new(),
             timeout,
             consul_timeout: timeout,
@@ -646,11 +761,18 @@ mod tests {
     fn ac34_hung_instance_is_bounded_and_hides_nothing() {
         let hung = TcpListener::bind("127.0.0.1:0").unwrap();
         let hung_port = hung.local_addr().unwrap().port();
-        let remote = fake(vec![(
-            "/machines",
-            200,
-            json!({"machines": {"pilot-mac-r": {"state": "running"}}}),
-        )]);
+        let remote = fake(vec![
+            (
+                "/health",
+                200,
+                json!({"ok": true, "service": "machine-service", "instance": "mac-b"}),
+            ),
+            (
+                "/machines",
+                200,
+                json!({"machines": {"pilot-mac-r": {"state": "running"}}}),
+            ),
+        ]);
         let remote_port = port_of(&remote.base).unwrap();
         let local = fake(vec![
             ("/health", 200, json!({"ok": true, "instance": "mac-a"})),

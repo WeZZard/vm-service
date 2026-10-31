@@ -390,10 +390,16 @@ fn main() {
     // Federation (FD-2, FD-3, CL-3). A selected environment pins its own
     // instance, so it never discovers others (DC-64).
     let consul_address = consul::base_address(std::env::var("CONSUL_HTTP_ADDR").ok().as_deref());
+    // Bonjour by default, Consul by choice, for the CLI as for the daemon (DC-84).
+    let discovery_mode =
+        discovery::Mode::from_environment().unwrap_or_else(|error| usage_error(&error));
     let local_base = base.trim_end_matches('/').to_string();
-    let federation_settings = |use_consul: bool| federation::Settings {
+    let federation_settings = |discover: bool| federation::Settings {
         local_base: local_base.clone(),
-        consul: (use_consul && environment.is_none()).then(|| consul_address.clone()),
+        consul: (discover && environment.is_none() && discovery_mode == discovery::Mode::Consul)
+            .then(|| consul_address.clone()),
+        browse: (discover && environment.is_none() && discovery_mode == discovery::Mode::Bonjour)
+            .then_some(federation::bonjour as federation::Browser),
         local_headers: environment
             .as_ref()
             .and_then(|env| env.get("identity"))
@@ -707,6 +713,7 @@ fn main() {
                     "machctl: warning: Consul at {consul_address} did not answer ({error}); listing only the local instance"
                 );
             }
+            browse_notes(&merged, "listing only the local instance");
             for note in &merged.notes {
                 eprintln!("machctl: note: {note}");
             }
@@ -1042,6 +1049,7 @@ fn acquire_by_capability(
             "machctl: warning: Consul at {consul_address} did not answer ({error}); choosing among the local instance only"
         );
     }
+    browse_notes(&merged, "choosing among the local instance only");
     for note in &merged.notes {
         eprintln!("machctl: note: {note}");
     }
@@ -1211,6 +1219,23 @@ fn split_exec_arguments(mut arguments: Vec<String>) -> (Vec<String>, Option<Vec<
 ///
 /// Every `p.error(...)` call in `bin/vmctl` uses the top-level parser, so the
 /// preamble is always this exact usage line.
+/// What a Bonjour browse leaves unsaid: a failed browse, or one that found
+/// no other instance, is said on standard error with how many instances
+/// answered, so an empty list never reads as a network without machines
+/// (FD-3, DC-84).
+fn browse_notes(merged: &federation::Merged, fallback: &str) {
+    if let Some(error) = &merged.browse_error {
+        eprintln!("machctl: warning: the Bonjour browse failed ({error}); {fallback}");
+    } else if merged.browsed && merged.instances.iter().all(|instance| instance.local) {
+        let answered = merged.instances.iter().filter(|i| i.reachable).count();
+        eprintln!(
+            "machctl: note: Bonjour found no other machine-service instance on the network within {} s; {answered} instance{} answered",
+            federation::BROWSE_WINDOW.as_secs(),
+            if answered == 1 { "" } else { "s" }
+        );
+    }
+}
+
 fn usage_error(message: &str) -> ! {
     eprintln!("usage: machctl [-h] [--environment ENVIRONMENT]");
     eprintln!(
