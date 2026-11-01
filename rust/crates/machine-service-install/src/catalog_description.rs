@@ -8,10 +8,9 @@
 //! an instance with durable exposure on carries `durable` (DC-39), and an
 //! instance that can create virtual machines carries `vm` and `tart`.
 //!
-//! The description also states the instance's ID, the Mac's LocalHostName,
-//! as the registration's `instance` metadata, because the Consul node name
-//! the registration sits under need not be that name (MM-2, DC-80). machctl
-//! recognizes a registration by it (FD-2).
+//! The description states the Mac's permanent hardware UUID as
+//! `machine_id` metadata, so a rename never makes it stale (MI-4, DC-87).
+//! Clients obtain the current name from the confirmed instance's `/health`.
 //!
 //! The command only reads. It prints the description on standard output and
 //! its reasoning on standard error, and it never writes into the registrar's
@@ -110,7 +109,7 @@ pub struct Description {
     /// The port that is the service.
     pub port: u16,
     /// What the registrar publishes as the registration's own metadata:
-    /// `instance`, the instance ID that `/health` reports (FD-1, DC-80).
+    /// `machine_id`, the hardware UUID that `/health` reports (MI-4, DC-87).
     pub meta: BTreeMap<String, String>,
 }
 
@@ -132,12 +131,12 @@ pub struct Health {
     pub interval: String,
 }
 
-/// The metadata key that carries the instance ID (FD-1, DC-80).
-pub const INSTANCE_META: &str = "instance";
+/// The metadata key that carries permanent machine identity (MI-4, DC-87).
+pub const MACHINE_ID_META: &str = "machine_id";
 
-/// The description of the instance `instance` that offers `offers` on
-/// `port`.
-pub fn description(offers: &Offers, port: u16, instance: &str) -> Description {
+/// The description of the instance on `machine_id` that offers `offers`
+/// on `port`. No mutable host name is stored (MI-4, DC-87).
+pub fn description(offers: &Offers, port: u16, machine_id: &str) -> Description {
     Description {
         id: SERVICE_ID.to_string(),
         name: "Machine service".to_string(),
@@ -155,7 +154,7 @@ pub fn description(offers: &Offers, port: u16, instance: &str) -> Description {
             interval: "30s".to_string(),
         },
         port,
-        meta: BTreeMap::from([(INSTANCE_META.to_string(), instance.to_string())]),
+        meta: BTreeMap::from([(MACHINE_ID_META.to_string(), machine_id.to_string())]),
     }
 }
 
@@ -381,11 +380,13 @@ to serve the LAN (FD-1)."
         durable,
         virtual_machines,
     };
-    // The daemon's own derivation, so the published ID and the `instance`
-    // of `/health` can never disagree (MM-2, DC-80).
-    let instance = machine_service_core::durable::config::instance_id();
-    eprintln!("instance: {instance} (this Mac's LocalHostName, published as meta.{INSTANCE_META})");
-    print!("{}", render(&description(&offers, port, &instance)));
+    // Reuse the capability report's hardware UUID source (MI-1/MI-4, DC-87).
+    let machine_id = machine_service_core::durable::capabilities::hardware_uuid()
+        .ok_or_else(|| InstallError::Refused("cannot read this Mac's hardware UUID".into()))?;
+    eprintln!(
+        "machine_id: {machine_id} (this Mac's hardware UUID, published as meta.{MACHINE_ID_META})"
+    );
+    print!("{}", render(&description(&offers, port, &machine_id)));
     eprintln!(
         "place this file at ~/.config/service-catalog/services/{SERVICE_ID}.json; the registrar \
 publishes it on its next pass"
@@ -396,6 +397,23 @@ publishes it on its next pass"
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// MI-4/DC-87: the Consul description survives a mutable host name.
+    #[test]
+    fn mi4_catalog_metadata_is_machine_identity_only() {
+        let machine_id = "00000000-0000-4000-8000-000000000001";
+        let value: Value = serde_json::from_str(&render(&description(
+            &Offers {
+                durable: true,
+                virtual_machines: false,
+            },
+            6250,
+            machine_id,
+        )))
+        .unwrap();
+        assert_eq!(value["meta"], serde_json::json!({"machine_id": machine_id}));
+        assert!(value["meta"].get("instance").is_none());
+    }
 
     fn installed(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
         pairs
@@ -491,7 +509,7 @@ mod tests {
                 virtual_machines: false,
             },
             6240,
-            "mac-b",
+            "00000000-0000-4000-8000-000000000001",
         ));
         assert!(text.ends_with("}\n"));
         let value: Value = serde_json::from_str(&text).unwrap();
@@ -505,13 +523,15 @@ mod tests {
             value["tags"],
             serde_json::json!(["machines", "agents", "durable"])
         );
-        assert_eq!(value["meta"], serde_json::json!({"instance": "mac-b"}));
+        assert_eq!(
+            value["meta"],
+            serde_json::json!({"machine_id": "00000000-0000-4000-8000-000000000001"})
+        );
     }
 
     /// The checked-in description is exactly what the command prints for a
-    /// Mac with Tart and images and durable exposure off, 192.168.50.3,
-    /// whose LocalHostName is `Mac-mini`, so the file and the generator
-    /// never drift apart.
+    /// Mac with Tart and images and durable exposure off. The fixture uses
+    /// a neutral example UUID, never the development Mac's identity.
     #[test]
     fn checked_in_description_matches_the_generator() {
         let checked_in = include_str!("../../../../services/machine-service.json");
@@ -521,7 +541,7 @@ mod tests {
                 virtual_machines: true,
             },
             DEFAULT_PORT,
-            "Mac-mini",
+            "00000000-0000-4000-8000-000000000001",
         ));
         assert_eq!(checked_in, generated);
     }

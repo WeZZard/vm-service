@@ -442,7 +442,8 @@ fn sysctl_u64(name: &str) -> Option<u64> {
     }
 }
 
-fn hardware_uuid() -> Option<String> {
+/// The Mac's permanent identity (MI-1, DC-87), also used without durable exposure.
+pub fn hardware_uuid() -> Option<String> {
     let mut id = [0u8; 16];
     let wait = libc::timespec {
         tv_sec: 1,
