@@ -15,6 +15,7 @@ use machine_service_core::{
 
 mod durable_routes;
 mod files;
+mod name_watch;
 mod probe;
 
 fn main() {
@@ -157,7 +158,7 @@ fn serve(config: Config, discovery_mode: discovery::Mode) -> Result<(), String> 
         discovery_mode.name()
     ));
     // Held while the daemon serves; the system withdraws it on exit (FD-1).
-    let _advertisement = advertise(&service, discovery_mode);
+    let _name_watcher = name_watch::start(service.clone(), discovery_mode)?;
 
     let gc_service = service.clone();
     std::thread::spawn(move || gc_service.gc_loop());
@@ -192,14 +193,14 @@ fn advertise(service: &Service, mode: discovery::Mode) -> Option<discovery::dnss
         ));
         return None;
     }
-    let (instance, kinds) = durable_routes::identity(offers_virtual(service))?;
-    let txt = discovery::txt_entries(&instance, &kinds);
+    let (instance, machine_id, kinds) = durable_routes::identity(offers_virtual(service))?;
+    let txt = discovery::txt_entries(&instance, &machine_id, &kinds);
     match discovery::dnssd::register(
         &instance,
         discovery::SERVICE_TYPE,
         service.config.port,
         &txt,
-        discovery::dnssd::Scope::Network,
+        discovery::dnssd::Scope::from_environment().ok()?,
         std::time::Duration::from_secs(5),
     ) {
         Ok(advertisement) => {
@@ -422,7 +423,9 @@ fn handle_get(service: &Service, request: &mut Request, url: &str) -> OpResult<(
     }
     if let Some(name) = path.strip_prefix("/machines/") {
         if !name.is_empty() && !name.contains('/') {
-            let machines = snapshot::snapshot(service)?;
+            let mut machines = snapshot::snapshot(service)?;
+            // MI-1 / DC-87 applies to individual machine records too.
+            durable_routes::extend_machines(&mut machines);
             if let Some(record) = machines
                 .get("machines")
                 .and_then(|machines| machines.get(name))

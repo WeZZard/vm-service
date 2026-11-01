@@ -86,8 +86,12 @@ struct Runtime {
 pub struct DurableMachine {
     /// The resolved configuration.
     pub config: DurableConfig,
+    /// Hardware UUID shared by every instance on this Mac (MI-1, DC-87).
+    pub machine_id: Option<String>,
     /// The cached capability facts.
     pub capabilities: Capabilities,
+    /// Shared live name and persisted history (MI-2, MI-3).
+    pub identity: super::identity::Identity,
     lock: HostLock,
     /// Serializes reads and writes of the lease state.
     store: Mutex<()>,
@@ -100,16 +104,29 @@ pub struct DurableMachine {
 
 impl DurableMachine {
     /// A durable machine for `config`.
-    pub fn new(config: DurableConfig) -> Self {
+    pub fn new(config: DurableConfig) -> Result<Self, String> {
         let lock = HostLock::new(&config.lock_dir, config.uid);
-        Self {
+        let identity =
+            super::identity::Identity::load(&config.state_dir, &config.instance, unix_now())?;
+        if let Some(old) = identity.startup_rename() {
+            log_to_file(
+                &config.log_file,
+                &format!(
+                    "machine name changed from {old} to {} while stopped (MI-2, DC-88)",
+                    identity.name()
+                ),
+            );
+        }
+        Ok(Self {
+            identity,
+            machine_id: super::capabilities::hardware_uuid(),
             config,
             capabilities: Capabilities::new(),
             lock,
             store: Mutex::new(()),
             gate: RwLock::new(()),
             runtime: Mutex::new(None),
-        }
+        })
     }
 
     /// Whether this instance exposes its Mac (DC-39).
@@ -118,15 +135,35 @@ impl DurableMachine {
     }
 
     /// The durable machine's name, which is the instance ID (MM-2).
-    pub fn name(&self) -> &str {
-        &self.config.instance
+    pub fn name(&self) -> String {
+        self.identity.name()
+    }
+
+    /// Whether a route belongs to this durable machine, including former
+    /// labels. Operations still require `current_for` authorization (MI-3).
+    pub fn owns_name(&self, name: &str) -> bool {
+        name == self.name()
+            || self.identity.renamed_message(name, unix_now()).is_some()
+            || self.current_record().is_some_and(|record| {
+                record["state"] != "released" && name == granted_name(&record)
+            })
+    }
+
+    /// A former-name refusal names the current label for seven days (MI-3).
+    pub fn unknown_name(&self, name: &str) -> Reply {
+        Reply::error(
+            404,
+            self.identity
+                .renamed_message(name, unix_now())
+                .unwrap_or_else(|| format!("unknown machine: {name}")),
+        )
     }
 
     /// The refusal of a durable request on an unexposed instance (MM-1).
     pub fn not_exposed(&self) -> Reply {
         Reply::error(
             404,
-            format!("durable machine not exposed on {}", self.config.instance),
+            format!("durable machine not exposed on {}", self.name()),
         )
     }
 
@@ -256,16 +293,16 @@ impl DurableMachine {
             state_dir: self.config.state_dir.to_string_lossy().to_string(),
             lease_id: record["lease_id"].as_str().unwrap_or_default().to_string(),
             purpose: record["purpose"].as_str().unwrap_or_default().to_string(),
-            name: self.config.instance.clone(),
+            name: granted_name(record).to_string(),
             ttl_expires_at: ttl,
             reclaim_at: ttl + self.config.grace_hours * 3600.0,
         }
     }
 
-    fn leased_message(&self, purpose: &str, until: f64) -> String {
+    fn leased_message(&self, name: &str, purpose: &str, until: f64) -> String {
         format!(
             "durable machine leased: {} (purpose {purpose}, until {})",
-            self.config.instance,
+            name,
             format_gmtime(until)
         )
     }
@@ -281,6 +318,7 @@ impl DurableMachine {
     }
 
     fn machine_record_from(&self, record: Option<&Value>) -> Value {
+        let name = self.name();
         let agents = agents::inspect(&self.config.agents_dir(), self.config.uid);
         let capabilities = self.capabilities.report(&self.config, &agents);
         let (cpu, memory_mb, disk_gb) = self.capabilities.resources();
@@ -296,11 +334,13 @@ impl DurableMachine {
             &self.config.user,
         );
         let mut out = json!({
-            "name": self.config.instance,
+            "name": name,
             "kind": "durable",
-            "instance": self.config.instance,
+            "instance": name,
+            "machine_id": self.machine_id,
             "state": state,
             "lease_id": field("lease_id"),
+            "granted_name": lease.map(granted_name).map(str::to_string),
             "purpose": field("purpose"),
             "image": null,
             "image_kind": null,
@@ -338,16 +378,26 @@ impl DurableMachine {
     /// (MM-2): a missing or stale `lease_id` is refused with 409 and nothing
     /// runs.
     fn current_for(&self, name: &str, body: &Value) -> Result<Value, Reply> {
-        if name != self.config.instance {
-            return Err(Reply::error(404, format!("unknown machine: {name}")));
+        let record = self.current_record();
+        let requested_id = body.get("lease_id").and_then(Value::as_str);
+        // MI-3 / DC-89: an old name authorizes nothing without the current
+        // lease's ID. Pre-MI records keep their original `name` compatibly.
+        if name != self.name()
+            && !record.as_ref().is_some_and(|record| {
+                record["state"] != "released"
+                    && name == granted_name(record)
+                    && requested_id.is_some()
+                    && record["lease_id"].as_str() == requested_id
+            })
+        {
+            return Err(self.unknown_name(name));
         }
-        let Some(lease_id) = body.get("lease_id").and_then(Value::as_str) else {
+        let Some(lease_id) = requested_id else {
             return Err(Reply::error(
                 409,
                 format!("lease_id is required for an operation on durable machine {name}"),
             ));
         };
-        let record = self.current_record();
         let current = record
             .as_ref()
             .filter(|record| record["lease_id"].as_str() == Some(lease_id));
@@ -382,16 +432,14 @@ impl DurableMachine {
             return Reply::error(400, "machine and image are mutually exclusive");
         }
         if !self.config.exposed {
-            return self.not_exposed();
+            return if self.identity.renamed_message(&name, unix_now()).is_some() {
+                self.unknown_name(&name)
+            } else {
+                self.not_exposed()
+            };
         }
-        if name != self.config.instance {
-            return Reply::error(
-                404,
-                format!(
-                    "unknown durable machine: {name} (this instance offers {})",
-                    self.config.instance
-                ),
-            );
+        if name != self.name() {
+            return self.unknown_name(&name);
         }
         for field in REFUSED_FIELDS {
             if body.get(field).is_some_and(|value| !value.is_null()) {
@@ -432,22 +480,30 @@ impl DurableMachine {
         {
             return Reply::error(
                 409,
-                format!(
-                    "durable machine unavailable: {} ({reason})",
-                    self.config.instance
-                ),
+                format!("durable machine unavailable: {} ({reason})", self.name()),
             );
         }
 
+        // MI-3: a rename may have happened during the display probe. Hold
+        // the current label through reservation, then release it before
+        // slow preparation or helpers that read the shared name again.
+        let current_name = self.identity.current_name();
+        if name != *current_name {
+            drop(current_name);
+            return self.unknown_name(&name);
+        }
         // Reserve: the lease state, then the host-wide lock (DM-2).
         let now = unix_now();
         let lease_id = uuid::Uuid::new_v4().simple().to_string();
         let workspace = self.config.workspace(&lease_id);
         let record = json!({
-            "name": self.config.instance,
+            "name": name,
             "kind": "durable",
-            "instance": self.config.instance,
+            "instance": name,
+            "machine_id": self.machine_id,
             "lease_id": lease_id,
+            // MI-3 / DC-89: immutable for the whole lease, including restarts.
+            "granted_name": name,
             "purpose": purpose,
             "image": null,
             "image_kind": null,
@@ -470,6 +526,7 @@ impl DurableMachine {
             if let Some(current) = self.current_id().and_then(|id| self.read_record(&id)) {
                 if current["state"] != "released" {
                     let message = self.leased_message(
+                        &name,
                         current["purpose"].as_str().unwrap_or_default(),
                         current["ttl_expires_at"].as_f64().unwrap_or_default(),
                     );
@@ -482,7 +539,8 @@ impl DurableMachine {
             match self.lock.take(&self.holder(&record), now) {
                 Ok(()) => {}
                 Err(LockError::Held(holder)) => {
-                    let message = self.leased_message(&holder.purpose, holder.ttl_expires_at);
+                    let message =
+                        self.leased_message(&name, &holder.purpose, holder.ttl_expires_at);
                     self.log(&format!(
                         "durable acquire refused (purpose={purpose}): {message}; held from {}",
                         holder.state_dir
@@ -503,9 +561,10 @@ impl DurableMachine {
                 return Reply::error(409, format!("durable acquisition failed: {error}"));
             }
         }
+        drop(current_name);
         self.log(&format!(
             "durable acquire {} for purpose {purpose} (lease {lease_id}, ttl {ttl}h)",
-            self.config.instance
+            self.name()
         ));
 
         match self.prepare(record) {
@@ -968,7 +1027,7 @@ impl DurableMachine {
     /// any step is recorded and never keeps the machine leased.
     fn finish_release(&self, mut record: Value) -> Value {
         let lease_id = record["lease_id"].as_str().unwrap_or_default().to_string();
-        let name = self.config.instance.clone();
+        let name = self.name();
         let lease_dir = self.config.lease_dir(&lease_id);
         let mut failures: Vec<Value> = Vec::new();
 
@@ -1203,8 +1262,10 @@ impl DurableMachine {
 
     /// `GET /machines/<name>/leases/<lease_id>/hygiene` (HY-4).
     pub fn hygiene(&self, name: &str, lease_id: &str) -> Reply {
-        if name != self.config.instance {
-            return Reply::error(404, format!("unknown machine: {name}"));
+        if name != self.name() {
+            if let Err(refused) = self.current_for(name, &json!({"lease_id": lease_id})) {
+                return refused;
+            }
         }
         if !valid_lease_id(lease_id) {
             return Reply::error(404, format!("unknown lease: {lease_id}"));
@@ -1228,9 +1289,11 @@ impl DurableMachine {
     }
 
     /// `POST /machines/<name>/refresh` (MM-4): re-read the expensive facts.
-    pub fn refresh(&self, name: &str) -> Reply {
-        if name != self.config.instance {
-            return Reply::error(404, format!("unknown machine: {name}"));
+    pub fn refresh(&self, name: &str, body: &Value) -> Reply {
+        if name != self.name() {
+            if let Err(refused) = self.current_for(name, body) {
+                return refused;
+            }
         }
         let login = self
             .login_environment()
@@ -1274,14 +1337,14 @@ impl DurableMachine {
                         }
                         self.log(&format!(
                             "LEASE WARN: durable machine {} past TTL; grace until {}",
-                            self.config.instance,
+                            self.name(),
                             format_gmtime(until)
                         ));
                     }
                     Some(until) if now >= until => {
                         self.log(&format!(
                             "GC: reclaiming durable machine {} (TTL + grace expired)",
-                            self.config.instance
+                            self.name()
                         ));
                         let committed = match self.gate.write() {
                             Ok(_gate) => self.commit_release(record, "ttl-expired", false).ok(),
@@ -1359,7 +1422,15 @@ impl DurableMachine {
     /// that may take long runs on a background thread.
     pub fn startup(self: &Arc<Self>) {
         let record = self.current_record();
-        if let Some(record) = record {
+        if let Some(mut record) = record {
+            if record.get("granted_name").is_none() {
+                record["granted_name"] = json!(granted_name(&record));
+                if let Err(error) = self.write_record(&record) {
+                    self.log(&format!(
+                        "WARN: cannot migrate durable granted_name: {error}"
+                    ));
+                }
+            }
             let lease_id = record["lease_id"].as_str().unwrap_or_default().to_string();
             match record["state"].as_str().unwrap_or_default() {
                 "acquiring" => {
@@ -1396,7 +1467,7 @@ impl DurableMachine {
                     match self.lock.take(&self.holder(&record), unix_now()) {
                         Ok(()) => self.log(&format!(
                             "startup: durable lease {lease_id} on {} continues",
-                            self.config.instance
+                            self.name()
                         )),
                         Err(error) => self.log(&format!(
                             "WARN: startup: durable lease {lease_id} is current but the host lock is {error}"
@@ -1652,6 +1723,15 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+// MI-3: leases written before granted_name was introduced already persist
+// their original name; never substitute the daemon's current label.
+fn granted_name(record: &Value) -> &str {
+    record["granted_name"]
+        .as_str()
+        .or_else(|| record["name"].as_str())
+        .unwrap_or_default()
+}
+
 /// A lease ID as acquisition issues it: 32 lowercase hex characters.
 pub fn valid_lease_id(value: &str) -> bool {
     value.len() == 32
@@ -1680,7 +1760,7 @@ fn tail_chars(text: &str, max: usize) -> String {
     text.chars().skip(count - max).collect()
 }
 
-fn format_gmtime(seconds: f64) -> String {
+pub(super) fn format_gmtime(seconds: f64) -> String {
     // SAFETY: `gmtime_r` writes into a caller-provided `tm`.
     unsafe {
         let stamp = seconds as libc::time_t;

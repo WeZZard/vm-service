@@ -16,6 +16,31 @@ pub enum Scope {
     LocalOnly,
 }
 
+impl Scope {
+    /// Parse the discovery scope. Network discovery is the default; TL-2
+    /// tests explicitly restrict both advertisement and browsing to this Mac.
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "" | "network" => Ok(Self::Network),
+            "local-only" => Ok(Self::LocalOnly),
+            other => Err(format!(
+                "MACHINE_SERVICE_DISCOVERY_SCOPE must be network or local-only; got {other:?}"
+            )),
+        }
+    }
+
+    /// Read the common daemon/client test isolation setting (TL-2).
+    pub fn from_environment() -> Result<Self, String> {
+        match std::env::var("MACHINE_SERVICE_DISCOVERY_SCOPE") {
+            Ok(value) => Self::parse(&value),
+            Err(std::env::VarError::NotPresent) => Ok(Self::Network),
+            Err(std::env::VarError::NotUnicode(_)) => {
+                Err("MACHINE_SERVICE_DISCOVERY_SCOPE is not valid UTF-8".into())
+            }
+        }
+    }
+}
+
 /// A registered service; dropping it withdraws the advertisement.
 pub struct Advertisement {
     /// The name the system registered, which differs from the one asked for
@@ -556,6 +581,17 @@ mod mac {
 mod tests {
     use super::*;
 
+    /// TL-2: isolated discovery uses the same scope for the daemon and CLI.
+    #[test]
+    fn local_only_scope_is_explicit_and_network_is_default() {
+        assert_eq!(Scope::parse(""), Ok(Scope::Network));
+        assert_eq!(Scope::parse("network"), Ok(Scope::Network));
+        assert_eq!(Scope::parse("local-only"), Ok(Scope::LocalOnly));
+        assert!(Scope::parse("local")
+            .unwrap_err()
+            .contains("MACHINE_SERVICE_DISCOVERY_SCOPE"));
+    }
+
     /// A registration on this Mac only is found by a browse on this Mac only,
     /// with its port and TXT record, and is gone once withdrawn. Nothing is
     /// sent on any network.
@@ -563,7 +599,7 @@ mod tests {
     fn a_local_only_advertisement_is_browsed_resolved_and_withdrawn() {
         let service_type = "_machine-svc-test._tcp";
         let name = format!("discovery-test-{}", std::process::id());
-        let txt = crate::txt_entries(&name, &["durable"]);
+        let txt = crate::txt_entries(&name, "host-id", &["durable"]);
         let advertisement = register(
             &name,
             service_type,
