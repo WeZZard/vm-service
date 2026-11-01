@@ -87,6 +87,18 @@ fn tags(description: &Value) -> Vec<String> {
         .collect()
 }
 
+/// AC-54/MI-4/DC-87: the real read-only installer command publishes the
+/// same hardware identity as the daemon and stores no host-name label.
+#[test]
+fn ac54_catalog_command_publishes_hardware_identity_without_name() {
+    let harness = Harness::new();
+    let (description, stderr) = describe(&harness, &["--expose-durable", "on"]);
+    let machine_id = machine_service_core::durable::capabilities::hardware_uuid().unwrap();
+    assert_eq!(description["meta"], json!({"machine_id": machine_id}));
+    assert!(description["meta"].get("instance").is_none());
+    assert!(stderr.contains("meta.machine_id"));
+}
+
 /// AC-37: a Mac with Tart, a configured line and its base VM, and durable
 /// exposure off, is tagged `vm` and `tart` and not `durable`.
 #[test]
@@ -116,11 +128,11 @@ fn ac37_tart_mac_is_tagged_vm_and_tart_without_durable() {
     assert!(stderr.contains("durable exposure: off"), "{stderr}");
     assert!(stderr.contains("pilot-base"), "{stderr}");
     assert!(!stderr.contains("loopback_only"), "{stderr}");
-    // AC-47, DC-80: the description states the instance ID that /health
-    // reports, the daemon's own derivation, whatever Consul names the node.
+    // MI-4/DC-87: the description uses the daemon's hardware identity,
+    // independent of the current host label and Consul node name.
     assert_eq!(
         description["meta"],
-        json!({"instance": machine_service_core::durable::config::instance_id()})
+        json!({"machine_id": machine_service_core::durable::capabilities::hardware_uuid().unwrap()})
     );
 }
 
