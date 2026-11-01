@@ -432,15 +432,15 @@ fn cl3_lease_commands_go_to_the_owner() {
         .any(|seen| seen.starts_with("/machines/pilot-remote-3c4d/files?path=/tmp/b")));
 }
 
-/// AC-47, DC-80: 192.168.50.3's Consul node is `mac-mini-m4-pro` and its
-/// own name `Mac-mini`. Its registration states `Mac-mini`, so the list
+/// AC-47, DC-80: 192.0.2.10's Consul node is `catalog-node-a` and its
+/// own name `Mac-A`. Its registration states `Mac-A`, so the list
 /// shows it once, under its own name, with its Consul health, and says
-/// nothing about a fallback.
+/// that its legacy description needs a permanent identity.
 #[test]
 fn ac47_a_mac_whose_node_name_differs_is_listed_once_by_its_own_name() {
-    let (local, consul) = this_mac("Mac-mini", |port| {
-        let mut row = unstated("mac-mini-m4-pro", port, "passing");
-        row["Service"]["Meta"]["instance"] = json!("Mac-mini");
+    let (local, consul) = this_mac("Mac-A", |port| {
+        let mut row = unstated("catalog-node-a", port, "passing");
+        row["Service"]["Meta"]["instance"] = json!("Mac-A");
         vec![row]
     });
     let home = tempfile::tempdir().unwrap();
@@ -451,17 +451,21 @@ fn ac47_a_mac_whose_node_name_differs_is_listed_once_by_its_own_name() {
     let rows: Vec<&str> = table.lines().skip(1).collect();
     assert_eq!(rows.len(), 1, "{table}");
     assert!(
-        rows[0].starts_with("Mac-mini ") && rows[0].contains("macos26"),
+        rows[0].starts_with("Mac-A ") && rows[0].contains("macos26"),
         "{table}"
     );
-    assert!(!table.contains("mac-mini-m4-pro"), "{table}");
-    assert!(!stderr(&output).contains("note:"), "{}", stderr(&output));
+    assert!(!table.contains("catalog-node-a"), "{table}");
+    assert!(
+        stderr(&output).contains("no machine_id"),
+        "{}",
+        stderr(&output)
+    );
 
     let output = run_machctl(&["list", "--json"], home.path(), local.port, &consul.base());
     let list: Value = serde_json::from_slice(&output.stdout).unwrap();
     let list = list.as_array().unwrap();
     assert_eq!(list.len(), 1, "{list:?}");
-    assert_eq!(list[0]["instance"], "Mac-mini");
+    assert_eq!(list[0]["instance"], "Mac-A");
     assert_eq!(list[0]["local"], true);
     assert_eq!(list[0]["consul"], "passing");
 }
@@ -494,14 +498,14 @@ fn ac47_a_registration_without_metadata_falls_back_to_the_node_name_and_says_so(
         "{errors}"
     );
 
-    let (local, consul) = this_mac("Mac-mini", |port| {
-        vec![unstated("mac-mini-m4-pro", port, "passing")]
+    let (local, consul) = this_mac("Mac-A", |port| {
+        vec![unstated("catalog-node-a", port, "passing")]
     });
     let output = run_machctl(&["list", "--json"], home.path(), local.port, &consul.base());
     let list: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(list.as_array().unwrap().len(), 2, "{list:?}");
     assert!(
-        stderr(&output).contains("Consul node mac-mini-m4-pro"),
+        stderr(&output).contains("Consul node catalog-node-a"),
         "{}",
         stderr(&output)
     );
@@ -545,7 +549,8 @@ fn list_json(mode: Option<&str>, consul: &Fake) -> (Vec<Value>, String) {
         .env("HOME", home.path())
         .env("PATH", "/usr/bin:/bin")
         .env("MACHINE_SERVICE_PORT", closed_port().to_string())
-        .env("CONSUL_HTTP_ADDR", consul.base());
+        .env("CONSUL_HTTP_ADDR", consul.base())
+        .env("MACHINE_SERVICE_DISCOVERY_SCOPE", "local-only");
     if let Some(mode) = mode {
         command.env("MACHINE_SERVICE_DISCOVERY", mode);
     }
@@ -630,4 +635,253 @@ fn an_unknown_discovery_mode_is_refused() {
         "{}",
         stderr(&output)
     );
+}
+
+/// MI-5/DC-90: permanent identity confirms a rename, and a mismatched
+/// permanent identity remains unreachable even when the label agrees.
+#[test]
+fn mi5_machine_identity_confirms_renames_and_refuses_impostors() {
+    let home = tempfile::tempdir().unwrap();
+    for (advertised_id, reachable) in [("machine-a", true), ("machine-other", false)] {
+        let remote = Fake::new(vec![
+            (
+                "/health",
+                json!({"service":"machine-service", "instance":"Mac-B", "machine_id":"machine-a"}),
+            ),
+            (
+                "/machines",
+                json!({"machines":{"Mac-B":{"kind":"durable"}}}),
+            ),
+        ]);
+        let mut row = registration("Mac-A", remote.port, "passing");
+        row["Service"]["Meta"]["machine_id"] = json!(advertised_id);
+        let consul = Fake::new(vec![("/v1/health/service/machine-service", json!([row]))]);
+        let output = run_machctl(
+            &["list", "--json"],
+            home.path(),
+            closed_port(),
+            &consul.base(),
+        );
+        let listed: Vec<Value> = serde_json::from_slice(&output.stdout).unwrap();
+        let found = listed
+            .iter()
+            .find(|row| row["found_by"] == "consul")
+            .unwrap();
+        assert_eq!(found["reachable"], reachable, "{found}");
+        if reachable {
+            assert_eq!(found["instance"], "Mac-B");
+            assert_eq!(found["machine_id"], "machine-a");
+        } else {
+            let error = found["error"].as_str().unwrap();
+            assert!(
+                error.contains("machine-a") && error.contains("machine-other"),
+                "{error}"
+            );
+        }
+    }
+}
+
+/// MI-1/MI-5: a label change cannot duplicate the local instance, and a
+/// former label still selects its owner with an explanation.
+#[test]
+fn mi5_deduplicates_by_machine_and_port_and_resolves_former_names() {
+    let home = tempfile::tempdir().unwrap();
+    let local = Fake::new(vec![
+        (
+            "/health",
+            json!({"service":"machine-service", "instance":"Mac-B", "machine_id":"machine-a", "former_names":[{"name":"Mac-A", "renamed_at":1}]}),
+        ),
+        (
+            "/machines",
+            json!({"machines":{"Mac-B":{"kind":"durable"},"pilot-test":{"kind":"virtual"}}}),
+        ),
+        ("/machines/pilot-test", json!({"name":"pilot-test"})),
+    ]);
+    let mut row = unstated("catalog-node", local.port, "passing");
+    row["Service"]["Meta"]["machine_id"] = json!("machine-a");
+    let consul = Fake::new(vec![("/v1/health/service/machine-service", json!([row]))]);
+    let output = run_machctl(&["list", "--json"], home.path(), local.port, &consul.base());
+    let listed: Vec<Value> = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    assert_eq!(listed[0]["instance"], "Mac-B");
+    assert!(!stderr(&output).contains("catalog-description"));
+    let output = run_machctl(
+        &["status", "pilot-test@Mac-A"],
+        home.path(),
+        local.port,
+        &consul.base(),
+    );
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("Mac-A was renamed Mac-B"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+/// MI-5/DC-90: a saved durable lease follows permanent identity, but every
+/// request keeps the name under which the lease was granted.
+#[test]
+fn mi5_saved_durable_lease_keeps_granted_name_after_a_rename() {
+    for (requested_name, history) in [("Mac-B", true), ("Mac-A", false)] {
+        let home = tempfile::tempdir().unwrap();
+        let remote = Fake::new(vec![
+            (
+                "/health",
+                json!({"service":"machine-service", "instance":"Mac-B", "machine_id":"machine-a", "former_names":if history {json!([{"name":"Mac-A", "renamed_at":1}])} else {json!([])}}),
+            ),
+            (
+                "/machines",
+                json!({"machines":{"Mac-B":{"kind":"durable","lease_id":"lease-a", "granted_name":"Mac-A"}}}),
+            ),
+            (
+                "/machines/Mac-A/exec",
+                json!({"rc":0,"output":"kept granted name"}),
+            ),
+        ]);
+        let mut row = unstated("catalog-node", remote.port, "passing");
+        row["Service"]["Meta"]["machine_id"] = json!("machine-a");
+        let consul = Fake::new(vec![("/v1/health/service/machine-service", json!([row]))]);
+        let state = home.path().join(".local/state/machine-service");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::write(state.join("cli-leases.json"), json!({"schema_version":2,"leases":[{"machine":"Mac-A","instance":"http://192.0.2.1:6240","machine_id":"machine-a","lease_id":"lease-a","granted_name":"Mac-A"}]}).to_string()).unwrap();
+        let output = run_machctl(
+            &["exec", requested_name, "--", "true"],
+            home.path(),
+            closed_port(),
+            &consul.base(),
+        );
+        assert!(output.status.success(), "{}", stderr(&output));
+        assert!(remote.asked("/machines/Mac-A/exec"));
+        assert!(stdout(&output).contains("kept granted name"));
+    }
+}
+
+/// MI-4/MI-5: a legacy Consul registration remains usable, with a concrete
+/// instruction to replace its name-based description.
+#[test]
+fn mi5_legacy_consul_description_requests_a_refresh() {
+    let (local, consul) = this_mac("Mac-A", |port| vec![registration("Mac-A", port, "passing")]);
+    let home = tempfile::tempdir().unwrap();
+    let output = run_machctl(&["list"], home.path(), local.port, &consul.base());
+    assert!(output.status.success());
+    let note = stderr(&output);
+    assert!(
+        note.contains("no machine_id")
+            && note.contains("reinstall")
+            && note.contains("catalog-description"),
+        "{note}"
+    );
+}
+
+/// MI-5/DC-90: qualifying a command cannot bypass a failed confirmation.
+#[test]
+fn mi5_qualified_command_never_reaches_an_impostor() {
+    let home = tempfile::tempdir().unwrap();
+    let remote = Fake::new(vec![
+        (
+            "/health",
+            json!({"service":"machine-service", "instance":"Mac-A", "machine_id":"other-machine"}),
+        ),
+        (
+            "/machines/Mac-A/exec",
+            json!({"rc":0,"output":"should not execute"}),
+        ),
+    ]);
+    let mut row = registration("Mac-A", remote.port, "passing");
+    row["Service"]["Meta"]["machine_id"] = json!("machine-a");
+    let consul = Fake::new(vec![("/v1/health/service/machine-service", json!([row]))]);
+    let output = run_machctl(
+        &["exec", "Mac-A@Mac-A", "--lease-id", "lease-a", "--", "true"],
+        home.path(),
+        closed_port(),
+        &consul.base(),
+    );
+    assert!(!output.status.success());
+    assert!(!remote.asked("/machines/Mac-A/exec"));
+    assert!(stderr(&output).contains("other-machine"));
+}
+
+/// MI-1/MI-5: reusing a former label cannot redirect or make an existing
+/// lease ambiguous; its permanent key still identifies its owner.
+#[test]
+fn mi5_saved_identity_wins_when_another_machine_reuses_the_label() {
+    let home = tempfile::tempdir().unwrap();
+    let owner = Fake::new(vec![
+        (
+            "/health",
+            json!({"service":"machine-service", "instance":"Mac-B", "machine_id":"machine-a", "former_names":[]}),
+        ),
+        (
+            "/machines",
+            json!({"machines":{"Mac-B":{"kind":"durable","lease_id":"lease-a","granted_name":"Mac-A"}}}),
+        ),
+        ("/machines/Mac-A/exec", json!({"rc":0,"output":"owner"})),
+    ]);
+    let other = Fake::new(vec![
+        (
+            "/health",
+            json!({"service":"machine-service", "instance":"Mac-A", "machine_id":"machine-other"}),
+        ),
+        (
+            "/machines",
+            json!({"machines":{"Mac-A":{"kind":"durable","lease_id":"lease-other"}}}),
+        ),
+        (
+            "/machines/Mac-A/exec",
+            json!({"rc":0,"output":"wrong owner"}),
+        ),
+    ]);
+    let mut row = unstated("catalog-owner", owner.port, "passing");
+    row["Service"]["Meta"]["machine_id"] = json!("machine-a");
+    let mut other_row = unstated("catalog-other", other.port, "passing");
+    other_row["Service"]["Meta"]["machine_id"] = json!("machine-other");
+    let consul = Fake::new(vec![(
+        "/v1/health/service/machine-service",
+        json!([row, other_row]),
+    )]);
+    let state = home.path().join(".local/state/machine-service");
+    std::fs::create_dir_all(&state).unwrap();
+    std::fs::write(state.join("cli-leases.json"), json!({"schema_version":2,"leases":[{"machine":"Mac-A","instance":"http://192.0.2.1:6240","machine_id":"machine-a","lease_id":"lease-a","granted_name":"Mac-A"}]}).to_string()).unwrap();
+    for name in ["Mac-A", "Mac-A@Mac-A"] {
+        let output = run_machctl(
+            &["exec", name, "--", "true"],
+            home.path(),
+            closed_port(),
+            &consul.base(),
+        );
+        assert!(output.status.success(), "{}", stderr(&output));
+        assert_eq!(stdout(&output), "owner");
+    }
+    assert!(!other.asked("/machines/Mac-A/exec"));
+}
+
+/// MI-5/DC-90: a health reply without machine_id falls back to the known
+/// label; a permanent-only registration cannot accept an unrelated label.
+#[test]
+fn mi5_missing_health_identity_uses_the_legacy_name_check() {
+    let home = tempfile::tempdir().unwrap();
+    let remote = Fake::new(vec![
+        (
+            "/health",
+            json!({"service":"machine-service", "instance":"Mac-B"}),
+        ),
+        ("/machines", json!({"machines":{}})),
+    ]);
+    let mut row = unstated("Mac-A", remote.port, "passing");
+    row["Service"]["Meta"]["machine_id"] = json!("machine-a");
+    let consul = Fake::new(vec![("/v1/health/service/machine-service", json!([row]))]);
+    let output = run_machctl(
+        &["list", "--json"],
+        home.path(),
+        closed_port(),
+        &consul.base(),
+    );
+    let listed: Vec<Value> = serde_json::from_slice(&output.stdout).unwrap();
+    let found = listed
+        .iter()
+        .find(|row| row["found_by"] == "consul")
+        .unwrap();
+    assert_eq!(found["reachable"], false, "{found}");
+    assert!(!remote.asked("/machines"));
 }

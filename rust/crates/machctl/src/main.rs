@@ -418,6 +418,9 @@ fn main() {
     // Whether the machine's owner is this Mac's own instance; push and pull
     // to any other send the bytes (FD-4, DC-70).
     let mut owner_is_local = true;
+    let requested_lease = lease_argument(&cli.cmd);
+    let mut remembered_lease = None;
+    let mut routed = false;
     if let Some(name) = machine_argument(&mut cli.cmd) {
         if environment.is_some() {
             if federation::split_name(name).1.is_some() {
@@ -426,10 +429,36 @@ fn main() {
                 );
             }
         } else {
-            match federation::route(&federation_settings(true), name) {
+            let hint = requested_lease.as_ref().and_then(|(_, given)| {
+                leases::path().and_then(|path| {
+                    leases::resolve(
+                        &path,
+                        federation::split_name(name).0,
+                        &base,
+                        None,
+                        given.as_deref(),
+                    )
+                })
+            });
+            match federation::route_lease(&federation_settings(true), name, hint.as_ref()) {
                 Ok(route) => {
                     owner_is_local = route.local;
-                    *name = route.machine;
+                    routed = true;
+                    if let Some((_, given)) = &requested_lease {
+                        remembered_lease = leases::path().and_then(|path| {
+                            leases::resolve(
+                                &path,
+                                federation::split_name(name).0,
+                                &route.base,
+                                route.machine_id.as_deref(),
+                                given.as_deref().or(route.lease_id.as_deref()),
+                            )
+                        });
+                    }
+                    *name = remembered_lease
+                        .as_ref()
+                        .and_then(|lease| lease.granted_name.clone())
+                        .unwrap_or(route.machine);
                     base = route.base;
                 }
                 Err(error) => {
@@ -444,7 +473,17 @@ fn main() {
     // The lease a lease command acts under: `--lease-id`, or the one this
     // CLI remembered for the machine on its owner (CL-3, DC-72).
     let lease_id = lease_argument(&cli.cmd).map(|(vm, given)| {
-        given.or_else(|| leases::path().and_then(|path| leases::find(&path, &vm, &base)))
+        given
+            .or_else(|| {
+                remembered_lease
+                    .as_ref()
+                    .map(|lease| lease.lease_id.clone())
+            })
+            .or_else(|| {
+                (!routed)
+                    .then(|| leases::path().and_then(|path| leases::find(&path, &vm, &base)))
+                    .flatten()
+            })
     });
     let lease_id: Option<String> = lease_id.flatten();
 
@@ -1009,13 +1048,15 @@ fn durable_body(args: &AcquireArgs, machine: &str) -> Map<String, Value> {
 
 /// The base URL of the instance `wanted` names (`--instance`, FD-2).
 fn instance_base(settings: &federation::Settings, wanted: &str) -> String {
-    let mut merged = federation::discover(settings);
-    if let Err(error) = federation::select(&mut merged, wanted) {
+    let merged = federation::gather(settings, Some(wanted)).unwrap_or_else(|error| {
         eprintln!("machctl: {error}");
         std::process::exit(1);
+    });
+    for note in &merged.notes {
+        eprintln!("machctl: note: {note}");
     }
     let owner = &merged.instances[0];
-    if let Some(reason) = &owner.unaskable {
+    if let Some(reason) = owner.unaskable.as_ref().or(owner.error.as_ref()) {
         eprintln!(
             "machctl: instance {} cannot be reached: {reason}",
             owner.label
@@ -1165,6 +1206,33 @@ fn remember_lease(resp: &Value, owner: &str) {
         machine: machine.to_string(),
         instance: owner.to_string(),
         lease_id: lease_id.to_string(),
+        // MI-5/DC-90: older virtual acquisition replies omit the owner ID;
+        // health supplies it without writing an operator label into the key.
+        machine_id: resp
+            .get("machine_id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                http::get_json(
+                    &format!("{owner}/health"),
+                    federation::INSTANCE_TIMEOUT,
+                    &[],
+                )
+                .ok()
+                .filter(|(status, _)| *status == 200)
+                .and_then(|(_, health)| {
+                    health
+                        .get("machine_id")
+                        .and_then(Value::as_str)
+                        .filter(|id| !id.is_empty())
+                        .map(str::to_string)
+                })
+            }),
+        granted_name: resp
+            .get("granted_name")
+            .and_then(Value::as_str)
+            .map(str::to_string),
     };
     if let Err(error) = leases::remember(&path, lease) {
         eprintln!("machctl: warning: could not remember lease {lease_id}: {error}");
