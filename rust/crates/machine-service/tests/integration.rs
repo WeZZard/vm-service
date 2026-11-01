@@ -654,7 +654,7 @@ fn test_vms_snapshot_includes_limits() {
 #[test]
 fn test_list_empty() {
     let live = Live::new();
-    let output = live.machctl_ok(&["list"]);
+    let output = live.machctl_ok(&["list", "--local"]);
     // CL-1, MM-3: with no lease the instance lists its two offers.
     let text = String::from_utf8_lossy(&output.stdout);
     let lines: Vec<&str> = text.lines().collect();
@@ -668,10 +668,10 @@ fn test_list_empty() {
 #[test]
 fn test_list_json() {
     let live = Live::new();
-    let output = live.machctl_ok(&["list", "--json"]);
+    let output = live.machctl_ok(&["list", "--local", "--json"]);
     let parsed: Value = serde_json::from_slice(&output.stdout).expect("list json");
-    // CL-1: one object per instance; Consul is unreachable in the fixture,
-    // so the local instance is the only one.
+    // CL-1, TL-2: explicit local scope keeps real LAN instances out of
+    // this fixture, regardless of the default discovery mode.
     let instances = parsed.as_array().expect("one object per instance");
     assert_eq!(instances.len(), 1, "{parsed}");
     assert_eq!(instances[0]["local"], true);
@@ -733,7 +733,7 @@ fn test_acquire_and_list() {
     ]);
     let record: Value = serde_json::from_slice(&output.stdout).expect("acquire json");
     assert_eq!(record["state"], "running");
-    let output = live.machctl_ok(&["list"]);
+    let output = live.machctl_ok(&["list", "--local"]);
     let text = String::from_utf8_lossy(&output.stdout);
     let vm = record["vm"].as_str().expect("vm");
     let row = text

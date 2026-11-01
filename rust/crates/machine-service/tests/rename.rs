@@ -111,7 +111,7 @@ fn ac35_old_paths_are_gone_and_machines_serves_their_operations() {
     assert_eq!(one.status, 200);
     assert_eq!(one.body["vm"], json!(vm));
 
-    let output = run_machctl(&["list"], &fixture.machctl_env());
+    let output = run_machctl(&["list", "--local"], &fixture.machctl_env());
     assert!(
         output.status.success(),
         "{}",

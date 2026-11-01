@@ -223,7 +223,7 @@ fn ac41_a_broken_line_keeps_the_last_good_list_and_is_loud() {
     let machines = fixture.request("GET", "/machines", None);
     assert_eq!(machines.body["catalog"]["status"], "stale");
 
-    let listing = common::run_machctl(&["list"], &fixture.machctl_env());
+    let listing = common::run_machctl(&["list", "--local"], &fixture.machctl_env());
     let text = String::from_utf8_lossy(&listing.stdout);
     // CL-1: the warning stands above its instance's rows, under the header,
     // and names the instance.
