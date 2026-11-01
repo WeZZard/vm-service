@@ -116,7 +116,7 @@ impl DurableConfig {
         let disk_warn_bytes = parse_disk_warn(std::env::var(DISK_WARN_VARIABLE).ok().as_deref())?;
         Ok(Self {
             exposed,
-            instance: instance_id(),
+            instance: read_instance_name()?,
             workspace_root: home.join("machine-service/leases"),
             ci_root: home.join("actions-runner"),
             home,
@@ -202,9 +202,26 @@ is host-wide at {HOST_LOCK_DIR}"
     }
 }
 
-/// The instance ID: the Mac's local host name, which is its Consul node
-/// name (MM-2). Falls back to the short host name when `scutil` cannot
-/// answer.
+/// Read the live label from the single name-source seam, or macOS (MI-2).
+/// An unreadable or empty test source never falls back to the real Mac's name.
+pub fn read_instance_name() -> Result<String, String> {
+    if let Some(path) =
+        std::env::var_os("MACHINE_SERVICE_NAME_FILE").filter(|path| !path.is_empty())
+    {
+        let name = std::fs::read_to_string(&path)
+            .map_err(|error| format!("cannot read MACHINE_SERVICE_NAME_FILE: {error}"))?;
+        let name = name.trim();
+        if name.is_empty() || name.contains(['/', '\n', '\r', '\0']) {
+            return Err(
+                "MACHINE_SERVICE_NAME_FILE must contain one nonempty host name".to_string(),
+            );
+        }
+        return Ok(name.to_string());
+    }
+    Ok(instance_id())
+}
+
+/// The Mac's local host name (MM-2), falling back to the short host name.
 pub fn instance_id() -> String {
     let scutil = std::process::Command::new("/usr/sbin/scutil")
         .args(["--get", "LocalHostName"])

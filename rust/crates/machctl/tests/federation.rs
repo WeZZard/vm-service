@@ -525,7 +525,7 @@ fn advertised(advertise_as: &str, answers: &str) -> (discovery::dnssd::Advertise
         advertise_as,
         discovery::SERVICE_TYPE,
         fake.port,
-        &discovery::txt_entries(advertise_as, &["durable"]),
+        &discovery::txt_entries(advertise_as, "", &["durable"]),
         discovery::dnssd::Scope::LocalOnly,
         std::time::Duration::from_secs(5),
     )

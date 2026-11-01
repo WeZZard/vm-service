@@ -5,7 +5,7 @@
 //! client alike: `bonjour`, the default, or `consul`. In Bonjour mode each
 //! instance advertises `_machine-service._tcp` through the Mac's own DNS-SD
 //! service, named by its instance ID, with `txtvers=1`, `instance` and
-//! `kinds` in its TXT record (DNS-SD, RFC 6763, over Multicast DNS, RFC
+//! `machine_id` and `kinds` in its TXT record (MI-1/DC-87; DNS-SD, RFC 6763, over Multicast DNS, RFC
 //! 6762), and clients browse for it. In Consul mode the daemon advertises
 //! nothing and clients ask the Consul agent.
 
@@ -75,12 +75,14 @@ pub fn is_loopback_host(host: &str) -> bool {
             .is_ok_and(|address| address.is_loopback())
 }
 
-/// The TXT record an instance advertises: `txtvers`, `instance` and `kinds`
-/// joined by commas, and nothing else (DC-85).
-pub fn txt_entries(instance: &str, kinds: &[&str]) -> Vec<(String, String)> {
+/// The TXT record an instance advertises: a stable machine ID, its current
+/// name, and its kinds joined by commas (MI-1/DC-87). Adding an optional key
+/// keeps `txtvers=1`, so older browsers continue to read the record.
+pub fn txt_entries(instance: &str, machine_id: &str, kinds: &[&str]) -> Vec<(String, String)> {
     vec![
         ("txtvers".to_string(), TXT_VERSION.to_string()),
         ("instance".to_string(), instance.to_string()),
+        ("machine_id".to_string(), machine_id.to_string()),
         ("kinds".to_string(), kinds.join(",")),
     ]
 }
@@ -154,6 +156,12 @@ impl Found {
             .unwrap_or(&self.name)
     }
 
+    /// The permanent machine identity, absent on older advertisements
+    /// (MI-1/DC-87).
+    pub fn machine_id(&self) -> Option<&str> {
+        self.txt_value("machine_id").filter(|id| !id.is_empty())
+    }
+
     /// The kinds it advertises.
     pub fn kinds(&self) -> Vec<String> {
         self.txt_value("kinds")
@@ -178,6 +186,33 @@ impl Found {
 mod tests {
     use super::*;
 
+    /// MI-1/DC-87: identity travels beside the mutable label without
+    /// changing the TXT protocol version.
+    #[test]
+    fn mi1_txt_contains_machine_identity_and_keeps_version_one() {
+        let machine_id = "00000000-0000-4000-8000-000000000001";
+        let entries = txt_entries("Mac-A", machine_id, &["durable"]);
+        let found = Found {
+            name: "Mac-A".into(),
+            host: "Mac-A.local.".into(),
+            address: None,
+            port: 6240,
+            txt: decode_txt(&encode_txt(&entries).unwrap()),
+        };
+        assert_eq!(found.machine_id(), Some(machine_id));
+        assert_eq!(found.txt_value("txtvers"), Some("1"));
+        assert_eq!(found.instance(), "Mac-A");
+        assert_eq!(found.kinds(), ["durable"]);
+        assert_eq!(
+            Found {
+                txt: Vec::new(),
+                ..found
+            }
+            .machine_id(),
+            None
+        );
+    }
+
     #[test]
     fn mode_defaults_to_bonjour_and_refuses_anything_else() {
         assert_eq!(Mode::parse("").unwrap(), Mode::Bonjour);
@@ -200,11 +235,12 @@ mod tests {
 
     #[test]
     fn the_txt_record_round_trips_and_says_nothing_else() {
-        let entries = txt_entries("Mac-A", &["durable", "virtual"]);
+        let entries = txt_entries("Mac-A", "host-id", &["durable", "virtual"]);
         let record = encode_txt(&entries).unwrap();
         assert_eq!(
             record,
-            b"\x09txtvers=1\x0einstance=Mac-A\x15kinds=durable,virtual".to_vec()
+            b"\x09txtvers=1\x0einstance=Mac-A\x12machine_id=host-id\x15kinds=durable,virtual"
+                .to_vec()
         );
         assert_eq!(decode_txt(&record), entries);
         assert!(encode_txt(&[("k".into(), "v".repeat(300))]).is_err());
@@ -228,7 +264,7 @@ mod tests {
             host: "Mac-A.local.".into(),
             address: Some("192.0.2.4".parse().unwrap()),
             port: 6240,
-            txt: txt_entries("Mac-A", &["durable"]),
+            txt: txt_entries("Mac-A", "host-id", &["durable"]),
         };
         assert_eq!(found.instance(), "Mac-A");
         assert_eq!(found.kinds(), vec!["durable".to_string()]);

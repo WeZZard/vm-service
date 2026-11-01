@@ -30,7 +30,8 @@
   - answers the new name in `/health` and `/machines` from then on;
   - remembers the old name as a former name (MI-3);
   - logs the old and the new name.
-- When the subscription cannot be made, the daemon reads the name every 30 seconds instead and acts the same way on a change.
+- The daemon also reads the name every 30 seconds, so a failed subscription or a missed notification follows the same change path.
+- TL-2 tests set `MACHINE_SERVICE_NAME_FILE` to a UTF-8 file containing the local host name and set `MACHINE_SERVICE_NAME_POLL_MS` to a positive polling interval in milliseconds. Startup and every notification or poll read the same source. An unreadable or empty file does not replace a valid name. Tests edit this file and never change the real Mac's host name (DC-91).
 - The host name inside the advertisement's address record, such as `Mac-A.local.`, is already renamed by the system's DNS-SD service; the daemon does nothing for it.
 - No restart is needed, and a restart after a rename behaves the same as a live rename (MI-3).
 
@@ -40,7 +41,7 @@
 - The `granted_name` is the name at the moment the lease is granted. A lease that sees two renames keeps the name it began with.
 - New acquisitions use the current name only.
 - The daemon keeps its former names, each with the time it was left, in its state directory, for 7 days. A request or an acquisition for a former name outside a held lease is refused with 404, and the message names the current name: `Mac-A was renamed Mac-B on 2026-11-01; use Mac-B`.
-- `/health` lists the former names under `former_names`, so a client can resolve an instance that is named by its old name, such as `<vm>@Mac-A`.
+- `/health` lists the former names under `former_names`, an array of objects with `name` and `renamed_at` (Unix seconds). A client can resolve an instance named by its old name, such as `<vm>@Mac-A`. The state directory also records the last observed current name, so a rename while the daemon is stopped produces the same former-name history when it starts. A lease written before `granted_name` existed uses its persisted `name` as the granted name (DC-91).
 
 ## MI-4: Consul registration
 

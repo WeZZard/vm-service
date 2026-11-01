@@ -30,7 +30,7 @@ pub fn install(service: &Service) -> Result<(), String> {
         probe,
     )?;
     let exposed = config.exposed;
-    let machine = Arc::new(DurableMachine::new(config));
+    let machine = Arc::new(DurableMachine::new(config)?);
     machine.startup();
     if exposed {
         service.log(&format!(
@@ -65,16 +65,25 @@ fn answer(reply_value: Reply) -> Option<(u16, Value)> {
 
 /// Add `instance` and `kinds` to the `/health` answer (FD-1).
 pub fn health(body: &mut Value, virtual_kind: bool) {
-    let Some((instance, kinds)) = identity(virtual_kind) else {
+    let Some((instance, _, kinds)) = identity(virtual_kind) else {
         return;
     };
     body["instance"] = json!(instance);
     body["kinds"] = json!(kinds);
+    // MI-1 / DC-87: virtual-only instances report hardware identity too.
+    if let Some(machine) = machine() {
+        let (name, former_names) = machine
+            .identity
+            .snapshot(machine_service_core::config::unix_now());
+        body["instance"] = json!(name);
+        body["machine_id"] = json!(machine.machine_id);
+        body["former_names"] = former_names;
+    }
 }
 
 /// The instance ID and the kinds it offers, as `/health` states them and the
 /// Bonjour advertisement carries them (FD-1, DC-85).
-pub fn identity(virtual_kind: bool) -> Option<(String, Vec<&'static str>)> {
+pub fn identity(virtual_kind: bool) -> Option<(String, String, Vec<&'static str>)> {
     let machine = machine()?;
     let mut kinds = Vec::new();
     if machine.exposed() {
@@ -83,17 +92,23 @@ pub fn identity(virtual_kind: bool) -> Option<(String, Vec<&'static str>)> {
     if virtual_kind {
         kinds.push("virtual");
     }
-    Some((machine.name().to_string(), kinds))
+    Some((
+        machine.name().to_string(),
+        machine.machine_id.clone().unwrap_or_default(),
+        kinds,
+    ))
 }
 
 /// Mark the virtual machines' records and list the durable machine in the
 /// `/machines` answer (MM-1, MM-3).
 pub fn extend_machines(body: &mut Value) {
     let Some(machine) = machine() else { return };
+    let name = machine.name();
     if let Some(offers) = body.get_mut("offers").and_then(Value::as_array_mut) {
         for offer in offers.iter_mut() {
             if let Some(object) = offer.as_object_mut() {
-                object.insert("instance".to_string(), json!(machine.name()));
+                object.insert("instance".to_string(), json!(name));
+                object.insert("machine_id".to_string(), json!(machine.machine_id));
             }
         }
     }
@@ -103,11 +118,15 @@ pub fn extend_machines(body: &mut Value) {
     for record in machines.values_mut() {
         if let Some(object) = record.as_object_mut() {
             object.insert("kind".to_string(), json!("virtual"));
-            object.insert("instance".to_string(), json!(machine.name()));
+            object.insert("instance".to_string(), json!(name));
+            object.insert("machine_id".to_string(), json!(machine.machine_id));
         }
     }
     if machine.exposed() {
-        machines.insert(machine.name().to_string(), machine.machine_record());
+        let mut record = machine.machine_record();
+        record["name"] = json!(name);
+        record["instance"] = json!(name);
+        machines.insert(name, record);
     }
 }
 
@@ -124,15 +143,20 @@ pub fn get(path: &str) -> Option<(u16, Value)> {
     let rest = path.strip_prefix("/machines/")?;
     let mut segments = rest.split('/');
     let name = segments.next()?;
-    if name != machine.name() {
+    if !machine.owns_name(name) {
         return None;
     }
     if !machine.exposed() {
-        return answer(machine.not_exposed());
+        return answer(if name == machine.name() {
+            machine.not_exposed()
+        } else {
+            machine.unknown_name(name)
+        });
     }
     let tail: Vec<&str> = segments.collect();
     match tail.as_slice() {
-        [] => reply((200, machine.machine_record())),
+        [] if name == machine.name() => reply((200, machine.machine_record())),
+        [] => answer(machine.unknown_name(name)),
         ["leases", lease_id, "hygiene"] => answer(machine.hygiene(name, lease_id)),
         _ => reply((404, json!({"error": "not found"}))),
     }
@@ -151,11 +175,15 @@ pub fn post(path: &str, body: &Value, loopback: bool) -> Option<(u16, Value)> {
     let rest = path.strip_prefix("/machines/")?;
     let mut segments = rest.split('/');
     let name = segments.next()?;
-    if name != machine.name() {
+    if !machine.owns_name(name) {
         return None;
     }
     if !machine.exposed() {
-        return answer(machine.not_exposed());
+        return answer(if name == machine.name() {
+            machine.not_exposed()
+        } else {
+            machine.unknown_name(name)
+        });
     }
     let action = segments.next().unwrap_or_default();
     if segments.next().is_some() && action != "console" {
@@ -167,7 +195,7 @@ pub fn post(path: &str, body: &Value, loopback: bool) -> Option<(u16, Value)> {
         "pull" => answer(machine.transfer(name, body, false, loopback)),
         "heartbeat" => answer(machine.heartbeat(name, body)),
         "release" => answer(machine.release(name, body)),
-        "refresh" => answer(machine.refresh(name)),
+        "refresh" => answer(machine.refresh(name, body)),
         // DM-9: the owner views a durable machine with Screen Sharing.
         "console" => reply((
             404,
@@ -182,11 +210,15 @@ pub fn post(path: &str, body: &Value, loopback: bool) -> Option<(u16, Value)> {
 /// before any byte is received.
 pub fn files_check(name: &str, body: &Value) -> Option<Result<(), (u16, Value)>> {
     let machine = machine()?;
-    if name != machine.name() {
+    if !machine.owns_name(name) {
         return None;
     }
     if !machine.exposed() {
-        let refused = machine.not_exposed();
+        let refused = if name == machine.name() {
+            machine.not_exposed()
+        } else {
+            machine.unknown_name(name)
+        };
         return Some(Err((refused.status, refused.body)));
     }
     Some(
@@ -207,4 +239,16 @@ pub fn files_transfer(name: &str, body: &Value, push: bool) -> (u16, Value) {
         }
         None => (404, json!({"error": "not found"})),
     }
+}
+
+/// Re-read the same source used at startup (MI-2 / DC-88).
+pub fn reread_name() -> Result<Option<(String, String)>, String> {
+    let Some(machine) = machine() else {
+        return Ok(None);
+    };
+    let next = machine_service_core::durable::config::read_instance_name()?;
+    machine
+        .identity
+        .rename(&next, machine_service_core::config::unix_now())
+        .map(|old| old.map(|old| (old, next)))
 }
