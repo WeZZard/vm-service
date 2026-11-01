@@ -34,7 +34,7 @@ flowchart TB
 ## MM-2: Identity
 
 - An **instance ID** is the Mac's own name, its local host name, and reported as `instance` in `/health` (DC-80). It is a label that follows the Mac live; the permanent identity is the machine ID, the Mac's hardware UUID, as [MI](identity.md) sets (DC-86 to DC-90).
-- The Consul node name is not the instance ID. It comes from the Consul agent's own configuration and need not equal the local host name: on 192.168.50.3 the node is `mac-mini-m4-pro` and the local host name is `Mac-mini`. An instance therefore states its ID in its Consul registration, and a client recognizes it by that ([FD-1](federation.md#fd-1-registration), [FD-2](federation.md#fd-2-discovery)).
+- The Consul node name is independent of the instance name. Current registrations state `machine_id`, and clients obtain the name from the confirmed `/health` response. Older registrations retain the name-based fallback ([MI-4](identity.md#mi-4-consul-registration), [FD-2](federation.md#fd-2-discovery)).
 - A durable machine's name is its instance ID. A Mac has one durable machine, so the name is unique on the intranet.
 - A virtual machine keeps today's name, `pilot-mac-<purpose>-<random>` or `pilot-<purpose>-<random>`. Two instances could create the same name, so the CLI qualifies a virtual machine as `<vm>@<instance>` whenever it lists more than one instance.
 - A durable machine also reports its `hardware_uuid`, the `IOPlatformUUID` of the Mac. A client can tell from it that a host name now belongs to another Mac.
@@ -45,7 +45,7 @@ flowchart TB
 ## MM-3: Capability report
 
 - A machine record carries every field that a virtual machine's lease record carries today: `name`, `lease_id`, `purpose`, `image`, `image_kind`, `state`, `created_at`, `ttl_hours`, `ttl_expires_at`, `grace_until`, `warned`, `env`, `ip`, `cpu`, `memory_mb`, `disk_gb` and `configuration`. A field with no meaning for a durable machine is `null`, such as `image`.
-- A machine record adds `kind` (`durable` or `virtual`), `instance` (the instance ID) and `capabilities`.
+- A machine record adds `kind` (`durable` or `virtual`), `instance` (the current name), `machine_id` (the hardware UUID) and `capabilities`.
 - `capabilities` is one object with a `schema_version` of 1 and the sections below. A fact that the instance could not observe is `null`, and its reason is listed in `unknown`. The instance never guesses a fact.
 
 | Section | Fields | Source on a durable machine |

@@ -359,3 +359,73 @@ fn cl3_remembered_lease_ids() {
     let text = std::fs::read_to_string(&file).expect("cli-leases.json");
     assert!(!text.contains("lease-vm"), "{text}");
 }
+
+/// MI-5/DC-90: virtual acquisition replies predating machine_id still save
+/// the owner identity from /health, so the remembered key survives renames.
+#[test]
+fn mi5_virtual_lease_saves_machine_identity_from_health() {
+    let intranet = Intranet::new();
+    let local = Fake::new(vec![
+        (
+            "/health",
+            200,
+            json!({"instance":"Mac-A","machine_id":"machine-a"}),
+        ),
+        (
+            "/acquire",
+            200,
+            json!({"vm":"pilot-test","lease_id":"lease-a","state":"running"}),
+        ),
+    ]);
+    let intranet = Intranet { local, ..intranet };
+    let output = intranet.run(&["acquire", "--purpose", "t", "--image", "macos26"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let saved: Value = serde_json::from_str(
+        &std::fs::read_to_string(intranet.home.path().join("state/cli-leases.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(saved["leases"][0]["machine_id"], "machine-a");
+}
+
+/// MI-4/MI-5: --instance resolves the current health name even when a
+/// permanent Consul description contains no name at all.
+#[test]
+fn mi5_image_acquisition_selects_current_name_from_permanent_registration() {
+    let intranet = Intranet::new();
+    let remote = Fake::new(vec![
+        (
+            "/health",
+            200,
+            json!({"instance":"Mac-B","machine_id":"machine-b"}),
+        ),
+        ("/machines", 200, json!({"machines":{}})),
+        (
+            "/acquire",
+            200,
+            json!({"vm":"pilot-test","lease_id":"lease-b","state":"running","machine_id":"machine-b"}),
+        ),
+    ]);
+    let mut row = registration("catalog-node", remote.port);
+    row["Service"]["Meta"]["machine_id"] = json!("machine-b");
+    let consul = Fake::new(vec![(
+        "/v1/health/service/machine-service",
+        200,
+        json!([row]),
+    )]);
+    let intranet = Intranet {
+        remote,
+        consul,
+        ..intranet
+    };
+    let output = intranet.run(&[
+        "acquire",
+        "--purpose",
+        "t",
+        "--image",
+        "macos26",
+        "--instance",
+        "Mac-B",
+    ]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(intranet.remote.acquisitions().len(), 1);
+}

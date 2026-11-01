@@ -50,6 +50,7 @@ pub fn to_json(merged: &Merged, filters: &Filters) -> Value {
         }
         let mut object = Map::new();
         object.insert("instance".into(), json!(instance.label));
+        object.insert("machine_id".into(), json!(instance.machine_id));
         object.insert("address".into(), json!(instance.address));
         object.insert("local".into(), json!(instance.local));
         object.insert("reachable".into(), json!(instance.reachable));
@@ -380,6 +381,8 @@ mod tests {
         Instance {
             label: label.to_string(),
             id: Some(label.to_string()),
+            machine_id: None,
+            former_names: Vec::new(),
             address: format!("http://192.0.2.1:6240/{label}"),
             local,
             consul: consul.map(str::to_string),

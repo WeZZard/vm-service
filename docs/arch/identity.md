@@ -55,7 +55,7 @@
 - **Confirming an instance.** A client confirms an instance it found by `machine_id`, which must match between the advertisement or registration and `/health`. A different name with the same `machine_id` is a rename, not an impostor: the client keeps the instance and uses the name `/health` answers. A different `machine_id` is still refused, as FD-2 sets.
 - **A second look.** When a client cannot find a named machine or instance, it browses once more after 2 seconds before it fails, to cover the moment between a goodbye and the new advertisement.
 - **Former names.** A client resolves an instance named by a former name through `former_names`, and says on standard error what the name became.
-- **Saved leases.** A client that remembers leases, such as `machctl`'s `cli-leases.json` (CL-3), keys them by machine ID and lease ID, and keeps addressing a durable lease by its `granted_name`.
+- **Saved leases.** A client that remembers leases, such as `machctl`'s `cli-leases.json` (CL-3), keys them by machine ID and lease ID, and keeps addressing a durable lease by its `granted_name`. The CLI writes schema version 2 with `machine_id` and `granted_name` beside the existing fields, and reads older entries compatibly. A remembered identity takes precedence when another Mac reuses its old name, and remains usable after the seven-day former-name history expires.
 - **No written names.** A consumer never writes a Mac's name or address into its code or configuration. It names an instance only as the operator gives it at run time, or as `machctl list --json` reports it.
 
 ## MI-6: What a rename does not change

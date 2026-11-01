@@ -38,7 +38,7 @@ pub type Browser = fn(Duration) -> Result<Vec<Found>, String>;
 pub fn bonjour(window: Duration) -> Result<Vec<Found>, String> {
     discovery::dnssd::browse(
         discovery::SERVICE_TYPE,
-        discovery::dnssd::Scope::Network,
+        discovery::dnssd::Scope::from_environment()?,
         window,
         RESOLVE_TIMEOUT,
     )
@@ -71,6 +71,10 @@ pub struct Instance {
     pub label: String,
     /// The instance ID (MM-2), when known.
     pub id: Option<String>,
+    /// Permanent hardware identity, confirmed by health (MI-5, DC-90).
+    pub machine_id: Option<String>,
+    /// Labels the instance previously used (MI-3, MI-5).
+    pub former_names: Vec<String>,
     /// The base URL the CLI asks.
     pub address: String,
     /// This is the local instance.
@@ -183,6 +187,8 @@ pub fn machines_of(body: &Value) -> Vec<Value> {
 /// What the local instance answered.
 struct LocalProbe {
     id: Option<String>,
+    machine_id: Option<String>,
+    former_names: Vec<String>,
     reachable: bool,
     error: Option<String>,
     body: Option<Value>,
@@ -206,9 +212,20 @@ fn probe_local(settings: &Settings) -> LocalProbe {
             .map(str::to_string),
         _ => None,
     };
+    let machine_id = health
+        .as_ref()
+        .ok()
+        .and_then(|(_, body)| text_field(body, "machine_id"));
+    let former_names = health
+        .as_ref()
+        .ok()
+        .map(|(_, body)| former_names(body))
+        .unwrap_or_default();
     if let Err(error) = health {
         return LocalProbe {
             id,
+            machine_id,
+            former_names,
             reachable: false,
             error: Some(error),
             body: None,
@@ -218,6 +235,8 @@ fn probe_local(settings: &Settings) -> LocalProbe {
         ask_machines(&settings.local_base, remaining(), &settings.local_headers);
     LocalProbe {
         id,
+        machine_id,
+        former_names,
         reachable,
         error,
         body,
@@ -337,6 +356,8 @@ pub fn discover(settings: &Settings) -> Merged {
     let mut local = Instance {
         label: local_id.clone().unwrap_or_else(|| "local".to_string()),
         id: local_id.clone(),
+        machine_id: probe.machine_id,
+        former_names: probe.former_names,
         address: settings.local_base.clone(),
         local: true,
         consul: None,
@@ -351,15 +372,25 @@ pub fn discover(settings: &Settings) -> Merged {
     let mut notes = Vec::new();
     for registration in registrations {
         let (id, stated) = identity(&registration);
-        if !stated {
+        if !stated && registration.machine_id.is_none() {
             notes.push(format!(
                 "the registration on Consul node {node} (port {port}) states no instance ID, so it is named {node} after its node, which need not be its Mac's name; place the description that `machine-service-install catalog-description` prints on that Mac (DC-80)",
                 node = registration.node,
                 port = registration.port
             ));
         }
+        if stated && registration.machine_id.is_none() {
+            notes.push(format!(
+                "the registration on Consul node {} (port {}) states no machine_id; reinstall or replace the description with `machine-service-install catalog-description` to follow renames (MI-4)", registration.node, registration.port
+            ));
+        }
         let same = local.consul.is_none()
-            && local_id.as_deref() == Some(id.as_str())
+            && same_identity(
+                local.machine_id.as_deref(),
+                registration.machine_id.as_deref(),
+                local_id.as_deref(),
+                &id,
+            )
             && local_port.is_none_or(|port| port == registration.port);
         if same {
             local.consul = Some(registration.status);
@@ -371,7 +402,12 @@ pub fn discover(settings: &Settings) -> Merged {
     for found in founds {
         let id = found.instance().to_string();
         let same = !seen_local
-            && local_id.as_deref() == Some(id.as_str())
+            && same_identity(
+                local.machine_id.as_deref(),
+                found.machine_id(),
+                local_id.as_deref(),
+                &id,
+            )
             && local_port.is_none_or(|port| port == found.port);
         if same {
             seen_local = true;
@@ -380,6 +416,8 @@ pub fn discover(settings: &Settings) -> Merged {
         others.push(Instance {
             label: id.clone(),
             id: Some(id.clone()),
+            machine_id: found.machine_id().map(str::to_string),
+            former_names: Vec::new(),
             address: found.base_url(),
             local: false,
             consul: None,
@@ -398,6 +436,18 @@ pub fn discover(settings: &Settings) -> Merged {
     });
     let mut instances = vec![local];
     instances.extend(others);
+    let mut seen = std::collections::HashSet::new();
+    instances.retain(|instance| {
+        let identity = instance
+            .machine_id
+            .as_deref()
+            .map(|id| ("machine", id))
+            .or_else(|| instance.id.as_deref().map(|id| ("name", id)));
+        match identity.zip(port_of(&instance.address)) {
+            Some(((kind, id), port)) => seen.insert((kind, id.to_string(), port)),
+            None => true,
+        }
+    });
     disambiguate(&mut instances);
     Merged {
         instances,
@@ -406,6 +456,19 @@ pub fn discover(settings: &Settings) -> Merged {
         browsed: browse_asked,
         browse_error,
         notes,
+    }
+}
+
+// MI-1/DC-87: labels are only a compatibility fallback for older peers.
+fn same_identity(
+    left: Option<&str>,
+    right: Option<&str>,
+    left_name: Option<&str>,
+    right_name: &str,
+) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => left == right,
+        _ => left_name == Some(right_name),
     }
 }
 
@@ -418,6 +481,8 @@ fn remote(registration: Registration, id: String, stated: bool) -> Instance {
     Instance {
         label: id.clone(),
         id: Some(id.clone()),
+        machine_id: registration.machine_id.clone(),
+        former_names: Vec::new(),
         address: registration.base_url(),
         local: false,
         consul: Some(registration.status),
@@ -435,6 +500,11 @@ fn remote(registration: Registration, id: String, stated: bool) -> Instance {
 /// Two instances with one ID are two instances on one Mac, such as a
 /// second instance for tests: name both `<id>:<port>` (DC-61).
 fn disambiguate(instances: &mut [Instance]) {
+    for instance in instances.iter_mut() {
+        if let Some(name) = &instance.id {
+            instance.label = name.clone();
+        }
+    }
     let labels: Vec<String> = instances.iter().map(|i| i.label.clone()).collect();
     for instance in instances.iter_mut() {
         if labels
@@ -461,6 +531,7 @@ pub fn names(instance: &Instance, wanted: &str) -> bool {
         .unwrap_or(authority);
     instance.label == wanted
         || instance.id.as_deref() == Some(wanted)
+        || instance.former_names.iter().any(|name| name == wanted)
         || instance.address == wanted
         || authority == wanted
         || host == wanted
@@ -493,6 +564,8 @@ pub fn select(merged: &mut Merged, wanted: &str) -> Result<(), String> {
         merged.instances = vec![Instance {
             label: wanted.to_string(),
             id: None,
+            machine_id: None,
+            former_names: Vec::new(),
             address,
             local: false,
             consul: None,
@@ -504,6 +577,14 @@ pub fn select(merged: &mut Merged, wanted: &str) -> Result<(), String> {
             body: None,
         }];
         return Ok(());
+    }
+    for instance in &matching {
+        if instance.former_names.iter().any(|name| name == wanted) {
+            merged.notes.push(format!(
+                "{wanted} was renamed {}; use {}",
+                instance.label, instance.label
+            ));
+        }
     }
     merged.instances = matching;
     Ok(())
@@ -523,10 +604,20 @@ pub fn ask_all(merged: &mut Merged, timeout: Duration) {
             }
             scope.spawn(move || {
                 let deadline = Instant::now() + timeout;
-                if let Some(expected) = &instance.expected_id {
-                    if let Err(error) = confirm(&instance.address, expected, timeout) {
-                        instance.error = Some(error);
-                        return;
+                if instance.expected_id.is_some() || instance.machine_id.is_some() {
+                    match confirm(instance, timeout) {
+                        Ok(health) => {
+                            instance.id = text_field(&health, "instance");
+                            if let Some(name) = &instance.id {
+                                instance.label = name.clone();
+                            }
+                            instance.machine_id = text_field(&health, "machine_id");
+                            instance.former_names = former_names(&health);
+                        }
+                        Err(error) => {
+                            instance.error = Some(error);
+                            return;
+                        }
                     }
                 }
                 let remaining = deadline.saturating_duration_since(Instant::now());
@@ -542,11 +633,30 @@ pub fn ask_all(merged: &mut Merged, timeout: Duration) {
 /// Ask an instance found by discovery who it is: it is used only when its
 /// `/health` answers machine-service with the ID it was found under, because
 /// finding an address proves nothing about who answers there (FD-2, DC-85).
-fn confirm(base: &str, expected: &str, timeout: Duration) -> Result<(), String> {
-    let (status, body) = http::get_json(&format!("{base}/health"), timeout, &[])?;
+fn text_field(body: &Value, field: &str) -> Option<String> {
+    body.get(field)
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn former_names(body: &Value) -> Vec<String> {
+    body.get("former_names")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| text_field(entry, "name"))
+        .collect()
+}
+
+// MI-5/DC-90: compare permanent IDs when both sides state them. A label
+// mismatch with the same ID is a rename, and health supplies the current name.
+fn confirm(instance: &Instance, timeout: Duration) -> Result<Value, String> {
+    let (status, body) = http::get_json(&format!("{}/health", instance.address), timeout, &[])?;
     if status != 200 {
         return Err(format!("its /health answered HTTP {status}"));
     }
+    let expected = instance.expected_id.as_deref().unwrap_or(&instance.label);
     let service = body.get("service").and_then(Value::as_str);
     if service.is_some_and(|service| service != SERVICE) {
         return Err(format!(
@@ -554,25 +664,42 @@ fn confirm(base: &str, expected: &str, timeout: Duration) -> Result<(), String> 
             service.unwrap_or_default()
         ));
     }
-    match body.get("instance").and_then(Value::as_str) {
-        Some(answered) if answered == expected => Ok(()),
-        Some(answered) => Err(format!(
-            "it was found as {expected}, but its /health answers {answered}"
+    let answered_name = body
+        .get("instance")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("it was found as {expected}, but its /health names no instance"))?;
+    match (instance.machine_id.as_deref(), body.get("machine_id").and_then(Value::as_str).filter(|id| !id.is_empty())) {
+        (Some(expected_id), Some(answered_id)) if expected_id != answered_id => Err(format!(
+            "it was found with machine_id {expected_id}, but its /health answers machine_id {answered_id}"
         )),
-        None => Err(format!(
-            "it was found as {expected}, but its /health names no instance"
-        )),
+        (Some(_), Some(_)) => Ok(body),
+        _ if answered_name == expected => Ok(body),
+        _ => Err(format!("it was found as {expected}, but its /health answers {answered_name}")),
     }
 }
 
 /// Discover and ask every instance: the merged list of CL-1.
 pub fn gather(settings: &Settings, instance: Option<&str>) -> Result<Merged, String> {
-    let mut merged = discover(settings);
-    if let Some(wanted) = instance {
-        select(&mut merged, wanted)?;
+    for attempt in 0..2 {
+        let mut merged = discover(settings);
+        ask_all(&mut merged, settings.timeout);
+        disambiguate(&mut merged.instances);
+        if let Some(wanted) = instance {
+            if let Err(error) = select(&mut merged, wanted) {
+                if attempt == 0 && has_discovery(settings) {
+                    thread::sleep(Duration::from_secs(2));
+                    continue;
+                }
+                return Err(error);
+            }
+        }
+        return Ok(merged);
     }
-    ask_all(&mut merged, settings.timeout);
-    Ok(merged)
+    unreachable!("the second gathering returns its result")
+}
+
+fn has_discovery(settings: &Settings) -> bool {
+    settings.browse.is_some() || settings.consul.is_some()
 }
 
 /// Split `<vm>@<instance>` (CL-3). A name without `@` names no instance.
@@ -588,6 +715,10 @@ pub fn split_name(name: &str) -> (&str, Option<&str>) {
 /// Where a lease command goes (CL-3).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Route {
+    /// The owner's confirmed permanent identity (MI-5).
+    pub machine_id: Option<String>,
+    /// The current lease, for looking up machine_id + lease_id (MI-5).
+    pub lease_id: Option<String>,
     /// The machine's name without any `@<instance>`.
     pub machine: String,
     /// The base URL of the instance that owns it.
@@ -603,54 +734,161 @@ pub struct Route {
 /// and the qualified form required. A name no instance lists goes to the
 /// local instance, whose own answer then says it is unknown.
 pub fn route(settings: &Settings, name: &str) -> Result<Route, String> {
+    route_lease(settings, name, None)
+}
+
+/// Route a remembered lease by permanent identity, including after its old
+/// label has expired from the seven-day history (MI-3, MI-5, DC-90).
+pub fn route_lease(
+    settings: &Settings,
+    name: &str,
+    remembered: Option<&crate::leases::Lease>,
+) -> Result<Route, String> {
     let (machine, instance) = split_name(name);
     let local_route = || Route {
+        machine_id: None,
+        lease_id: None,
         machine: machine.to_string(),
         base: settings.local_base.clone(),
         local: true,
     };
-    if let Some(wanted) = instance {
-        let mut merged = discover(settings);
-        select(&mut merged, wanted)?;
-        let owner = &merged.instances[0];
-        if let Some(reason) = &owner.unaskable {
-            return Err(format!(
-                "instance {} cannot be reached: {reason}",
-                owner.label
-            ));
-        }
-        return Ok(Route {
-            machine: machine.to_string(),
-            base: owner.address.clone(),
-            local: owner.local,
-        });
-    }
-    let merged = gather(settings, None)?;
-    let owners: Vec<&Instance> = merged
-        .instances
-        .iter()
-        .filter(|instance| {
-            instance.machines().iter().any(|record| {
-                !capability::is_offer(record)
-                    && record.get("name").and_then(Value::as_str) == Some(machine)
+    for attempt in 0..2 {
+        let mut merged = gather(settings, None)?;
+        // MI-5/DC-90: a saved permanent key wins over labels, including a
+        // former label another Mac has since adopted.
+        let stable: Vec<(&Instance, String)> = merged
+            .instances
+            .iter()
+            .filter_map(|owner| {
+                let lease = remembered?;
+                if instance.is_some_and(|wanted| {
+                    !names(owner, wanted)
+                        && lease.granted_name.as_deref() != Some(wanted)
+                        && lease.instance != wanted
+                }) {
+                    return None;
+                }
+                remembered_machine(owner, lease).map(|name| (owner, name))
             })
-        })
-        .collect();
-    match owners.as_slice() {
-        [] => Ok(local_route()),
-        [owner] => Ok(Route {
-            machine: machine.to_string(),
-            base: owner.address.clone(),
-            local: owner.local,
-        }),
+            .collect();
+        if !stable.is_empty() {
+            return choose_route(machine, &stable);
+        }
+        if let Some(wanted) = instance {
+            if let Err(error) = select(&mut merged, wanted) {
+                if attempt == 0 && has_discovery(settings) {
+                    thread::sleep(Duration::from_secs(2));
+                    continue;
+                }
+                return Err(error);
+            }
+            for note in &merged.notes {
+                eprintln!("machctl: note: {note}");
+            }
+            let owners: Vec<_> = merged
+                .instances
+                .iter()
+                .map(|owner| {
+                    (
+                        owner,
+                        machine_name(owner, machine).unwrap_or_else(|| machine.to_string()),
+                    )
+                })
+                .collect();
+            return choose_route(machine, &owners);
+        }
+        let owners: Vec<_> = merged
+            .instances
+            .iter()
+            .filter_map(|owner| machine_name(owner, machine).map(|name| (owner, name)))
+            .collect();
+        if !owners.is_empty() {
+            return choose_route(machine, &owners);
+        }
+        if attempt == 0 && has_discovery(settings) {
+            thread::sleep(Duration::from_secs(2));
+        } else {
+            return Ok(local_route());
+        }
+    }
+    unreachable!("the second gathering returns its route")
+}
+
+fn choose_route(machine: &str, owners: &[(&Instance, String)]) -> Result<Route, String> {
+    match owners {
+        [(owner, current)] => {
+            if let Some(reason) = owner.unaskable.as_ref().or(owner.error.as_ref()) {
+                return Err(format!(
+                    "instance {} cannot be reached: {reason}",
+                    owner.label
+                ));
+            }
+            if current != machine {
+                eprintln!("machctl: note: {machine} was renamed {current}; use {current}");
+            }
+            Ok(Route {
+                machine_id: owner.machine_id.clone(),
+                lease_id: machine_lease(owner, current),
+                machine: current.clone(),
+                base: owner.address.clone(),
+                local: owner.local,
+            })
+        }
         several => {
-            let labels: Vec<&str> = several.iter().map(|owner| owner.label.as_str()).collect();
+            let labels: Vec<_> = several
+                .iter()
+                .map(|(owner, _)| owner.label.as_str())
+                .collect();
             Err(format!(
                 "{machine} exists on {}; name it as {machine}@<instance>",
                 labels.join(" and ")
             ))
         }
     }
+}
+
+fn remembered_machine(owner: &Instance, lease: &crate::leases::Lease) -> Option<String> {
+    if owner.machine_id.is_none() || owner.machine_id != lease.machine_id {
+        return None;
+    }
+    owner
+        .machines()
+        .iter()
+        .find(|record| record.get("lease_id").and_then(Value::as_str) == Some(&lease.lease_id))
+        .and_then(|record| text_field(record, "name"))
+}
+
+fn machine_lease(owner: &Instance, machine: &str) -> Option<String> {
+    let current = machine_name(owner, machine)?;
+    owner
+        .machines()
+        .iter()
+        .find(|record| record.get("name").and_then(Value::as_str) == Some(&current))
+        .and_then(|record| text_field(record, "lease_id"))
+}
+
+// MI-5/DC-90: former labels resolve the durable machine only; virtual
+// machine names remain independent of the host label.
+fn machine_name(owner: &Instance, wanted: &str) -> Option<String> {
+    let machines = owner.machines();
+    if machines.iter().any(|record| {
+        !capability::is_offer(record) && record.get("name").and_then(Value::as_str) == Some(wanted)
+    }) {
+        return Some(wanted.to_string());
+    }
+    owner
+        .former_names
+        .iter()
+        .any(|name| name == wanted)
+        .then(|| {
+            machines
+                .iter()
+                .find(|record| capability::kind(record) == "durable")
+                .and_then(|record| record.get("name"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .flatten()
 }
 
 #[cfg(test)]
@@ -842,17 +1080,24 @@ mod tests {
         assert_eq!(merged.instances[0].consul.as_deref(), Some("warning"));
         assert_eq!(merged.instances[0].label, format!("mac-a:{local_port}"));
         assert_eq!(merged.instances[1].label, format!("mac-a:{other_port}"));
-        assert!(merged.notes.is_empty(), "{:?}", merged.notes);
+        assert_eq!(
+            merged.notes.len(),
+            if merged.instances.len() == 2 { 2 } else { 1 }
+        );
+        assert!(merged
+            .notes
+            .iter()
+            .all(|note| note.contains("no machine_id")));
     }
 
     /// AC-47, DC-80: a Mac whose Consul node name differs from its own name
-    /// (192.168.50.3: node `mac-mini-m4-pro`, LocalHostName `Mac-mini`) is
+    /// (192.0.2.10: node `catalog-node-a`, LocalHostName `Mac-A`) is
     /// one instance, named by its own name, because its registration states
     /// the ID its `/health` reports.
     #[test]
     fn ac47_node_name_differing_from_the_machine_name_is_one_instance() {
         let local = fake(vec![
-            ("/health", 200, json!({"ok": true, "instance": "Mac-mini"})),
+            ("/health", 200, json!({"ok": true, "instance": "Mac-A"})),
             ("/machines", 200, json!({"machines": {}})),
         ]);
         let local_port = port_of(&local.base).unwrap();
@@ -860,12 +1105,12 @@ mod tests {
             (
                 "/v1/health/service/machine-service",
                 200,
-                json!([stated("mac-mini-m4-pro", "Mac-mini", local_port, "passing")]),
+                json!([stated("catalog-node-a", "Mac-A", local_port, "passing")]),
             ),
             (
                 "/v1/agent/self",
                 200,
-                json!({"Config": {"NodeName": "mac-mini-m4-pro"}}),
+                json!({"Config": {"NodeName": "catalog-node-a"}}),
             ),
         ]);
         let merged = discover(&settings(
@@ -874,10 +1119,17 @@ mod tests {
             Duration::from_secs(2),
         ));
         let labels: Vec<&str> = merged.instances.iter().map(|i| i.label.as_str()).collect();
-        assert_eq!(labels, ["Mac-mini"]);
+        assert_eq!(labels, ["Mac-A"]);
         assert!(merged.instances[0].local);
         assert_eq!(merged.instances[0].consul.as_deref(), Some("passing"));
-        assert!(merged.notes.is_empty(), "{:?}", merged.notes);
+        assert_eq!(
+            merged.notes.len(),
+            if merged.instances.len() == 2 { 2 } else { 1 }
+        );
+        assert!(merged
+            .notes
+            .iter()
+            .all(|note| note.contains("no machine_id")));
     }
 
     /// AC-47, DC-80: another Mac is named by the ID its registration
@@ -1087,6 +1339,8 @@ mod tests {
         assert_eq!(
             route_to("only-remote").unwrap(),
             Route {
+                machine_id: None,
+                lease_id: None,
                 machine: "only-remote".into(),
                 base: remote.base.clone(),
                 local: false
@@ -1101,5 +1355,83 @@ mod tests {
         assert!(route_to("macos26").unwrap().local);
         assert!(route_to("ghost").unwrap().local);
         assert!(route_to("vm@mac-z").is_err());
+    }
+    /// MI-5/DC-90: a command in the goodbye gap browses again after two
+    /// seconds and resolves the former label from the confirmed health.
+    #[test]
+    fn mi5_missing_name_gets_a_second_browse_and_resolves_a_rename() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Mutex;
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        static FOUND: Mutex<Option<Found>> = Mutex::new(None);
+        fn browse(_: Duration) -> Result<Vec<Found>, String> {
+            if CALLS.fetch_add(1, Ordering::SeqCst) == 0 {
+                Ok(Vec::new())
+            } else {
+                Ok(FOUND.lock().unwrap().clone().into_iter().collect())
+            }
+        }
+        let local = fake(vec![
+            ("/health", 200, json!({"instance":"Mac-Local"})),
+            ("/machines", 200, json!({"machines":{}})),
+        ]);
+        let remote = fake(vec![
+            (
+                "/health",
+                200,
+                json!({"service":"machine-service", "instance":"Mac-B", "machine_id":"machine-a", "former_names":[{"name":"Mac-A", "renamed_at":1}]}),
+            ),
+            (
+                "/machines",
+                200,
+                json!({"machines":{"Mac-B":{"kind":"durable"},"pilot-a":{"kind":"virtual"}}}),
+            ),
+        ]);
+        *FOUND.lock().unwrap() = Some(Found {
+            name: "Mac-B".into(),
+            host: "localhost".into(),
+            address: Some("127.0.0.1".parse().unwrap()),
+            port: port_of(&remote.base).unwrap(),
+            txt: discovery::txt_entries("Mac-B", "machine-a", &["durable"]),
+        });
+        let mut settings = settings(&local.base, None, Duration::from_secs(1));
+        settings.browse = Some(browse);
+        for (name, expected_machine) in [("Mac-A", "Mac-B"), ("pilot-a@Mac-A", "pilot-a")] {
+            CALLS.store(0, Ordering::SeqCst);
+            let started = Instant::now();
+            let routed = route(&settings, name).unwrap();
+            assert_eq!(routed.base, remote.base);
+            assert_eq!(routed.machine, expected_machine);
+            assert_eq!(CALLS.load(Ordering::SeqCst), 2);
+            assert!(started.elapsed() >= Duration::from_secs(2));
+        }
+    }
+
+    /// MI-1/DC-87: two interfaces do not create two instances; two ports do.
+    #[test]
+    fn mi1_duplicate_advertisements_share_machine_and_port() {
+        fn browse(_: Duration) -> Result<Vec<Found>, String> {
+            Ok([("Mac-A", 6250), ("Mac-B", 6250), ("Mac-B", 6251)]
+                .into_iter()
+                .map(|(name, port)| Found {
+                    name: name.into(),
+                    host: "localhost".into(),
+                    address: Some("127.0.0.1".parse().unwrap()),
+                    port,
+                    txt: discovery::txt_entries(name, "machine-a", &["durable"]),
+                })
+                .collect())
+        }
+        let local = fake(vec![
+            (
+                "/health",
+                200,
+                json!({"instance":"Mac-Local", "machine_id":"machine-local"}),
+            ),
+            ("/machines", 200, json!({"machines":{}})),
+        ]);
+        let mut settings = settings(&local.base, None, Duration::from_secs(1));
+        settings.browse = Some(browse);
+        assert_eq!(discover(&settings).instances.len(), 3);
     }
 }

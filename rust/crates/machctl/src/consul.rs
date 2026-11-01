@@ -43,6 +43,8 @@ pub struct Registration {
     /// The instance ID it states in its service metadata, `instance` (FD-1).
     /// `None` for a registration whose description predates the field.
     pub instance: Option<String>,
+    /// The permanent hardware identity (MI-4, DC-87).
+    pub machine_id: Option<String>,
     /// The Consul service ID.
     pub service_id: String,
     /// The address to reach it at: the service's own, else the node's.
@@ -147,6 +149,9 @@ pub fn parse_health(body: &Value) -> Result<Vec<Registration>, String> {
         out.push(Registration {
             node: node_name,
             instance,
+            machine_id: meta("machine_id")
+                .filter(|id| !id.is_empty())
+                .map(str::to_string),
             service_id,
             host,
             port,
@@ -245,6 +250,7 @@ mod tests {
         let registration = Registration {
             node: "n".into(),
             instance: None,
+            machine_id: None,
             service_id: "s".into(),
             host: "2001:db8::1".into(),
             port: 6240,

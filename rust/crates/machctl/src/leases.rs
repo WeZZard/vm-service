@@ -39,6 +39,10 @@ pub struct Lease {
     pub machine: String,
     pub instance: String,
     pub lease_id: String,
+    /// Permanent identity; absent only in older lease files (MI-5).
+    pub machine_id: Option<String>,
+    /// Durable requests retain this label until release (MI-3, DC-89).
+    pub granted_name: Option<String>,
 }
 
 fn entries(document: &Value) -> Vec<Lease> {
@@ -52,6 +56,15 @@ fn entries(document: &Value) -> Vec<Lease> {
                 machine: entry.get("machine")?.as_str()?.to_string(),
                 instance: entry.get("instance")?.as_str()?.to_string(),
                 lease_id: entry.get("lease_id")?.as_str()?.to_string(),
+                machine_id: entry
+                    .get("machine_id")
+                    .and_then(Value::as_str)
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_string),
+                granted_name: entry
+                    .get("granted_name")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
             })
         })
         .collect()
@@ -83,6 +96,44 @@ pub fn find(path: &Path, machine: &str, instance: &str) -> Option<String> {
     }
 }
 
+/// Resolve a remembered lease against its confirmed owner. New entries use
+/// machine ID plus lease ID; legacy entries retain their name/address lookup
+/// until the next acquisition (MI-5, DC-90).
+pub fn resolve(
+    path: &Path,
+    machine: &str,
+    instance: &str,
+    machine_id: Option<&str>,
+    lease_id: Option<&str>,
+) -> Option<Lease> {
+    let leases = read(path);
+    if let (Some(machine_id), Some(lease_id)) = (machine_id, lease_id) {
+        if let Some(lease) = leases.iter().find(|lease| {
+            lease.machine_id.as_deref() == Some(machine_id) && lease.lease_id == lease_id
+        }) {
+            return Some(lease.clone());
+        }
+    }
+    let named: Vec<_> = leases
+        .into_iter()
+        .filter(|lease| {
+            (lease.machine == machine || lease.granted_name.as_deref() == Some(machine))
+                && machine_id
+                    .zip(lease.machine_id.as_deref())
+                    .is_none_or(|(expected, saved)| expected == saved)
+                && lease_id.is_none_or(|id| lease.lease_id == id)
+        })
+        .collect();
+    named
+        .iter()
+        .find(|lease| lease.instance == instance)
+        .cloned()
+        .or_else(|| match named.as_slice() {
+            [only] => Some(only.clone()),
+            _ => None,
+        })
+}
+
 /// Change the file under its lock: `change` edits the list in place.
 fn update(path: &Path, change: impl FnOnce(&mut Vec<Lease>)) -> Result<(), String> {
     let parent = path
@@ -109,13 +160,15 @@ fn update(path: &Path, change: impl FnOnce(&mut Vec<Lease>)) -> Result<(), Strin
     let mut leases = read(path);
     change(&mut leases);
     let document = json!({
-        "schema_version": 1,
+        "schema_version": 2,
         "leases": leases
             .iter()
             .map(|lease| json!({
                 "machine": lease.machine,
                 "instance": lease.instance,
                 "lease_id": lease.lease_id,
+                "machine_id": lease.machine_id,
+                "granted_name": lease.granted_name,
             }))
             .collect::<Vec<_>>(),
     });
@@ -141,10 +194,14 @@ fn update(path: &Path, change: impl FnOnce(&mut Vec<Lease>)) -> Result<(), Strin
     Ok(())
 }
 
-/// Remember a lease, replacing any entry for the same machine and instance.
+/// Remember a lease under machine ID plus lease ID (MI-5, DC-90). Older
+/// entries without identity retain the compatible machine/address key.
 pub fn remember(path: &Path, lease: Lease) -> Result<(), String> {
     update(path, |leases| {
-        leases.retain(|old| !(old.machine == lease.machine && old.instance == lease.instance));
+        leases.retain(|old| match (&old.machine_id, &lease.machine_id) {
+            (Some(old_id), Some(new_id)) => old_id != new_id || old.lease_id != lease.lease_id,
+            _ => old.machine != lease.machine || old.instance != lease.instance,
+        });
         leases.push(lease);
     })
 }
@@ -166,6 +223,8 @@ mod tests {
             machine: machine.to_string(),
             instance: instance.to_string(),
             lease_id: id.to_string(),
+            machine_id: None,
+            granted_name: None,
         }
     }
 
@@ -199,5 +258,50 @@ mod tests {
         remember(&path, lease("shared", "http://b:6240", "b")).unwrap();
         assert_eq!(find(&path, "shared", "http://c:6240"), None);
         assert_eq!(find(&path, "shared", "http://b:6240").as_deref(), Some("b"));
+    }
+    /// MI-5/DC-90: renamed labels and moved addresses replace one permanent
+    /// key; different lease IDs remain distinct and old entries still load.
+    #[test]
+    fn mi5_remembered_leases_are_keyed_by_machine_and_lease_ids() {
+        let folder = tempfile::tempdir().unwrap();
+        let path = folder.path().join(FILE_NAME);
+        let mut first = lease("Mac-A", "http://192.0.2.1:6240", "lease-a");
+        first.machine_id = Some("machine-a".into());
+        first.granted_name = Some("Mac-A".into());
+        remember(&path, first.clone()).unwrap();
+        let mut renamed = first.clone();
+        renamed.machine = "Mac-B".into();
+        renamed.instance = "http://192.0.2.2:6240".into();
+        remember(&path, renamed.clone()).unwrap();
+        assert_eq!(read(&path), vec![renamed.clone()]);
+        let mut second = renamed.clone();
+        second.lease_id = "lease-b".into();
+        remember(&path, second).unwrap();
+        assert_eq!(read(&path).len(), 2);
+        assert_eq!(
+            resolve(&path, "Mac-B", "unused", Some("machine-a"), Some("lease-a")),
+            Some(renamed)
+        );
+        assert!(resolve(
+            &path,
+            "Mac-B",
+            "unused",
+            Some("other-machine"),
+            Some("lease-a")
+        )
+        .is_none());
+        std::fs::write(&path, json!({"schema_version":1,"leases":[{"machine":"Mac-A","instance":"http://192.0.2.1:6240","lease_id":"old"}]}).to_string()).unwrap();
+        assert_eq!(
+            resolve(
+                &path,
+                "Mac-A",
+                "http://192.0.2.1:6240",
+                Some("machine-a"),
+                Some("old")
+            )
+            .unwrap()
+            .lease_id,
+            "old"
+        );
     }
 }
