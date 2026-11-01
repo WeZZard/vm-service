@@ -19,6 +19,7 @@ serde_json.workspace = true
 libc.workspace = true
 
 [dev-dependencies]
+machine-service-install = { path = "../machine-service-install" }
 byte-transfer = { path = "../byte-transfer" }
 serde_json.workspace = true
 sha2.workspace = true

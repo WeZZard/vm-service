@@ -550,6 +550,7 @@ dependencies = [
  "environment",
  "libc",
  "machine-service-core",
+ "machine-service-install",
  "serde_json",
  "sha2",
  "tempfile",
