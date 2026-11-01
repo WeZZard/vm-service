@@ -37,6 +37,22 @@ fn kept(instance: &Instance, filters: &Filters) -> Vec<Value> {
         .collect()
 }
 
+/// An offer whose base VM is not built on its Mac: the Mac cannot create it,
+/// so the table leaves it out (DC-92).
+fn unbuilt(record: &Value) -> bool {
+    capability::is_offer(record) && record.get("base_available") == Some(&Value::Bool(false))
+}
+
+/// The local instance refused the connection: no service runs on this Mac,
+/// which is not the same as a Mac the network cannot reach (DC-93).
+fn not_running(instance: &Instance) -> bool {
+    instance.local
+        && instance
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("connection refused"))
+}
+
 /// The merged list as JSON: one object per instance with its `instance`,
 /// `address`, `reachable`, `error` and `machines` (CL-1), plus whether it
 /// is the local instance, how it was found, its Consul health, and its image
@@ -101,6 +117,19 @@ pub fn format_table(merged: &Merged, filters: &Filters) -> String {
     let mut lines = Vec::new();
     for instance in &merged.instances {
         let label = instance.label.clone();
+        if !instance.reachable && not_running(instance) {
+            lines.push(Line::Row {
+                cells: vec![
+                    label,
+                    "-".into(),
+                    "-".into(),
+                    "not running".into(),
+                    "no machine-service on this Mac".into(),
+                ],
+                span: true,
+            });
+            continue;
+        }
         if !instance.reachable {
             let error = instance.error.as_deref().unwrap_or("no answer");
             let consul = match (
@@ -123,7 +152,10 @@ pub fn format_table(merged: &Merged, filters: &Filters) -> String {
             });
             continue;
         }
-        let machines = kept(instance, filters);
+        let machines: Vec<Value> = kept(instance, filters)
+            .into_iter()
+            .filter(|record| !unbuilt(record))
+            .collect();
         if filters.active() && machines.is_empty() {
             continue;
         }
@@ -135,8 +167,14 @@ pub fn format_table(merged: &Merged, filters: &Filters) -> String {
         }
         if machines.is_empty() {
             lines.push(Line::Row {
-                cells: vec![label, "-".into(), "-".into(), "none".into()],
-                span: false,
+                cells: vec![
+                    label,
+                    "-".into(),
+                    "-".into(),
+                    "none".into(),
+                    "provides no machines".into(),
+                ],
+                span: true,
             });
             continue;
         }
@@ -589,6 +627,73 @@ mod tests {
         assert_eq!(json[1]["error"], "connection refused");
         assert_eq!(json[1]["consul"], "critical");
         assert_eq!(json[1]["machines"], json!([]));
+    }
+
+    /// CL-1 (DC-92): an offer whose base VM is not built on its Mac is left
+    /// out of the table, and `--json` still carries it.
+    #[test]
+    fn offers_without_a_built_base_are_left_out_of_the_table() {
+        let offer = |name: &str, built: bool| {
+            json!({"name": name, "kind": "virtual", "state": "offer", "image_kind": "linux",
+                   "base_available": built,
+                   "concurrency": {"running": 0, "limit": 2, "acquirable": built}})
+        };
+        let body =
+            json!({"machines": {}, "offers": [offer("built", true), offer("unbuilt", false)]});
+        let list = merged(vec![instance("mac-a", false, Some(body), None, None)]);
+        let table = format_table(&list, &Filters::default());
+        assert!(table.contains("built "), "{table}");
+        assert!(!table.contains("unbuilt"), "{table}");
+        let json = to_json(&list, &Filters::default());
+        assert_eq!(json[0]["machines"].as_array().unwrap().len(), 2);
+    }
+
+    /// CL-1 (DC-93): an instance that answers with no machine, or only with
+    /// offers whose base is not built, says it provides nothing.
+    #[test]
+    fn an_instance_with_nothing_to_offer_says_so() {
+        let unbuilt = json!({"name": "x", "kind": "virtual", "state": "offer",
+                             "base_available": false,
+                             "concurrency": {"acquirable": false}});
+        let list = merged(vec![
+            instance("mac-a", true, Some(json!({"machines": {}})), None, None),
+            instance(
+                "mac-b",
+                false,
+                Some(json!({"machines": {}, "offers": [unbuilt]})),
+                None,
+                None,
+            ),
+        ]);
+        let table = format_table(&list, &Filters::default());
+        let lines: Vec<&str> = table.lines().collect();
+        assert_eq!(
+            lines[1],
+            "mac-a            -                               -        none  provides no machines"
+        );
+        assert!(lines[2].starts_with("mac-b") && lines[2].ends_with("none  provides no machines"));
+        assert_eq!(lines.len(), 3, "{table}");
+    }
+
+    /// CL-1 (DC-93): the local instance that refuses the connection is not
+    /// running; it is not called unreachable.
+    #[test]
+    fn a_local_instance_that_refuses_is_not_running() {
+        let list = merged(vec![
+            instance("mac-a", true, None, Some("connection refused"), None),
+            instance("mac-c", false, None, Some("connection refused"), None),
+        ]);
+        let table = format_table(&list, &Filters::default());
+        let lines: Vec<&str> = table.lines().collect();
+        assert!(
+            lines[1].starts_with("mac-a")
+                && lines[1].contains("not running  no machine-service on this Mac"),
+            "{table}"
+        );
+        assert!(
+            lines[2].contains("unreachable  connection refused"),
+            "{table}"
+        );
     }
 
     #[test]

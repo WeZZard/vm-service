@@ -1,4 +1,4 @@
-//! The image catalog (`docs/arch/image-catalog.md`, IC-1 to IC-6).
+//! The image catalog (`docs/arch/image-catalog.md`, IC-1 to IC-7).
 //!
 //! The daemon keeps one immutable [`CatalogSnapshot`] of its image lines. A
 //! request that reads the catalog first computes the [`InputIdentity`] of the
@@ -220,6 +220,22 @@ pub trait CatalogSource: Send + Sync {
     /// The folder a file watcher should observe, if any.
     fn watch_root(&self) -> Option<PathBuf> {
         None
+    }
+}
+
+/// The source of an instance with no image source configured (IC-7,
+/// DC-94): it reads no files and always builds an empty catalog, so the
+/// catalog is current with no lines and nothing warns.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoSource;
+
+impl CatalogSource for NoSource {
+    fn identity(&self) -> InputIdentity {
+        InputIdentity::default()
+    }
+
+    fn build(&self, _identity: &InputIdentity) -> Result<BuiltLines, CatalogFailure> {
+        Ok(BuiltLines::default())
     }
 }
 

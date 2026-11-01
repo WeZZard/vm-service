@@ -295,3 +295,27 @@ fn install_writes_and_preserves_durable_exposure() {
         json!("on")
     );
 }
+
+/// IC-7 (DC-94): with Tart and a base VM but no `PILOT_REPO`, the instance
+/// has no image source, so it is not tagged `vm`; no checkout is assumed.
+#[test]
+fn ic7_no_pilot_repo_is_no_image_source() {
+    let harness = Harness::new();
+    let tart = fake_tart(&harness, &["pilot-base"]);
+    install_agent(
+        &harness,
+        &[
+            ("HOME", harness.home_str()),
+            ("PATH", "/usr/bin:/bin"),
+            ("TART", tart.to_str().unwrap()),
+            ("MACHINE_SERVICE_HOST", "0.0.0.0"),
+        ],
+    );
+    let (description, stderr) = describe(&harness, &["--expose-durable", "on"]);
+    let tags = tags(&description);
+    assert!(!tags.contains(&"vm".to_string()), "{tags:?}");
+    assert!(
+        stderr.contains("virtual machines: no (no image source: PILOT_REPO is not set)"),
+        "{stderr}"
+    );
+}

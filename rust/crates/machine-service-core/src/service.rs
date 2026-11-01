@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{Map, Value};
 
-use crate::catalog::{CatalogView, FileSource, ImageCatalog, REBUILD_WAIT};
+use crate::catalog::{CatalogView, FileSource, ImageCatalog, NoSource, REBUILD_WAIT};
 use crate::config::{log_to_file, Config};
 use crate::console_api::{ConsoleConfig, ConsoleController, Manager};
 use crate::error::{OpError, OpResult};
@@ -87,7 +87,10 @@ impl Service {
         );
         let source = host
             .catalog_source()
-            .unwrap_or_else(|| Arc::new(FileSource::new(config.pilot.join("images"))));
+            .unwrap_or_else(|| match &config.pilot {
+                Some(pilot) => Arc::new(FileSource::new(pilot.join("images"))),
+                None => Arc::new(NoSource),
+            });
         let log_file = config.log_file.clone();
         let catalog = ImageCatalog::new(
             source,

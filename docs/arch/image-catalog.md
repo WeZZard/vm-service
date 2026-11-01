@@ -73,3 +73,11 @@
   - A legacy startup with a broken `line.conf` serves with the status `unavailable` and recovers on the next change, and a selected startup with a broken `line.conf` refuses to start.
 - The live layer (TL-4) promotes and removes a line on a second instance with real Tart and checks the same answers.
 - The acceptance scenarios are AC-39 to AC-42.
+
+## IC-7: No image source
+
+- An instance's image source is the pilot-images checkout that `PILOT_REPO` names, or a selected environment's `imageRepository`. No other path is assumed (DC-94).
+- When neither names one, the instance has no image source. It reads no image files and runs no `tart list` for images. Its catalog is `current` with no lines, so nothing warns: `GET /images` answers an empty `images`, `GET /applications` answers an empty `images`, and `GET /machines` lists no offer.
+- The start line of the service log says `image source: none`, and `machine-service-install catalog-description` reports `virtual machines: no (no image source: PILOT_REPO is not set)`.
+- An image line whose base VM is not built on that Mac stays in the catalog with `base_available: false`, because building the base makes it acquirable without a rebuild (IC-1). `machctl list` leaves such an offer out of its table (DC-92).
+

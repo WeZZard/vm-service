@@ -206,10 +206,7 @@ pub fn resolve_exposure(
 /// `env` is the instance's environment: the installed LaunchAgent's
 /// variables over the installer's defaults. Answers the base VMs found, or
 /// the first reason the instance cannot create virtual machines.
-pub fn virtual_capability(
-    env: &BTreeMap<String, String>,
-    home: &Path,
-) -> Result<Vec<String>, String> {
+pub fn virtual_capability(env: &BTreeMap<String, String>) -> Result<Vec<String>, String> {
     let (effective, bundle) = effective_environment(env)?;
     let tart = match &bundle {
         Some(bundle) => bundle
@@ -230,18 +227,21 @@ pub fn virtual_capability(
         _ => return Err("Tart is not installed".to_string()),
     };
 
+    // No configured image source means no images; no checkout is assumed
+    // (IC-7, DC-94).
     let pilot = match &bundle {
         Some(bundle) => bundle
             .get("profile")
             .and_then(|profile| profile.get("imageRepository"))
             .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
             .map(PathBuf::from)
-            .unwrap_or_default(),
+            .ok_or("no image source: the profile names no imageRepository")?,
         None => effective
             .get("PILOT_REPO")
             .filter(|value| !value.is_empty())
             .map(PathBuf::from)
-            .unwrap_or_else(|| home.join("Artifacts/Repositories/com.github/WeZZard/pilot-images")),
+            .ok_or("no image source: PILOT_REPO is not set")?,
     };
     // The daemon's own strict build (IC-4), so the check and the catalog
     // the daemon serves can never disagree about which lines exist.
@@ -341,7 +341,7 @@ pub fn run(argument: Option<Exposure>, home: &Path) -> Result<(), InstallError> 
         "durable exposure: {} ({from})",
         if durable { "on" } else { "off" }
     );
-    let virtual_machines = match virtual_capability(&env, home) {
+    let virtual_machines = match virtual_capability(&env) {
         Ok(bases) => {
             eprintln!(
                 "virtual machines: yes (base VMs present: {})",

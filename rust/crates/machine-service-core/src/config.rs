@@ -20,8 +20,9 @@ pub struct Config {
     pub tart_executable: String,
     /// The full environment for `tart` when a selected environment is active.
     pub subprocess_env: Option<Vec<(String, String)>>,
-    /// The pilot-images checkout.
-    pub pilot: PathBuf,
+    /// The pilot-images checkout, the instance's image source. `None` when
+    /// none is configured: the instance then has no images (IC-7, DC-94).
+    pub pilot: Option<PathBuf>,
     /// The service state directory.
     pub state_dir: PathBuf,
     /// `state_dir/state.json`.
@@ -94,8 +95,8 @@ impl Config {
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("/"));
         let pilot = std::env::var_os("PILOT_REPO")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home.join("Artifacts/Repositories/com.github/WeZZard/pilot-images"));
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from);
         let state_dir = std::env::var_os("MACHINE_SERVICE_STATE")
             .map(PathBuf::from)
             .unwrap_or_else(|| home.join(".local/state/machine-service"));
@@ -153,7 +154,9 @@ impl Config {
             environment: Some(bundle.clone()),
             tart_executable: get(profile, "tartPath"),
             subprocess_env: Some(subprocess_env),
-            pilot: PathBuf::from(get(profile, "imageRepository")),
+            pilot: Some(get(profile, "imageRepository"))
+                .filter(|path| !path.is_empty())
+                .map(PathBuf::from),
             state_file: state_dir.join("state.json"),
             lock_file: state_dir.join("state.lock"),
             log_file: state_dir.join("service.log"),

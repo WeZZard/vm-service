@@ -844,7 +844,7 @@ impl Fixture {
             environment: None,
             tart_executable: "tart".to_string(),
             subprocess_env: None,
-            pilot: root.join("pilot"),
+            pilot: Some(root.join("pilot")),
             state_dir: root.clone(),
             state_file: root.join("state.json"),
             lock_file: root.join("state.lock"),

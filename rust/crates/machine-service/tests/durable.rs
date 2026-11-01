@@ -1181,6 +1181,54 @@ fn ac38_instance_without_tart_offers_only_its_durable_machine() {
     assert_eq!(daemon.release(&name, &lease).status, 200);
 }
 
+/// IC-7 (DC-94): without `PILOT_REPO` the instance has no image source. It
+/// checks no image files, its catalog is current and empty, and nothing
+/// warns.
+#[test]
+fn ic7_no_pilot_repo_means_no_image_source() {
+    let fixture = Fixture::new();
+    let daemon = fixture
+        .try_start_with("state", true, &[("PILOT_REPO", "")])
+        .unwrap_or_else(|err| panic!("{}", std::fs::read_to_string(err).unwrap_or_default()));
+    let machines = daemon.request("GET", "/machines", None).body;
+    assert_eq!(machines["catalog"]["status"], "current", "{machines}");
+    assert!(machines["catalog"].get("error").is_none(), "{machines}");
+    let images = daemon.request("GET", "/images", None);
+    assert_eq!(images.status, 200, "{}", images.body);
+    assert_eq!(images.body["images"], json!({}), "{}", images.body);
+    let applications = daemon.request("GET", "/applications", None);
+    assert_eq!(applications.status, 200, "{}", applications.body);
+    assert_eq!(
+        applications.body["images"],
+        json!([]),
+        "{}",
+        applications.body
+    );
+    let log = std::fs::read_to_string(daemon.state.join("service.log")).unwrap_or_default();
+    assert!(!log.contains("ERROR"), "{log}");
+    assert!(log.contains("image source: none"), "{log}");
+}
+
+/// DC-93: a Mac configured to provide neither its durable machine nor
+/// virtual machines runs, and answers with no machine at all.
+#[test]
+fn dc93_an_instance_configured_to_offer_nothing_serves_no_machines() {
+    let fixture = Fixture::new();
+    let daemon = fixture
+        .try_start_with("state", false, &[("PILOT_REPO", "")])
+        .unwrap_or_else(|err| panic!("{}", std::fs::read_to_string(err).unwrap_or_default()));
+    let health = daemon.request("GET", "/health", None);
+    assert_eq!(health.body["kinds"], json!([]), "{}", health.body);
+    let machines = daemon.request("GET", "/machines", None).body;
+    assert_eq!(machines["machines"], json!({}), "{machines}");
+    assert!(
+        machines
+            .get("offers")
+            .is_none_or(|offers| offers.as_array().is_some_and(Vec::is_empty)),
+        "{machines}"
+    );
+}
+
 fn sha256(bytes: &[u8]) -> String {
     common::sha256_hex(bytes)
 }

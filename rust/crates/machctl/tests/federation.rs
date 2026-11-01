@@ -341,7 +341,8 @@ fn list_without_consul_warns_and_lists_the_local_instance() {
 }
 
 /// FD-3: when no instance answers the table still names them, and the CLI
-/// exits 2 with the start hint.
+/// exits 2 with the start hint. The local instance that refuses is not
+/// running, not unreachable (DC-93).
 #[test]
 fn list_with_no_instance_answering_exits_2() {
     let home = tempfile::tempdir().unwrap();
@@ -357,7 +358,7 @@ fn list_with_no_instance_answering_exits_2() {
         .unwrap();
     assert_eq!(output.status.code(), Some(2));
     assert!(
-        stdout(&output).contains("unreachable  connection refused"),
+        stdout(&output).contains("not running  no machine-service on this Mac"),
         "{}",
         stdout(&output)
     );

@@ -4,9 +4,12 @@ Turns this Mac's Tart installation into a **lease-based VM service for agents**.
 Agents never touch `tart` directly; they ask the service for a fresh, disposable
 VM and give it back when done.
 
-Built on top of `~/Artifacts/Repositories/com.github/WeZZard/pilot-images`
-(golden bases `pilot-macos26-base` / `pilot-ubuntu-base`, credential packs).
-Enforces the doctrines from pilot-images' CLAUDE.md and the host
+Its virtual machines come from the public
+[pilot-images](https://github.com/WeZZard/pilot-images) repository (golden
+bases such as `pilot-macos26-base` and `pilot-ubuntu-base`, credential packs).
+Clone it and build the bases you need on each Mac that runs virtual machines,
+then set `PILOT_REPO` to the checkout when installing. Without `PILOT_REPO`
+the instance has no images and checks none (IC-7, DC-94). Enforces the doctrines from pilot-images' CLAUDE.md and the host
 AGENTS.md mechanically:
 
 - **Clean clone per task** — every acquire is a fresh COW clone of the golden
@@ -87,13 +90,16 @@ the installer installs exactly those executables: both read one list, the
 # 1. Build every executable of the installation, each under its installed
 #    name, into target/machine-service/ (the Linux guest agents need
 #    `rustup target add aarch64-unknown-linux-musl` and aarch64-linux-musl-gcc).
-cd ~/Artifacts/Repositories/com.github/WeZZard/vm-service/rust
+cd vm-service/rust   # your checkout
 scripts/build-release.sh
 
 # 2. Validate, then install into the install folder. Loopback only is the
 #    fresh-install default.
 target/machine-service/machine-service-install install --check --prefix ~/.local/libexec/machine-service
 target/machine-service/machine-service-install install --prefix ~/.local/libexec/machine-service
+
+# With images: name the pilot-images checkout (none is assumed; DC-94).
+PILOT_REPO=/path/to/pilot-images target/machine-service/machine-service-install install --prefix ~/.local/libexec/machine-service
 
 # LAN-reachable (binds 0.0.0.0; required for consumers on other hosts, and
 # for the Bonjour advertisement). A repeated install preserves the bind address it finds.
@@ -160,7 +166,7 @@ does not require them there.
 On the build Mac, build the three release executables and pack them:
 
 ```zsh
-cd ~/Artifacts/Repositories/com.github/WeZZard/vm-service/rust
+cd vm-service/rust   # your checkout
 cargo build --release -p machine-service -p machctl -p machine-service-install
 tar -C target/release -czf /tmp/machine-service-durable.tgz \
   machine-service machctl machine-service-install
@@ -190,14 +196,14 @@ curl -s localhost:6240/health       # "kinds": ["durable"]
 ```
 
 - The installer says `No Tart found: this instance offers only its durable
-  machine` and links `~/.local/bin/machctl`. It refuses a Mac without Tart
-  whose exposure is off, because that instance would offer nothing; the error
-  names Tart and `MACHINE_SERVICE_EXPOSE_DURABLE`.
+  machine` and links `~/.local/bin/machctl`. Without Tart and with exposure
+  off, it installs an instance that offers nothing and says so ([A Mac that
+  offers nothing](#a-mac-that-offers-nothing)).
 - `GET /health` answers `kinds: ["durable"]`, `GET /machines` lists the
   durable machine and no offer, and `POST /acquire` with an image answers 400
   `this instance cannot create virtual machines: Tart is not installed`.
-- The service log records the image catalog as unavailable at every start,
-  because the Mac has no pilot-images checkout. That is expected here.
+- Leave `PILOT_REPO` unset: the instance then has no image source, checks no
+  image files and warns about none (IC-7).
 - The executables are built for macOS 11 and later (Cargo's default), so a
   build on a newer macOS runs on macOS 26. Cargo signs them ad hoc, so macOS
   forgets the privacy grants of `machine-service` whenever a new build is
@@ -207,6 +213,23 @@ curl -s localhost:6240/health       # "kinds": ["durable"]
 - The owner writes the agent keys and `endpoints.json` ([Agent
   keys](#agent-keys)). A reinstall restarts the daemon, which keeps a
   current durable lease and its processes (DM-8).
+
+### A Mac that offers nothing
+
+A Mac that only runs `machctl`, such as a laptop, can be configured to provide
+neither its durable machine nor virtual machines: install without Tart (or
+without `PILOT_REPO`) and with durable exposure off. Its own configuration then
+says it provides nothing, and no list of names is needed (DC-93).
+
+```zsh
+~/.local/libexec/machine-service/machine-service-install install --expose-durable off
+~/.local/bin/machctl list --local   # one row: none  provides no machines
+```
+
+- The installer says `this instance offers nothing`. The default loopback bind
+  keeps it off the LAN and out of Bonjour, so other Macs do not list it.
+- Without any service on the Mac, `machctl list` shows the local row as `not
+  running`, not `unreachable`.
 
 ### Migrating from vm-service
 
@@ -853,6 +876,13 @@ agent fails, and requires evidence to be pulled to `/var/tmp/` before teardown.
   durable lease lock, shared by every instance on the Mac
 - `~/.config/machine-service/agents/` — the owner's agent keys and
   `endpoints.json`
+
+## Roadmap
+
+- **Image tools in machine-service.** Images are built, maintained and updated
+  today with the separate pilot-images scripts. In the future, machine-service
+  should provide its own tools to build, maintain and update images, so a Mac
+  can keep its bases current without a hand-run script.
 
 ## Not implemented here (deliberately)
 
