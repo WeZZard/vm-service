@@ -112,7 +112,7 @@ The human operator (WeZZard) who installs the service, keeps it healthy, trouble
 
 ## US33 — Choose which Macs are durable machines
 
-- As the operator, I want each instance to expose its Mac as a durable machine only when I turn it on, so that a Mac that serves virtual machines, such as 192.168.50.3, is never leased as a whole by accident (DC-39).
+- As the operator, I want each instance to expose its Mac as a durable machine only when I turn it on, so that a Mac that serves virtual machines, such as 192.0.2.3, is never leased as a whole by accident (DC-39).
 - See [MM-1](../arch/machines.md#mm-1-two-kinds-of-machine).
 
 **Tests:** AC-43 in [operator.acceptance](../acceptance/operator.acceptance).

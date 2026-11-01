@@ -29,7 +29,7 @@ sequenceDiagram
 
 - A durable lease owns a workspace at `~/machine-service/leases/<lease_id>/` with three folders: `work/`, the default working directory; `tmp/`, the session's `TMPDIR`; and `codex/`, the session's `CODEX_HOME` ([AK-4](agent-keys.md#ak-4-codex)).
 - The lease's own record lives in the service state at `~/.local/state/machine-service/leases/<lease_id>/`. It holds the lease record, the process groups the lease started, and the hygiene record ([HY](hygiene.md)).
-- `HOME` stays `/Users/wezzard`. Engine licences, installed tools, Xcode and the privacy permissions all belong to that home, and a session must be able to use them (DC-23).
+- `HOME` stays the operator's home folder. Engine licences, installed tools, Xcode and the privacy permissions all belong to that home, and a session must be able to use them (DC-23).
 - A durable lease does not isolate the session from the rest of the account. The workspace is where work is expected to happen, and hygiene records what happened elsewhere ([HY-1](hygiene.md#hy-1-best-effort-not-isolation)).
 
 ## DM-2: One lease at a time
@@ -52,7 +52,7 @@ sequenceDiagram
 ## DM-4: Exec
 
 - `POST /machines/<name>/exec` takes `lease_id`, `argv` or `script`, and the optional `timeout` and `cwd`. Its response has the same shape as a virtual machine's exec.
-- The command runs as a child of the machine-service process, which runs as `wezzard` in the LaunchAgent domain of `wezzard`'s logged-in GUI session (DC-29). It does not go through SSH, because the service already runs on the Mac and an SSH hop to itself would add a key, a daemon and a different privacy attribution.
+- The command runs as a child of the machine-service process, which runs as the operator's account in the LaunchAgent domain of `wezzard`'s logged-in GUI session (DC-29). It does not go through SSH, because the service already runs on the Mac and an SSH hop to itself would add a key, a daemon and a different privacy attribution.
 - macOS attributes Screen Recording, Accessibility and event posting to the responsible process. A command the lease runs is a child of machine-service, so machine-service's own grants would apply to it, and machine-service is never granted Screen Recording (DC-82). GUI work goes through cua-driver instead: `cua-driver call` hands its work to the `cua-driver serve` LaunchAgent, which is its own responsible process and holds Screen Recording and Accessibility as `com.trycua.driver`. The owner grants those to CuaDriver once on each Mac, because System Integrity Protection is on and the permission store cannot be written ([CN-3](consumers.md#cn-3-what-a-durable-machine-needs-installed)). machine-service must still be signed with a stable identity, because an ad hoc signature changes with every build and macOS then forgets any grant it holds.
 - Each command starts in a new process session (`setsid`), so it and everything it starts form process groups that the service can signal. The service records every process group it starts in the lease record.
 - The **session environment** is built once at acquisition and reused for every command:

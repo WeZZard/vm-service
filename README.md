@@ -323,7 +323,7 @@ machine-service-install catalog-description > \
 - The file also carries `"meta": {"instance": "<LocalHostName>"}`, which the
   registrar publishes as the registration's service metadata. The Consul node
   name comes from the Consul agent's configuration and need not be the Mac's
-  name (192.168.50.3 is node `mac-mini-m4-pro` and `Mac-mini`), so this is how
+  name (192.0.2.3 is node `mac-a-m4` and `Mac-A`), so this is how
   a client knows which instance a registration is. It needs a registrar that
   publishes a description's `meta`.
 - `machctl list` reads the registrations from the local agent

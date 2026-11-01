@@ -38,7 +38,7 @@ Consolidated, test-linked user stories for the lease-based VM service. Each stor
 | US22 | Orchestrator | Release and destroy close guest sessions; a restart is reported uncertain | AC-12 to AC-14 |
 | US23 | Operator | See every machine on the intranet in one list | AC-34, AC-37, AC-47; [federation](../arch/federation.md) |
 | US24 | Agent | Acquire a durable machine by capability | AC-20 to AC-22, AC-29; [machine model](../arch/machines.md) |
-| US25 | Agent | Work in a durable-machine session as `wezzard` | AC-23; [durable machine leases](../arch/durable-machine.md) |
+| US25 | Agent | Work in a durable-machine session as the operator's account | AC-23; [durable machine leases](../arch/durable-machine.md) |
 | US26 | Agent | Claude Code and Codex reach the gateway with the machine's keys | AC-24 to AC-27, AC-44; [agent keys](../arch/agent-keys.md) |
 | US27 | Agent | Work on a machine on another Mac | AC-28; [federation](../arch/federation.md#fd-4-working-on-a-remote-instance) |
 | US28 | Orchestrator | Every durable lease leaves a hygiene record | AC-30, AC-31, AC-33; [hygiene](../arch/hygiene.md) |

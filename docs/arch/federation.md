@@ -69,7 +69,7 @@ flowchart LR
 ## FD-5: Trust
 
 - The HTTP API has no authentication today. LAN exposure assumes the household trust model, the same as the LLM gateway.
-- On a durable machine this exposure is larger than on a virtual machine. Any device on 192.168.50.0/24 that can reach port 6240 can acquire a durable machine and run commands on the Mac itself as `wezzard`, an admin account. On a virtual machine the same request runs only inside a disposable guest.
+- On a durable machine this exposure is larger than on a virtual machine. Any device on 192.0.2.0/24 that can reach port 6240 can acquire a durable machine and run commands on the Mac itself as the operator's admin account. On a virtual machine the same request runs only inside a disposable guest.
 - The boundaries that exist today are the Wi-Fi's MAC address whitelist, which limits who joins the network, and the bind address: an instance bound to loopback cannot be reached from another Mac.
 - The remote session listener of [RS-1](remote-session.md#rs-1-transport) requires TLS and a client credential off loopback. That requirement covers only that listener, not the HTTP API.
 - This design keeps household trust for the HTTP API, as the owner set it for vm-service.

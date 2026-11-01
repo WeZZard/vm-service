@@ -60,13 +60,13 @@
 | `host/check-clone.py`, `host/environment.py` and the README | pilot-images | `vmctl` becomes `machctl`; the bootstrap reads `machctlPath` at schema 2, and the `VMCTL` export becomes `MACHCTL` |
 | `examples/pi-subagents/vm-use.workflow.js` and the README | this repository | `vmctl` becomes `machctl` |
 | The `environment` crate and `docs/selected-environments.md` | this repository | the profile schema 2 with `machctlPath` and `MACHCTL`, changed with the code |
-| The service-catalog description on 192.168.50.3 | local file | `vm-service.json` is replaced by `machine-service.json` |
+| The service-catalog description on 192.0.2.3 | local file | `vm-service.json` is replaced by `machine-service.json` |
 
 ## MG-4: Order of migration
 
 1. Build and test the service, the relay release, and the AnyDict and pilot-images changes on their branches, each against a second instance of the renamed service (TL-4).
-2. Release every lease on 192.168.50.3.
-3. In one sitting: run `machine-service-install install` on 192.168.50.3, which migrates the installation and starts `com.wezzard.machine-service` on port 6240; install the new relay release; merge the AnyDict and pilot-images changes; and replace the catalog description with `machine-service.json`, tagged `vm` and `tart`. Durable exposure stays off on 192.168.50.3 (DC-39).
+2. Release every lease on 192.0.2.3.
+3. In one sitting: run `machine-service-install install` on 192.0.2.3, which migrates the installation and starts `com.wezzard.machine-service` on port 6240; install the new relay release; merge the AnyDict and pilot-images changes; and replace the catalog description with `machine-service.json`, tagged `vm` and `tart`. Durable exposure stays off on 192.0.2.3 (DC-39).
 4. Check that `machctl list`, a relay acquisition and one evaluation row work, and that `GET /vms` answers 410.
-5. Later, in M2, install machine-service on 192.168.50.4 and 192.168.50.5 with `MACHINE_SERVICE_HOST=0.0.0.0` and `--expose-durable on`. On a Mac without Tart the installer does not require the virtual-machine helpers (the guest agents, the console worker, the firewall and the forwarder), and the instance offers only its durable machine. Place `machine-service.json`, tagged `durable` and without `vm`, on each.
+5. Later, in M2, install machine-service on 192.0.2.4 and 192.0.2.5 with `MACHINE_SERVICE_HOST=0.0.0.0` and `--expose-durable on`. On a Mac without Tart the installer does not require the virtual-machine helpers (the guest agents, the console worker, the firewall and the forwarder), and the instance offers only its durable machine. Place `machine-service.json`, tagged `durable` and without `vm`, on each.
 - An instance with exposure off and no Tart would offer nothing. The installer refuses that combination and names both settings.

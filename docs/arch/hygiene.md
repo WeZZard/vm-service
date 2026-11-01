@@ -20,7 +20,7 @@
 ## HY-3: Leftover-process sweep
 
 - At release, after the lease's own process groups are stopped, the service ends the processes that the lease left running.
-- A process is a leftover when it runs as `wezzard`, it started after the lease began, and one of these holds:
+- A process is a leftover when it runs as the operator's account, it started after the lease began, and one of these holds:
   - It belongs to a process session that the lease started, or it descends from one.
   - Its environment carries `MACHINE_SERVICE_LEASE_ID` with this lease's ID. macOS 27 does not let a process read another process's environment, so there this rule finds nothing, and a process that left the lease's sessions after its parents exited is not swept (DC-48).
   - It is a regular application, one with a Dock presence, that the lease launched: it was not running in the inventory before the lease, and its launchd job in the user's GUI domain (`application.<bundle>.<n>.<n>`) was started with `MACHINE_SERVICE_LEASE_ID` set to this lease's ID. Applications started through Launch Services, for example with `open`, are children of launchd and belong to no session of the lease, but `open` hands the caller's environment to the job it creates, so the lease's own launches carry the variable. An application that was already running is only activated by `open` and keeps its own job, and one that the owner or another program opened carries no such variable, so the rule never ends an application the lease did not launch (DC-73).
@@ -53,7 +53,7 @@
 
 ## HY-5: Coexistence with the CI runner
 
-- The readycheck-dev GitHub Actions runner on 192.168.50.4 and 192.168.50.5 runs as `wezzard`, as the LaunchAgent `com.github.actions.runner`, from `~/actions-runner`. machine-service never pauses, stops or reconfigures it (DC-25).
+- The readycheck-dev GitHub Actions runner on 192.0.2.4 and 192.0.2.5 runs as the operator's account, as the LaunchAgent `com.github.actions.runner`, from `~/actions-runner`. machine-service never pauses, stops or reconfigures it (DC-25).
 - A lease may start while a CI job runs, and a CI job may start during a lease. They share the CPU, the memory, the GPU, the disk and the desktop.
 - `ci_runner.busy` in the capability report says whether a job is running when the client asks ([MM-3](machines.md#mm-3-capability-report)). A client that measures performance, or that drives the desktop, can prefer an idle machine. A client that must wait for an idle machine does so itself; the service never makes a busy runner a refusal.
 - During a lease, the service samples whether a CI job runs once a minute, with every GC pass, and also at acquisition, on `POST /gc` and at release. The hygiene record's `ci_busy_intervals` lists `{from, to}` for each stretch a job was seen running, an interval still open at release closing there, and `ci_sampling` gives the interval and the number of samples. A job that starts and ends between two samples is not seen (DC-75). A client can then judge a measurement taken while a job ran.
@@ -61,6 +61,6 @@
 
 ## HY-6: Free disk
 
-- Each Mac mini at 192.168.50.4 and 192.168.50.5 has a 228 GiB system volume with about 125 GiB free. A task that installs an engine can use a large share of it.
+- Each Mac mini at 192.0.2.4 and 192.0.2.5 has a 228 GiB system volume with about 125 GiB free. A task that installs an engine can use a large share of it.
 - The capability report always carries the free disk space. Below the configured warning level, `MACHINE_SERVICE_DISK_WARN_GB` in GiB, the machine record's `warnings` carries `{"code": "low-free-disk", "message": "low free disk: <n> GiB free, below the warning level of <n> GiB"}`. The warning never makes the machine unavailable.
 - The level is 30 GiB when the variable is unset, about the space one engine installation takes; `0` turns the warning off, and a value that is not a number stops the daemon, so a typo never silences the warning (DC-76).

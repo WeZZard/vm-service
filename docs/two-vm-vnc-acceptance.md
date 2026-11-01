@@ -57,7 +57,7 @@
 - `viewer-phase1.png` and `viewer-phase2.png` are the actual viewer-guest screenshots. `viewer-disconnected.png` records the viewer guest after cancellation.
 - `expected-phase1.json` and `expected-phase2.json` contain the source-generated expectations. `vllm-phase1.json` and `vllm-phase2.json` retain the raw model responses.
 - `visual-assertions.json` contains the exact-match decisions and screenshot SHA-256 hashes. `listener.log`, `cancel.json`, and `cleanup.json` record the other bounded observations.
-- The renderer and test adapter remain in the isolated private test directory. The vLLM requests used SSH to `spark-left` and its loopback OpenAI-compatible endpoint; no Anthropic gateway request was made.
+- The renderer and test adapter remain in the isolated private test directory. The vLLM requests used SSH to a GPU server and its loopback OpenAI-compatible endpoint; no Anthropic gateway request was made.
 
 ## Remaining acceptance
 

@@ -77,8 +77,8 @@ Feature: Federation, rename and installation
   @AC-37 @TL-6
   Scenario: Each instance is registered in Consul with the tags it warrants
     Given the catalog description printed by "machine-service-install catalog-description" is placed on each Mac
-    Then Consul lists "machine-service" on mac-mini-m4-pro with the tags vm and tart and without durable
-    And Consul lists "machine-service" on mac-mini-m4-1 and mac-mini-m4-2 with the tag durable and without vm
+    Then Consul lists "machine-service" on mac-a-m4 with the tags vm and tart and without durable
+    And Consul lists "machine-service" on mac-b and mac-c with the tag durable and without vm
     And Consul lists no "vm-service"
 
   @AC-38 @TL-6
@@ -153,11 +153,11 @@ Feature: Federation, rename and installation
 
   @AC-47 @TL-2 @TL-6
   Scenario: A Mac whose Consul node name is not its own name is listed once, by its own name
-    Given a Mac whose LocalHostName is "Mac-mini" and whose Consul node is "mac-mini-m4-pro"
+    Given a Mac whose LocalHostName is "Mac-A" and whose Consul node is "mac-a-m4"
     And the description printed by "machine-service-install catalog-description" is placed there
-    Then Consul lists "machine-service" on "mac-mini-m4-pro" with the metadata instance "Mac-mini"
+    Then Consul lists "machine-service" on "mac-a-m4" with the metadata instance "Mac-A"
     When the operator runs "machctl list"
-    Then the Mac's instance appears once, as "Mac-mini", with its Consul health status
+    Then the Mac's instance appears once, as "Mac-A", with its Consul health status
     Given a registration that states no instance
     When the operator runs "machctl list"
     Then that registration is named by its Consul node name

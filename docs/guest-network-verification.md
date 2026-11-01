@@ -42,8 +42,8 @@
 | 3 | The installed vm-service through the gateway | `curl -s -m 5 http://192.168.2.1:6240/health` | No answer | No answer | `{"ok": true, "service": "vm-service"}` |
 | 3 | The gateway's resolver | `dig @192.168.2.1 example.com` | Timed out | Timed out | `198.18.35.15` |
 | 3 | The vm-service isolation probe | The service's probe of `192.168.2.1:<ephemeral port>` | Timeout on the first attempt | Timeout on the first attempt | Not run for NAT |
-| 4 | The host's home-network address | TCP probes `192.168.50.3` on 443, 22 and 6240 | Timeout | Timeout | Open |
-| 5 | The home router and other private ranges | TCP probes `192.168.50.1:443`, `192.168.50.1:80`, `192.168.50.2:443`, `192.168.50.2:6152`, `10.0.0.1:443`, `172.16.0.1:443` | Timeout | Timeout | Refused, open, refused, open, open, open |
+| 4 | The host's home-network address | TCP probes `192.0.2.3` on 443, 22 and 6240 | Timeout | Timeout | Open |
+| 5 | The home router and other private ranges | TCP probes `192.0.2.1:443`, `192.0.2.1:80`, `192.0.2.2:443`, `192.0.2.2:6152`, `10.0.0.1:443`, `172.16.0.1:443` | Timeout | Timeout | Refused, open, refused, open, open, open |
 
 - After the idle period, the Linux `internet` guest still had only the DNS-over-TLS resolvers, resolved `example.com` to `104.20.23.154`, loaded it with `HTTP/2 200`, and timed out on the gateway's 443, 22 and 6240.
 - Under NAT, `10.0.0.1:443` and `172.16.0.1:443` report "open" because the host's Surge enhanced mode most likely accepts these connections itself. The NAT column matches NAT before the guest firewall.
@@ -69,8 +69,8 @@
 | 3 | The gateway on 443, 22, 6240, 80, 53, 6420, 8443 and 47811 | TCP probe `192.168.2.1:<port>` | Timeout on every port | **Timeout on every port** |
 | 3 | The gateway's resolver | `dig @192.168.2.1 example.com` | Timed out | **Timed out** |
 | 3 | The vm-service isolation probe | The service's probe of `192.168.2.1:51858` | Timeout; verified | Not run for NAT |
-| 4 | The host's home-network address | TCP probes `192.168.50.3` on 443, 22 and 6240 | Timeout | **Timeout** |
-| 5 | The home router and other private ranges | TCP probes `192.168.50.1:443`, `192.168.50.1:80`, `192.168.50.2:443`, `192.168.50.2:6152`, `10.0.0.1:443`, `172.16.0.1:443` | Timeout | Refused, open, refused, open, open, open |
+| 4 | The host's home-network address | TCP probes `192.0.2.3` on 443, 22 and 6240 | Timeout | **Timeout** |
+| 5 | The home router and other private ranges | TCP probes `192.0.2.1:443`, `192.0.2.1:80`, `192.0.2.2:443`, `192.0.2.2:6152`, `10.0.0.1:443`, `172.16.0.1:443` | Timeout | Refused, open, refused, open, open, open |
 
 - The NAT guest's results differ from NAT before the firewall in checks 2, 3 and 4. Before the firewall, a NAT guest alone on `192.168.64.0/24` reached the gateway, the home-network address, and the internet by name.
 - A NAT lease during the first firewall run, while no Softnet guest ran, got `192.168.64.2`. That subnet is outside the anchor's, so the current anchor would not match it either; this was not rerun with the current anchor.
@@ -94,7 +94,7 @@
 - The installed vm-service on port 6240 was left running and unchanged. It held no leases before or after the test.
 - A second instance, built from commit `2e0aab5` on branch `guest-internet-only`, ran on `127.0.0.1:6260` with its own state directory, started with `LIVE_PORT=6260 scripts/live-instance.sh start ssh` (DC-5).
 - Both leases used the Linux image `ubuntu2404` with `env: none`. Each lease was released after its checks, and the second instance was stopped.
-- The host's home-network address is `192.168.50.3` on `en1`, and its default router is `192.168.50.2`.
+- The host's home-network address is `192.0.2.3` on `en1`, and its default router is `192.0.2.2`.
 - The host's DNS resolver is Surge at `198.18.0.2`, which answers names with addresses in `198.18.0.0/15`.
 
 ### Procedure
@@ -120,8 +120,8 @@ The guest's default gateway was `192.168.2.1` under `internet` and `192.168.64.1
 | 3 | The gateway's TCP 22 | TCP probe `<gateway>:22` | Open | **Open** |
 | 3 | The gateway's TCP 6240 | TCP probe `<gateway>:6240`, then `curl -s -m 5 http://<gateway>:6240/health` | Open; `{"ok": true, "service": "vm-service"}` | **Open; `{"ok": true, "service": "vm-service"}`** |
 | 3 | Other gateway ports | TCP probes to 80, 53, 6420 and 8443 | Open | **Open** |
-| 4 | The host's home-network address | TCP probes `192.168.50.3` on 443, 22 and 6240 | Open | Timeout |
-| 5 | The home router | TCP probes `192.168.50.1:443`, `192.168.50.1:80`, `192.168.50.2:443`, `192.168.50.2:6152` | Refused, open, refused, open | Timeout |
+| 4 | The host's home-network address | TCP probes `192.0.2.3` on 443, 22 and 6240 | Open | Timeout |
+| 5 | The home router | TCP probes `192.0.2.1:443`, `192.0.2.1:80`, `192.0.2.2:443`, `192.0.2.2:6152` | Refused, open, refused, open | Timeout |
 | 5 | Other private ranges | TCP probes `10.0.0.1:443` and `172.16.0.1:443` | Open | Timeout |
 | 5 | Surge's DNS answer range | TCP probe `198.18.35.15:443` | Open | Timeout |
 
