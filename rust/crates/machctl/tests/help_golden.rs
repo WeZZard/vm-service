@@ -116,6 +116,10 @@ fn check_colored(directory: &Path, name: &str, args: &[&str], columns: &str) {
     let output = Command::new(MACHCTL)
         .args(args)
         .env("COLUMNS", columns)
+        // The fixture tests FORCE_COLOR, whose documented precedence is
+        // below NO_COLOR and PYTHON_COLORS; isolate those inherited inputs.
+        .env_remove("NO_COLOR")
+        .env_remove("PYTHON_COLORS")
         .env("FORCE_COLOR", "1")
         .output()
         .unwrap_or_else(|error| panic!("spawn machctl {args:?}: {error}"));
