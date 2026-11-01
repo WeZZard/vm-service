@@ -4,13 +4,15 @@
 
 - `machctl list` discovers the instances ([FD-2](../../arch/federation.md#fd-2-discovery)) and prints one table of every machine and every virtual machine offer ([FD-3](../../arch/federation.md#fd-3-aggregation)).
 - Rows are grouped by instance, with the local instance first. Inside an instance the durable machine comes first, when the instance exposes one, then the running virtual machines, then the offers.
-- An instance with durable exposure off has no durable row. 192.168.50.3 is such an instance today (DC-39).
+- An instance with durable exposure off has no durable row (DC-39).
+- An offer whose base VM is not built on its Mac (`base_available: false`) is left out of the table, because that Mac cannot create it. `--json` still carries it (DC-92).
 - An unreachable instance keeps one row, which names the error, and in Consul mode its Consul health status.
+- When the local instance refuses the connection, no service runs on this Mac. Its row has the state `not running` and the text `no machine-service on this Mac`, not `unreachable` (DC-93).
 - `--json` prints the merged list as JSON: one object per instance with its `instance`, `address`, `reachable`, `error` and `machines`, where each machine is the record of [MM-3](../../arch/machines.md#mm-3-capability-report).
 - `--local` lists only the local instance. `--kind durable` or `--kind virtual` filters by kind. `--require <capability>` filters by capability, as CL-2 describes.
 - `--instance <ID or address>` lists one instance. An address that discovery does not find is asked directly.
 - The JSON objects also carry `local`, `found_by` (`local`, `bonjour`, `consul` or `address`), `consul` (the instance's Consul health, in Consul mode) and `catalog` (its image catalog status) (DC-63, DC-84).
-- A reachable instance with no machine shows one row with the state `none`, so that it is never missing from the list. While a filter is active, an instance with no matching machine is left out, and an unreachable instance is kept.
+- A reachable instance with no machine to show, such as one configured to offer nothing, shows one row with the state `none` and the text `provides no machines`, so that it is never missing from the list (DC-93). While a filter is active, an instance with no matching machine is left out, and an unreachable instance is kept.
 - `machctl list` exits 0 when any instance answered, and 2 with the hint to start the service when none did.
 
 ```text

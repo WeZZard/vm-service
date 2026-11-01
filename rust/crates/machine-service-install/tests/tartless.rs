@@ -3,7 +3,8 @@
 //!
 //! A Mac without Tart creates no virtual machine, so its instance offers only
 //! its durable machine: the installer does not require the virtual-machine
-//! helpers there, and it refuses an instance that would offer nothing.
+//! helpers there. With exposure off too it offers nothing, and installs so
+//! (DC-93).
 //!
 //! Every test runs the built `machine-service-install` against an isolated
 //! `HOME` and the `launchctl` stub, with no `tart` on `PATH` and no `TART`.
@@ -74,26 +75,32 @@ fn ac38_reinstall_keeps_exposure_without_tart() {
     );
 }
 
-/// AC-38: without Tart and with exposure off the instance would offer
-/// nothing, and the refusal names both settings before anything is written.
+/// DC-93: without Tart and with exposure off the instance offers nothing.
+/// That is a configuration the owner may choose, such as a laptop that only
+/// runs the CLI, so the installer installs it and says what it offers.
 #[test]
-fn ac38_refuses_an_instance_that_would_offer_nothing() {
+fn dc93_installs_an_instance_that_offers_nothing() {
     let mut harness = Harness::new();
     harness.remove_tart();
+    harness.remove_vm_helpers();
     for args in [
+        &["install", "--check"][..],
         &["install"][..],
         &["install", "--expose-durable", "off"][..],
     ] {
-        let error = harness.assert_refused(args);
-        assert!(error.contains("would offer nothing"), "{error}");
-        assert!(error.contains("Tart"), "{error}");
-        assert!(error.contains("MACHINE_SERVICE_EXPOSE_DURABLE"), "{error}");
-        assert!(error.contains("--expose-durable on"), "{error}");
-        assert!(harness.saved().get("ProgramArguments").is_none());
+        let output = harness.run(args);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(stdout.contains("this instance offers nothing"), "{stdout}");
     }
-    // `--check` refuses the same way and writes nothing.
-    let error = harness.assert_refused(&["install", "--check"]);
-    assert!(error.contains("would offer nothing"), "{error}");
+    assert_eq!(
+        harness.saved()["EnvironmentVariables"]["MACHINE_SERVICE_EXPOSE_DURABLE"],
+        json!("off")
+    );
 }
 
 /// MG-4: the `machctl` CLI is still required without Tart, and a Mac with

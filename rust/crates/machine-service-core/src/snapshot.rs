@@ -75,7 +75,7 @@ pub fn snapshot(service: &Service) -> OpResult<Value> {
     Ok(json!({
         "machines": vms,
         "limits": {"max_macos_running": MAX_MACOS_RUNNING, "grace_hours": GRACE_HOURS},
-        "pilot_repo": service.config.pilot.to_string_lossy(),
+        "pilot_repo": service.config.pilot.as_ref().map(|pilot| pilot.to_string_lossy()),
         "port": service.config.port,
     }))
 }
@@ -129,13 +129,18 @@ pub fn images_snapshot(service: &Service, view: &CatalogView) -> OpResult<Value>
     capacity["macos_taken"] = json!(macos_taken);
 
     // Whether a base exists is read live, so promoting a base needs no
-    // rebuild (IC-1); one `tart list` answers every line.
-    let local: std::collections::HashSet<String> = service
-        .host
-        .tart_list()?
-        .into_iter()
-        .map(|(name, _)| name)
-        .collect();
+    // rebuild (IC-1); one `tart list` answers every line, and no line asks
+    // nothing, so a Mac without images never runs Tart (IC-7).
+    let local: std::collections::HashSet<String> = if catalog.lines.is_empty() {
+        std::collections::HashSet::new()
+    } else {
+        service
+            .host
+            .tart_list()?
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect()
+    };
     let mut out = Map::new();
     for (name, line) in &catalog.lines {
         let kind = line.kind.as_str();
@@ -306,12 +311,10 @@ fn inventories(
         })
         .collect();
     let mut out = std::collections::HashMap::new();
-    match application_catalog::load_catalog(
-        &service.config.pilot,
-        &Value::Object(associations),
-        None,
-        None,
-    ) {
+    let Some(pilot) = &service.config.pilot else {
+        return out;
+    };
+    match application_catalog::load_catalog(pilot, &Value::Object(associations), None, None) {
         Ok(loaded) => {
             for entry in loaded["images"].as_array().into_iter().flatten() {
                 if let Some(image) = entry.get("image").and_then(Value::as_str) {

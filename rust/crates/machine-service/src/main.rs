@@ -150,10 +150,15 @@ fn serve(config: Config, discovery_mode: discovery::Mode) -> Result<(), String> 
     };
     let server = Server::http(&address).map_err(|error| error.to_string())?;
     service.log(&format!(
-        "machine-service starting on {}:{} (pilot repo: {}, guest link: {}, discovery: {})",
+        "machine-service starting on {}:{} (image source: {}, guest link: {}, discovery: {})",
         service.config.host,
         service.config.port,
-        service.config.pilot.display(),
+        service
+            .config
+            .pilot
+            .as_ref()
+            .map(|pilot| pilot.display().to_string())
+            .unwrap_or_else(|| "none".to_string()),
         service.config.guest_link.name(),
         discovery_mode.name()
     ));
@@ -403,9 +408,13 @@ fn handle_get(service: &Service, request: &mut Request, url: &str) -> OpResult<(
             Ok(associations) => associations,
             Err(error) => return Ok((503, json!({"error": error.to_string()}))),
         };
+        // No image source, no images, so no applications (IC-7).
+        let Some(pilot) = &service.config.pilot else {
+            return Ok((200, json!({"schemaVersion": 1, "images": []})));
+        };
         let log = |message: &str| service.log(message);
         match application_catalog::load_catalog(
-            &service.config.pilot,
+            pilot,
             &Value::Object(associations),
             None,
             Some(&log),

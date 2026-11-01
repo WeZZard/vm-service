@@ -592,16 +592,10 @@ fn validate_install(
         .or_else(|| which("tart", effective.get("PATH").map(String::as_str)))
         .filter(|path| Path::new(path).is_file() && is_executable(Path::new(path)));
     // Without Tart the instance creates no virtual machine, so only the
-    // durable machine is left to offer; an instance that offers nothing is
-    // refused, naming both settings (MG-4 step 5, AC-38, DC-65).
+    // durable machine is left to offer (MG-4 step 5, AC-38, DC-65). With
+    // exposure off too it offers nothing, which the owner may choose, such
+    // as on a Mac that only runs the CLI (DC-93).
     let exposed = written.get(EXPOSE_KEY).map(String::as_str) == Some("on");
-    if tart.is_none() && !exposed {
-        return Err(InstallError::refused(format!(
-            "this instance would offer nothing: no Tart executable was found (TART or PATH), \
-so it cannot create virtual machines, and durable exposure is off ({EXPOSE_KEY}); \
-install stock Tart, or install with --expose-durable on"
-        )));
-    }
     // Every executable is checked before anything is written, so an
     // installation is complete or does not happen (IN-2).
     let helpers = service_layout::required(tart.is_some());
@@ -668,10 +662,15 @@ install stock Tart, or install with --expose-durable on"
             "Tart version observed: {version}. Upstream provenance and guest compatibility \
              require acceptance checks."
         );
-    } else {
+    } else if exposed {
         println!(
             "No Tart found: this instance offers only its durable machine, and the \
              virtual-machine helpers are not required."
+        );
+    } else {
+        println!(
+            "No Tart found and durable exposure is off ({EXPOSE_KEY}): this instance offers \
+             nothing. Install stock Tart, or install with --expose-durable on, to offer machines."
         );
     }
     let mut data = old.clone();

@@ -40,7 +40,12 @@ const FIXTURE_CONF: &str =
     "LINE_KIND=linux\nBASE_VM=fixture-base\nCLONE_PREFIX=fixture-\nGUEST_PASS=secret\n";
 
 fn pilot(fixture: &common::Fixture) -> PathBuf {
-    fixture.service.config.pilot.clone()
+    fixture
+        .service
+        .config
+        .pilot
+        .clone()
+        .expect("the fixture has an image source")
 }
 
 /// Build `<pilot>/images/fixture/line.conf`, the one valid association.
@@ -54,7 +59,7 @@ fn seed_fixture_line(pilot: &Path) {
 /// analogue of Python's `load_daemon(); fresh.PILOT = svc.PILOT`.
 fn service_with_pilot(fixture: &common::Fixture, pilot: PathBuf) -> Arc<Service> {
     let mut config = fixture.service.config.clone();
-    config.pilot = pilot;
+    config.pilot = Some(pilot);
     fixture.host.file_lines.store(true, Ordering::SeqCst);
     Arc::new(Service::with_host(
         config,
