@@ -213,12 +213,12 @@ fn ac54_consul_description_survives_real_daemon_rename() {
 #[test]
 fn ac53_remembered_lease_executes_across_advertisement_gap() {
     let old = "Mac-A-AC53";
-    let new = "Mac-B-AC53";
+    let final_name = "Mac-C-AC53";
     let instance = Instance::start(old, true);
     let health = instance.health();
     assert_eq!(health["instance"], old);
     let id = health["machine_id"].as_str().unwrap().to_string();
-    let advertisement = instance.advertise(old, &id);
+    let mut advertisement = Some(instance.advertise(old, &id));
     let acquired = instance
         .cli()
         .env("MACHINE_SERVICE_PORT", instance.fixture.port().to_string())
@@ -245,34 +245,47 @@ fn ac53_remembered_lease_executes_across_advertisement_gap() {
     )
     .unwrap();
     assert_eq!(saved["leases"][0]["machine_id"], id);
-    drop(advertisement);
-    instance.rename(new);
-    let port = instance.fixture.port();
-    let ready = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_secs(1));
-        discovery::dnssd::register(
-            new,
-            discovery::SERVICE_TYPE,
-            port,
-            &discovery::txt_entries(new, &id, &["durable"]),
-            discovery::dnssd::Scope::LocalOnly,
-            Duration::from_secs(5),
-        )
-        .unwrap()
-    });
-    let output = instance
-        .cli()
-        .args(["exec", old, "--", "/usr/bin/true"])
-        .output()
-        .unwrap();
-    let _advertisement = ready.join().unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let note = String::from_utf8_lossy(&output.stderr);
-    assert!(note.contains(old) && note.contains(new), "{note}");
+    // The specified one-second gap may fit inside the initial two-second
+    // browse. The longer gap forces that first browse to miss, proving the
+    // second look against the real daemon and DNS-SD too (AC-53, MI-5).
+    for (new, gap) in [("Mac-B-AC53", 1), (final_name, 3)] {
+        drop(advertisement.take());
+        instance.rename(new);
+        let port = instance.fixture.port();
+        let machine_id = id.clone();
+        let ready = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(gap));
+            discovery::dnssd::register(
+                new,
+                discovery::SERVICE_TYPE,
+                port,
+                &discovery::txt_entries(new, &machine_id, &["durable"]),
+                discovery::dnssd::Scope::LocalOnly,
+                Duration::from_secs(5),
+            )
+            .unwrap()
+        });
+        let started = Instant::now();
+        let output = instance
+            .cli()
+            .args(["exec", old, "--", "/usr/bin/true"])
+            .output()
+            .unwrap();
+        advertisement = Some(ready.join().unwrap());
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if gap == 3 {
+            assert!(
+                started.elapsed() >= Duration::from_secs(4),
+                "the second browse must follow its two-second delay"
+            );
+        }
+        let note = String::from_utf8_lossy(&output.stderr);
+        assert!(note.contains(old) && note.contains(new), "{note}");
+    }
     let released = instance.cli().args(["release", old]).output().unwrap();
     assert!(
         released.status.success(),
@@ -285,5 +298,5 @@ fn ac53_remembered_lease_executes_across_advertisement_gap() {
         Some(&json!({"lease_id": lease["lease_id"]})),
     );
     assert_eq!(after.status, 404);
-    assert!(after.body["error"].as_str().unwrap().contains(new));
+    assert!(after.body["error"].as_str().unwrap().contains(final_name));
 }
