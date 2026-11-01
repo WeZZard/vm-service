@@ -5,7 +5,7 @@
 - Two programs lease machines today: mcp-relay, which runs agents' commands and scripts in guests with recorded evidence, and the AnyDict evaluation runner, which runs its rows through mcp-relay and, for its Unity rows, in one persistent licensed VM over SSH.
 - Both assume a loopback vm-service and a Tart guest. This section states what each must change to consume durable machines and remote instances. The changes are built and tested in each consumer's own repository, as DC-4 set for mcp-relay.
 - Moving to the new names and the `/machines` API is a separate, earlier step: every caller makes it in the coordinated switch of [MG-3](rename.md#mg-3-one-coordinated-switch). Consuming durable machines builds on that switch.
-- Only 192.168.50.4 and 192.168.50.5 expose durable machines (DC-39). 192.168.50.3 offers only virtual machines.
+- Only 192.0.2.4 and 192.0.2.5 expose durable machines (DC-39). 192.0.2.3 offers only virtual machines.
 
 ## CN-1: mcp-relay
 
@@ -33,9 +33,9 @@
 
 ## CN-3: What a durable machine needs installed
 
-- pilot-images' `metal/bootstrap.zsh` provides the software baseline of a Mac mini with the same guest phases as the VM images. The minis at 192.168.50.4 and 192.168.50.5 were found with this state on 2026-10-20:
+- pilot-images' `metal/bootstrap.zsh` provides the software baseline of a Mac mini with the same guest phases as the VM images. The minis at 192.0.2.4 and 192.0.2.5 were found with this state on 2026-10-20:
 
-| Need | 192.168.50.4 and 192.168.50.5 today | What closes the gap |
+| Need | 192.0.2.4 and 192.0.2.5 today | What closes the gap |
 | --- | --- | --- |
 | A logged-in GUI session for `wezzard` | `wezzard` is the console user and the auto-login user; display sleep is off | nothing |
 | Node.js, which the relay's staging needs | installed by Homebrew at `/opt/homebrew/bin/node`, on the login shell's `PATH` only | the login environment capture of [DM-4](durable-machine.md#dm-4-exec) |

@@ -18,17 +18,17 @@
 ```text
 $ machctl list
 INSTANCE         MACHINE                         KIND     STATE      LEASE (PURPOSE, UNTIL)        CHIP / OS           GPU            FREE DISK  CI
-mac-mini-m4-pro  pilot-mac-x-session-7f3a        virtual  running    x-session, 18:40              macOS 26 (macos26)  mac2,common3   -          -
-mac-mini-m4-pro  macos26                         virtual  offer      acquirable 1 of 2             macOS 26            mac2,common3   -          -
-mac-mini-m4-pro  ubuntu2404                      virtual  offer      acquirable                    Ubuntu 24.04        -              -          -
-mac-mini-m4-1    mac-mini-m4-1                   durable  leased     unreal-post-process, 21:05    M4 / macOS 26.3     metal3         128 GiB    busy
-mac-mini-m4-2    mac-mini-m4-2                   durable  available  -                             M4 / macOS 26.3     metal3         124 GiB    idle
+mac-a-m4         pilot-mac-x-session-7f3a        virtual  running    x-session, 18:40              macOS 26 (macos26)  mac2,common3   -          -
+mac-a-m4         macos26                         virtual  offer      acquirable 1 of 2             macOS 26            mac2,common3   -          -
+mac-a-m4         ubuntu2404                      virtual  offer      acquirable                    Ubuntu 24.04        -              -          -
+mac-b            mac-b                           durable  leased     unreal-post-process, 21:05    M4 / macOS 26.3     metal3         128 GiB    busy
+mac-c            mac-c                           durable  available  -                             M4 / macOS 26.3     metal3         124 GiB    idle
 ```
 
 - When an instance does not answer, its machines are replaced by one row:
 
 ```text
-mac-mini-m4-2    -                               -        unreachable  connection refused (Consul: critical)
+mac-c            -                               -        unreachable  connection refused (Consul: critical)
 ```
 
 - The `GPU` column prints `metal3` when the machine supports Metal 3, and otherwise its families.
@@ -44,7 +44,7 @@ mac-mini-m4-2    -                               -        unreachable  connectio
 - The CLI lists the machines, keeps those that match, and prefers in order: an available durable machine whose CI runner is idle, then any available durable machine, then a virtual machine offer that is acquirable. It acquires from the instance that owns the first candidate and tries the next candidate when that acquisition is refused for capacity.
 - `--machine <name>` acquires a named durable machine, and `--image <image>` acquires a virtual machine, as `vmctl acquire` did. `--instance <ID>` chooses the instance for an image, and narrows the instances `--require` chooses among. Without any of the three forms the image is `macos26`.
 - The forms exclude one another. The flags that shape only a virtual machine (`--network`, `--profile`, `--cpu`, `--memory-mb`, `--disk-gb`, `--no-wait`, `--vnc`, `--source`, `--expected-source-fingerprint`) are refused with `--machine` and `--require`, because a durable machine refuses them (DC-69).
-- The CLI prints the machine it chose and why on standard error, before each attempt, so a person can see the choice and standard output stays the lease's JSON: `chose mac-mini-m4-2 (durable, metal3, CI idle)`. An offer adds `offer on <instance>`.
+- The CLI prints the machine it chose and why on standard error, before each attempt, so a person can see the choice and standard output stays the lease's JSON: `chose mac-c         (durable, metal3, CI idle)`. An offer adds `offer on <instance>`.
 - A capacity refusal is `durable machine leased`, `durable machine unavailable` ([MM-5](../../arch/machines.md#mm-5-states)) or `macOS VM limit reached`. Any other refusal ends the command with its error. When every candidate is refused for capacity, the command exits 1 naming each refusal (DC-69).
 
 ## CL-3: Naming a machine

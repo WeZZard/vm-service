@@ -19,7 +19,7 @@ flowchart LR
 ```
 
 1. MM: [Machine model](machines.md). Durable and virtual machines, their identity, and the capability report that consumers choose by.
-2. DM: [Durable machine leases](durable-machine.md). A lease is an exclusive session with a scratch workspace; commands run as `wezzard` in the GUI session, not over SSH.
+2. DM: [Durable machine leases](durable-machine.md). A lease is an exclusive session with a scratch workspace; commands run as the operator's account in the GUI session, not over SSH.
 3. AK: [Agent keys](agent-keys.md). Claude Code and Codex reach the LiteLLM gateway with a stable key per machine per agent, never printed.
 4. HY: [Hygiene and CI coexistence](hygiene.md). A workspace, a leftover-process sweep, and a recorded inventory before and after; the CI runner is never paused.
 5. FD: [Discovery and federation](federation.md). Bonjour advertisement by default or Consul registration by choice, the CLI's merged list, remote work, and the household trust model.

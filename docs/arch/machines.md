@@ -4,7 +4,7 @@
 
 - vm-service leases only Tart virtual machines on the Mac it runs on.
 - Some work needs what a Tart VM cannot give. An Unreal post-process evaluation needs Metal 3, and a Tart VM's paravirtual GPU supports only the `mac2` and `common3` Metal families, with argument buffers tier 1 (DC-27).
-- Two of the three Mac minis, 192.168.50.4 and 192.168.50.5, have no Tart and no images, so today they cannot serve any lease at all (DC-20).
+- Two of the three Mac minis, 192.0.2.4 and 192.0.2.5, have no Tart and no images, so today they cannot serve any lease at all (DC-20).
 - machine-service therefore leases two kinds of machine through one API: the Mac the instance runs on, and the virtual machines that instance can create (DC-22).
 
 ## MM-1: Two kinds of machine
@@ -14,20 +14,20 @@
 - An instance offers at most one durable machine: the Mac it runs on.
 - Exposure is local configuration of each instance and is off by default (DC-39). The operator turns it on with `MACHINE_SERVICE_EXPOSE_DURABLE=on` in the instance's LaunchAgent environment, which `machine-service-install --expose-durable on` writes and later installations preserve.
 - An instance with exposure off lists no durable machine, answers an acquisition that names its Mac with HTTP 404 and the error `durable machine not exposed on <instance>`, and reports no `durable` kind in `/health` or in Consul ([FD-1](federation.md#fd-1-registration)).
-- Today 192.168.50.3 keeps exposure off and offers only its Tart VMs. 192.168.50.4 and 192.168.50.5 turn exposure on.
-- An instance offers virtual machines only when it can create them. It can create them when Tart is installed, at least one image line is configured, and that line's base VM exists in the selected Tart store. Today only 192.168.50.3 qualifies.
+- Today 192.0.2.3 keeps exposure off and offers only its Tart VMs. 192.0.2.4 and 192.0.2.5 turn exposure on.
+- An instance offers virtual machines only when it can create them. It can create them when Tart is installed, at least one image line is configured, and that line's base VM exists in the selected Tart store. Today only 192.0.2.3 qualifies.
 - The kinds are named `durable` and `virtual` in every response. The words "bare metal" and "physical machine" are not used anywhere in the API, the CLI or the documents (DC-22).
 
 ```mermaid
 flowchart TB
-    subgraph M3["192.168.50.3 (mac-mini-m4-pro), durable exposure off"]
+    subgraph M3["192.0.2.3 (mac-a-m4), durable exposure off"]
         I3[machine-service instance] --> V3[virtual machines: Tart clones of macos26, macos26-games, ubuntu2404 ...]
     end
-    subgraph M4["192.168.50.4 (mac-mini-m4-1)"]
-        I4[machine-service instance, durable exposure on] --> D4[durable machine mac-mini-m4-1]
+    subgraph M4["192.0.2.4 (mac-b)"]
+        I4[machine-service instance, durable exposure on] --> D4[durable machine mac-b]
     end
-    subgraph M5["192.168.50.5 (mac-mini-m4-2)"]
-        I5[machine-service instance, durable exposure on] --> D5[durable machine mac-mini-m4-2]
+    subgraph M5["192.0.2.5 (mac-c)"]
+        I5[machine-service instance, durable exposure on] --> D5[durable machine mac-c]
     end
 ```
 
@@ -62,7 +62,7 @@ flowchart TB
 | `observed_at` | the time of each section's last observation | the instance's clock |
 
 - A virtual machine's capabilities come from its image, not from a probe of a running guest. The `gpu` section of a macOS virtual machine is the measured paravirtual device: families `mac2` and `common3`, `metal3` false, argument buffers tier 1. A Linux guest has no Metal device. Its `software` section comes from the image's validated application inventory (`GET /applications`); without one it is `null` with the reason. `os`, `hardware` and `disk` carry the line's kind and resource defaults, `network` is `nat`, `source` is `image`, and the facts only a running guest could answer (`display`, `permissions`, `agents`, `ci_runner`, `os.version`) are `null` with their reasons (DC-67).
-- `GET /machines` reports, per instance, the virtual machine **offers** as well as the existing ones, under `offers`: one entry per image of the current image catalog ([IC](image-catalog.md)), with `kind: "virtual"`, `state: "offer"`, `name` and `image` (the image), `image_kind`, `base_vm`, `base_available`, `defaults`, the image's capabilities and the `concurrency` figures of `GET /images` (`running`, `limit`, `acquirable`). A consumer can therefore compare "a fresh macOS 26 VM on mac-mini-m4-pro" with "the durable machine mac-mini-m4-1" in one list. An instance without Tart or without a catalog lists no offer and says why in `offers_unavailable` (DC-66).
+- `GET /machines` reports, per instance, the virtual machine **offers** as well as the existing ones, under `offers`: one entry per image of the current image catalog ([IC](image-catalog.md)), with `kind: "virtual"`, `state: "offer"`, `name` and `image` (the image), `image_kind`, `base_vm`, `base_available`, `defaults`, the image's capabilities and the `concurrency` figures of `GET /images` (`running`, `limit`, `acquirable`). A consumer can therefore compare "a fresh macOS 26 VM on mac-a-m4" with "the durable machine mac-b" in one list. An instance without Tart or without a catalog lists no offer and says why in `offers_unavailable` (DC-66).
 - A durable machine record carries `warnings`, a list of `{code, message}`. Below the free-disk level of `MACHINE_SERVICE_DISK_WARN_GB` (default 30 GiB) it holds `low-free-disk` ([HY-6](hygiene.md#hy-6-free-disk), DC-76).
 
 ## MM-4: When facts are observed

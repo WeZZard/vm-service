@@ -66,7 +66,7 @@ The orchestrator's defining duty: **teardown happens even when the work fails**.
 
 ## US29 — Leases coexist with the CI runner
 
-- As an orchestrator, I want leases on 192.168.50.4 and 192.168.50.5 to run beside the readycheck-dev CI runner without pausing it, and I want to know when a CI job ran during my lease, so that I can judge my results.
+- As an orchestrator, I want leases on 192.0.2.4 and 192.0.2.5 to run beside the readycheck-dev CI runner without pausing it, and I want to know when a CI job ran during my lease, so that I can judge my results.
 - See [HY-5](../arch/hygiene.md#hy-5-coexistence-with-the-ci-runner).
 
 **Tests:** AC-32 in [orchestrator.acceptance](../acceptance/orchestrator.acceptance).
