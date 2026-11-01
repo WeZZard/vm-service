@@ -123,3 +123,10 @@ The human operator (WeZZard) who installs the service, keeps it healthy, trouble
 - See [IN](../arch/installation.md).
 
 **Tests:** AC-46 in [operator.acceptance](../acceptance/operator.acceptance).
+
+## US35 — Rename a Mac without breaking anything
+
+- As the operator, I want to rename a Mac in System Settings at any time, so that its instance, its leases, `machctl` and every consumer keep working and simply show the new name (DC-86).
+- See [MI](../arch/identity.md).
+
+**Tests:** AC-50 to AC-54 in [operator.acceptance](../acceptance/operator.acceptance).

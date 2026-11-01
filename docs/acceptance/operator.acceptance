@@ -180,3 +180,46 @@ Feature: Federation, rename and installation
     Then the CLI asks the Consul agent and browses nothing
     And an advertised instance that Consul does not list is not listed
 
+Feature: Renaming a Mac
+
+  @AC-50 @TL-2
+  Scenario: An instance follows a rename without a restart
+    Given an instance on a Mac named "Mac-A", advertised on the network
+    When the Mac's local host name is changed to "Mac-B"
+    Then within 5 seconds a browser sees "Mac-A" removed and "Mac-B" added, with the same machine_id
+    And "/health" answers instance "Mac-B" with the same machine_id
+    And the daemon's process ID is unchanged
+
+  @AC-51 @TL-2
+  Scenario: A held durable lease keeps working through a rename and a restart
+    Given a durable lease of "Mac-A" held by a client
+    When the Mac is renamed "Mac-B"
+    Then exec, push, pull and heartbeat on "Mac-A" with the lease's lease_id succeed
+    When the daemon restarts
+    Then exec on "Mac-A" with the lease's lease_id still succeeds
+    And release of "Mac-A" with the lease's lease_id succeeds
+    And afterwards a request for "Mac-A" is refused with 404 naming "Mac-B"
+
+  @AC-52 @TL-2
+  Scenario: machctl treats a new name under the same machine_id as a rename
+    Given an instance advertised as "Mac-A" whose "/health" answers "Mac-B" with the advertised machine_id
+    When the operator runs "machctl list"
+    Then the instance is listed once, as "Mac-B"
+    Given an instance whose "/health" answers a different machine_id than it advertised
+    When the operator runs "machctl list"
+    Then it is listed as unreachable with the two machine IDs
+
+  @AC-53 @TL-2
+  Scenario: A command during the gap between the goodbye and the new advertisement still succeeds
+    Given a durable lease of "Mac-A" remembered by machctl
+    And the Mac is renamed "Mac-B" so that its new advertisement arrives 1 second after the goodbye
+    When the operator runs "machctl exec Mac-A -- true" in that second
+    Then the command succeeds on the second look
+
+  @AC-54 @TL-2
+  Scenario: The Consul description never goes stale
+    Given an instance installed with MACHINE_SERVICE_DISCOVERY set to "consul"
+    Then its service-catalog description states machine_id and no instance name
+    When the Mac is renamed
+    Then a client in consul mode confirms the instance by machine_id and lists it under its new name
+    And nothing was reinstalled

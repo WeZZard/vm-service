@@ -27,6 +27,7 @@ flowchart LR
 7. MG: [Rename and migration](rename.md). The names, the removal of `/vms`, and the one coordinated switch of the service and its callers.
 8. IC: [Image catalog hot reload](image-catalog.md). Image lines, bases and associations change the available virtual machines without a restart.
 9. IN: [Installation](installation.md). One layout lists every executable beside the daemon; the daemon resolves its helpers from it and the installer installs exactly it.
+10. MI: [Machine identity and renames](identity.md). A Mac's hardware UUID is its permanent ID; its name is a label that follows a rename live, and a held lease keeps the name it was granted under.
 
 ## Links
 

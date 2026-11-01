@@ -33,7 +33,7 @@ flowchart TB
 
 ## MM-2: Identity
 
-- An **instance ID** is the Mac's own name, its local host name. The instance reads it from `scutil --get LocalHostName` at startup and reports it as `instance` in `/health` (DC-80).
+- An **instance ID** is the Mac's own name, its local host name, and reported as `instance` in `/health` (DC-80). It is a label that follows the Mac live; the permanent identity is the machine ID, the Mac's hardware UUID, as [MI](identity.md) sets (DC-86 to DC-90).
 - The Consul node name is not the instance ID. It comes from the Consul agent's own configuration and need not equal the local host name: on 192.168.50.3 the node is `mac-mini-m4-pro` and the local host name is `Mac-mini`. An instance therefore states its ID in its Consul registration, and a client recognizes it by that ([FD-1](federation.md#fd-1-registration), [FD-2](federation.md#fd-2-discovery)).
 - A durable machine's name is its instance ID. A Mac has one durable machine, so the name is unique on the intranet.
 - A virtual machine keeps today's name, `pilot-mac-<purpose>-<random>` or `pilot-<purpose>-<random>`. Two instances could create the same name, so the CLI qualifies a virtual machine as `<vm>@<instance>` whenever it lists more than one instance.
