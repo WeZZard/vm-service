@@ -888,6 +888,21 @@ fn test_missing_env_extra_still_ok_when_pack_has_other_files() {
     assert!(ok);
 }
 
+/// US3: every zsh, interactive or not, loads the pack's keys, so a command
+/// run over `exec` sees them too (DC-96).
+#[test]
+fn test_inject_loads_secrets_from_zshenv() {
+    let (fixture, pack, key_dir) = inject_environment(true, false);
+    let ok = fixture
+        .service
+        .inject_pack("1.2.3.4", &inject_cfg("macos"), &pack, &key_dir)
+        .expect("inject");
+    assert!(ok);
+    let script = script_stdin(&fixture, "secrets.zsh");
+    assert!(script.contains(">> ~/.zshenv"), "{script}");
+    assert!(script.contains("grep -qxF"), "{script}");
+}
+
 /// US3: a pack's home.tgz carries sign-in and settings files into the
 /// guest's home folder.
 #[test]
