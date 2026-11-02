@@ -207,5 +207,6 @@ if [[ -f git-identity ]]; then
   name=$(sed 's/ <.*//' git-identity); email=$(sed 's/.*<\(.*\)>.*/\1/' git-identity)
   git config --global user.name "$name"; git config --global user.email "$email"
 fi
+if [[ -f home.tgz ]]; then tar -xzf home.tgz -C "$HOME"; fi
 cd /; rm -rf /tmp/pack
 "#;

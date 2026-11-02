@@ -888,6 +888,24 @@ fn test_missing_env_extra_still_ok_when_pack_has_other_files() {
     assert!(ok);
 }
 
+/// US3: a pack's home.tgz carries sign-in and settings files into the
+/// guest's home folder.
+#[test]
+fn test_inject_unpacks_home_files() {
+    let (fixture, pack, key_dir) = inject_environment(true, false);
+    std::fs::write(pack.join("home.tgz"), b"fixture").expect("home.tgz");
+    let ok = fixture
+        .service
+        .inject_pack("1.2.3.4", &inject_cfg("macos"), &pack, &key_dir)
+        .expect("inject");
+    assert!(ok);
+    let script = script_stdin(&fixture, "secrets.zsh");
+    assert!(
+        script.contains(r#"tar -xzf home.tgz -C "$HOME""#),
+        "{script}"
+    );
+}
+
 #[test]
 fn test_scp_failure_detected() {
     // scp returns nonzero -> inject_pack must catch it (the silent-failure bug).

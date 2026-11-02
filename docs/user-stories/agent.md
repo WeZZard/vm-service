@@ -32,6 +32,7 @@ The agent's contract with the service is **lease-based**: it asks for a VM, work
 **As an** agent, **I want** gateway credentials present as environment variables when my session starts, **so that** `pi` and Claude Code work without any interactive auth inside the guest.
 
 - Default `env: "default"` injects `~/.config/vm-credentials/default/`: `env.extra` (LiteLLM/Anthropic gateway envs, `GH_TOKEN`) plus optional `git-identity`.
+- A pack may also hold `home.tgz`, unpacked into the guest's home folder. It carries what an agent keeps in files rather than in environment variables: a sign-in token, or settings that name the gateway (DC-95).
 - Delivery is verified: scp return codes are checked and the guest `secrets.zsh` must be non-empty, or the injection reports failure.
 - The gateway architecture is transparent to the agent — it just sees working API endpoints.
 
