@@ -203,6 +203,10 @@ mkdir -p ~/.config/zsh
 if [[ -f env.extra ]]; then cat env.extra >> /tmp/secrets.zsh; fi
 if [[ -s /tmp/secrets.zsh ]]; then install -m 600 /tmp/secrets.zsh ~/.config/zsh/secrets.zsh; fi
 rm -f /tmp/secrets.zsh
+if [[ -s ~/.config/zsh/secrets.zsh ]] && command -v zsh >/dev/null; then
+  line='[ -f "$HOME/.config/zsh/secrets.zsh" ] && source "$HOME/.config/zsh/secrets.zsh"'
+  grep -qxF "$line" ~/.zshenv 2>/dev/null || printf '%s\n' "$line" >> ~/.zshenv
+fi
 if [[ -f git-identity ]]; then
   name=$(sed 's/ <.*//' git-identity); email=$(sed 's/.*<\(.*\)>.*/\1/' git-identity)
   git config --global user.name "$name"; git config --global user.email "$email"
