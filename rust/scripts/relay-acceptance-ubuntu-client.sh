@@ -13,6 +13,10 @@
 # multicast DNS beyond its host, so the names the run uses (the target
 # instance's and its relay_url's) are looked up here, at run time, and written
 # into the VM's /etc/hosts; nothing is written down by hand.
+#
+# The client VM is ordinary use of the instance that leases it and needs no
+# credentials, so it asks for the environment `none` (DC-283). The rig's tool
+# cache is named inside the VM, under the client VM's own home (DC-257).
 set -eu
 
 client_instance="${1:?usage: relay-acceptance-ubuntu-client.sh <client instance> <binary> <evidence dir> <run args...>}"
@@ -43,7 +47,7 @@ done
 purpose=$(printf 'acc-client-%s-%s' "$cell" "$profile" | tr 'A-Z.' 'a-z-' | cut -c1-64)
 echo "leasing the Ubuntu client VM from $client_instance"
 answer=$(curl -fsS -m 1800 -X POST "$client_instance/acquire" -H 'content-type: application/json' \
-    -d "{\"purpose\":\"$purpose\",\"image\":\"ubuntu2404\",\"ttl_hours\":8}")
+    -d "{\"purpose\":\"$purpose\",\"image\":\"ubuntu2404\",\"ttl_hours\":8,\"env\":\"none\"}")
 vm=$(printf %s "$answer" | json 'd["vm"]')
 lease=$(printf %s "$answer" | json 'd.get("lease_id","")')
 echo "client VM: $vm"
@@ -83,6 +87,7 @@ done
 exec_script "$vm" "chmod +x ~/relay-acceptance; printf '$hosts' | sudo -n tee -a /etc/hosts >/dev/null; \
 mkdir -p ~/evidence; systemd-run --user --unit relay-acceptance-run --collect \
 --setenv=RELAY_ACCEPTANCE_LONG_MINUTES=\${RELAY_ACCEPTANCE_LONG_MINUTES:-30} \
+--setenv=NETWORK_RIG_CACHE=\$HOME/network-rig-cache \
 sh -c 'exec ~/relay-acceptance run$quoted --evidence ~/evidence > ~/evidence/run.log 2>&1'; echo started" >/dev/null
 echo "running $cell under $profile in $vm"
 
