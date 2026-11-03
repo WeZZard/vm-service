@@ -54,6 +54,7 @@ pub fn install_relay(relay: &Arc<Relay>, state_dir: &std::path::Path) {
             &format!("WARN: relay: no durable agent credential: {error}"),
         ),
     }
+    admit_current_client(machine, relay);
     // DC-236: only a release that the instance trusts names the
     // build its agent must run for the lease's calls to take it.
     let expected_build = relay
@@ -165,11 +166,36 @@ fn with_relay_credential(machine: &Arc<DurableMachine>, mut body: Value) -> Valu
     ) else {
         return body;
     };
-    // The credential is good while its lease is the machine's current one,
-    // up to the end of its TTL plus its grace bounded by its TTL, read from
-    // the record at every hello, so a renewal moves it (RP-3).
+    let credential = relay.broker.issue(
+        &durable_target(machine),
+        Role::Client,
+        Some(client_validity(machine, &lease_id)),
+    );
+    // The record keeps its hash, so a restart accepts it again (DM-8).
+    if let Err(error) = machine.record_relay_client(
+        &lease_id,
+        &machine_service_core::relay_broker::credential_sha256(&credential),
+    ) {
+        machine_service_core::config::log_to_file(
+            &machine.config.log_file,
+            &format!("WARN: relay: the client credential of {lease_id} is not kept: {error}"),
+        );
+    }
+    body["relay"] = relay.answer(&credential);
+    body
+}
+
+/// A durable lease's client credential is good while its lease is the
+/// machine's current one, up to the end of its TTL plus its grace bounded
+/// by its TTL, read from the record at every hello, so a renewal moves it
+/// (RP-3).
+fn client_validity(
+    machine: &Arc<DurableMachine>,
+    lease_id: &str,
+) -> machine_service_core::relay_broker::Validity {
     let current = Arc::clone(machine);
-    let valid: machine_service_core::relay_broker::Validity = Arc::new(move || {
+    let lease_id = lease_id.to_string();
+    Arc::new(move || {
         current.current_record().is_some_and(|record| {
             let until = machine_service_core::ops::relay_credential_until(
                 record["ttl_expires_at"].as_f64().unwrap_or_default(),
@@ -180,12 +206,35 @@ fn with_relay_credential(machine: &Arc<DurableMachine>, mut body: Value) -> Valu
                 && record["state"] != "released"
                 && machine_service_core::config::unix_now() < until
         })
-    });
-    let credential = relay
-        .broker
-        .issue(&durable_target(machine), Role::Client, Some(valid));
-    body["relay"] = relay.answer(&credential);
-    body
+    })
+}
+
+/// Accept again the client credential of the durable lease that survived a
+/// restart, by the hash its record keeps, with the same validity, as the
+/// credentials of a virtual machine's `relay` lease are (DM-8).
+fn admit_current_client(machine: &Arc<DurableMachine>, relay: &Arc<Relay>) {
+    let Some(record) = machine.current_record() else {
+        return;
+    };
+    let (Some(lease_id), Some(hash)) = (
+        record["lease_id"].as_str(),
+        record["relay_client_sha256"].as_str(),
+    ) else {
+        return;
+    };
+    if record["state"] == "released" {
+        return;
+    }
+    relay.broker.admit(
+        &durable_target(machine),
+        Role::Client,
+        hash,
+        Some(client_validity(machine, lease_id)),
+    );
+    machine_service_core::config::log_to_file(
+        &machine.config.log_file,
+        &format!("relay: durable lease {lease_id}: client credential admitted again after restart"),
+    );
 }
 
 /// Build the durable machine. Call once at startup, before the relay link

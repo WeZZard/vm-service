@@ -245,6 +245,23 @@ impl DurableMachine {
         self.current_id().and_then(|id| self.read_record(&id))
     }
 
+    /// Keep the SHA-256 of the relay client credential issued for the
+    /// current lease `lease_id` in its record, as a virtual machine's record
+    /// keeps `relay_client_sha256`, so that the broker accepts it again
+    /// after a restart of the instance (DM-8, RP-3).
+    pub fn record_relay_client(&self, lease_id: &str, sha256: &str) -> Result<(), String> {
+        let _gate = self.gate.read().map_err(|_| "durable gate poisoned")?;
+        let _store = self.store.lock().map_err(|_| "durable state poisoned")?;
+        let mut record = self
+            .current_id()
+            .filter(|id| id == lease_id)
+            .and_then(|id| self.read_record(&id))
+            .filter(|record| record["state"] != "released")
+            .ok_or_else(|| format!("{lease_id} is not the current lease"))?;
+        record["relay_client_sha256"] = json!(sha256);
+        self.write_record(&record)
+    }
+
     fn write_json(path: &Path, value: &Value) -> Result<(), String> {
         let parent = path.parent().unwrap_or(Path::new("/"));
         std::fs::DirBuilder::new()
